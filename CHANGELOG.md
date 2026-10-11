@@ -1,5 +1,10 @@
 # Release notes
 
+## 0.5.4
+
+- Release through the GitHub npm trusted-publishing workflow after the initial registry bootstrap.
+- Bound CI and publishing jobs so stalled installations cannot run indefinitely.
+
 ## 0.5.3
 
 - Move the MCP Swarm extension to public `zotoio/botz-mcp-swarm-cli`, with an independent engine, build, tests, and release workflow.

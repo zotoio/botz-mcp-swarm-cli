@@ -29,6 +29,9 @@ tag, never a branch. Published versions are immutable: use a new version for fix
 
 ## Initial npm setup
 
+The initial package version 0.5.3 was bootstrapped from the CI-tested tarball.
+The following releases use the repository-specific trusted publisher.
+
 The npm package must exist before a trusted publisher can be configured. Publish
 the first tested tarball while signed in with scope-owner access (outside CI,
 use `npm publish <tarball> --access public --provenance=false`). Then configure:
