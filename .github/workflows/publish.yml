@@ -1,0 +1,43 @@
+name: Publish CLI
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: publish-cli
+  cancel-in-progress: false
+jobs:
+  release-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: release
+        run: node scripts/check-release.mjs
+  validate:
+    needs: release-ref
+    uses: ./.github/workflows/ci.yml
+  publish:
+    needs: [release-ref, validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@11
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cli-package
+          path: .artifacts
+      # Publish the exact artifact that passed validation, without rebuilding it.
+      - name: Publish validated CLI
+        env:
+          DIST_TAG: ${{ needs.release-ref.outputs.tag }}
+        run: npm publish .artifacts/*.tgz --provenance --access public --tag "$DIST_TAG"
