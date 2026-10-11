@@ -3,11 +3,12 @@
 Standards-based MCP load testing for CI and local development. Measures **MCP operations** (not raw HTTP RPS) across stdio, SSE, and streamable HTTP transports. **Silent green = Fail.**
 
 ```bash
+pipx install git+https://github.com/zotoio/botz-cli.git
 pnpm add -g @zotoio/botz-mcp-swarm-cli
 botz mcp-swarm --help
 ```
 
-The user-facing command is `botz mcp-swarm [args]`. Install the `botz` host from [botz-mcp](https://github.com/zotoio/botz-mcp) separately; its future standalone home is `botz-cli`. This extension installs `botz-mcp-swarm` on PATH so the host can discover it. It does not install or own the `botz` executable. Direct execution as `botz-mcp-swarm` (or the compatibility alias `swarm`) also works. Requires Node 22.13 or later.
+The user-facing command is `botz mcp-swarm [args]`. Install the `botz` host from the public [botz-cli](https://github.com/zotoio/botz-cli) repo separately (Python 3.11+). Until a registry release is available, use the Git installation above. This extension installs `botz-mcp-swarm` on PATH so the host can discover it. It does not install or own the `botz` executable. Direct execution as `botz-mcp-swarm` (or the compatibility alias `swarm`) also works. Requires Node 22.13 or later.
 
 Source and releases live in [botz-mcp-swarm-cli](https://github.com/zotoio/botz-mcp-swarm-cli). The private swarm service remains in `botz-mcp-swarm`. The engine code needed for local execution is included in `src/engine`; this repository builds without access to the private service repository.
 
@@ -148,4 +149,4 @@ Releases publish that validated artifact using npm trusted publishing. Configure
 npm trusted publisher for organization `zotoio`, repository `botz-mcp-swarm-cli`,
 and workflow `publish.yml`. Bump `package.json` and `CHANGELOG.md`, then publish a
 GitHub release tagged `v<version>`. Prereleases use npm's `next` tag.
-The `botz` host remains separately versioned and published by its own repository.
+The `botz` host is separately versioned and published by [botz-cli](https://github.com/zotoio/botz-cli).

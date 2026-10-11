@@ -1,6 +1,6 @@
 # botz MCP Swarm extension contract
 
-- Host command: `botz`; currently provided by `botz-mcp`, planned for the separate `botz-cli` repo.
+- Host command: `botz`; provided by the separate public [botz-cli](https://github.com/zotoio/botz-cli) repo.
 - Extension source: public `zotoio/botz-mcp-swarm-cli`.
 - Extension npm package: `@zotoio/botz-mcp-swarm-cli`.
 - Invocation: `botz mcp-swarm [args]`.
@@ -14,4 +14,4 @@ not parse a second `mcp-swarm` argument or install a replacement `botz` executab
 
 Direct execution via `botz-mcp-swarm [args]` remains useful for troubleshooting.
 `swarm` is a compatibility alias. No service is started by either entry point.
-The future host repo can keep this executable protocol without changing the extension.
+The shared host implements this executable protocol without requiring a package dependency on the extension.
