@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc --noEmit && tsdown --config-loader native",
     "lint": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/release-policy-check.mjs",
     "check:leakage": "node scripts/check-leakage.mjs",
     "check:cli-pack": "node scripts/check-cli-pack.mjs",
     "prepublishOnly": "pnpm run build"

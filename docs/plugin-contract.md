@@ -4,9 +4,11 @@
 - Extension source: public `zotoio/botz-mcp-swarm-cli`.
 - Extension npm package: `@zotoio/botz-mcp-swarm-cli`.
 - Invocation: `botz mcp-swarm [args]`.
-- Executable discovered on PATH: `botz-mcp-swarm` (not `botz-mcp-swarm-cli`).
+- Core npm package: `@zotoio/botz-cli` (TypeScript/Node, no Python runtime).
+- Preferred installation: `botz plugins install mcp-swarm`; inspect with `botz plugins list`.
+- Executable also discovered on PATH: `botz-mcp-swarm` (not `botz-mcp-swarm-cli`).
 
-The host resolves the executable, sets `BOTZ_PLUGIN=mcp-swarm`, and forwards only
+The host resolves a managed installation first, then a PATH executable, sets `BOTZ_PLUGIN=mcp-swarm`, and forwards only
 `[args]`, preserving argument boundaries, working directory, environment, signals,
 and exit status. The extension displays `botz mcp-swarm` in its help when launched
 with that environment marker. The host owns plugin discovery; the extension does

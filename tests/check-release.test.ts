@@ -9,6 +9,7 @@ function check(version: string, ref: string, prerelease?: boolean) {
   try {
     mkdirSync(join(dir, "scripts")); mkdirSync(join(dir, "packages/cli"), { recursive: true });
     writeFileSync(join(dir, "scripts/check-release.mjs"), readFileSync(resolve("scripts/check-release.mjs")));
+    writeFileSync(join(dir, "scripts/release-policy.mjs"), readFileSync(resolve("scripts/release-policy.mjs")));
     writeFileSync(join(dir, "package.json"), JSON.stringify({ version }));
     writeFileSync(join(dir, "event.json"), JSON.stringify({ release: { prerelease } }));
     const output = join(dir, "output");

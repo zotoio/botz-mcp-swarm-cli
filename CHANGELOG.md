@@ -1,12 +1,11 @@
 # Release notes
 
-## Unreleased
+## 0.5.3
 
 - Move the MCP Swarm extension to public `zotoio/botz-mcp-swarm-cli`, with an independent engine, build, tests, and release workflow.
-- Document `botz mcp-swarm [args]` as the primary invocation; `botz-mcp-swarm` remains the host-discovered executable. The shared `botz` host will move separately to `botz-cli`.
+- Document `botz mcp-swarm [args]` as the primary invocation; `botz-mcp-swarm` remains the host-discovered executable. The TypeScript `botz` host is published separately as `@zotoio/botz-cli`.
 
-
-## Unreleased
+- Add strict SemVer tag validation and npm trusted publishing of the tested artifact.
 
 - Behavior change: capture and standalone saved-suite runs now default to MCP-only testing. Add `--inference` to preserve previous model-generation/evaluation behavior; `--no-inference` still works.
 - Added unified `suite capture|show|list|validate|refresh|run` commands, retaining existing top-level aliases.

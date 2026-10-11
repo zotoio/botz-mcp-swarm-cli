@@ -3,12 +3,13 @@
 Standards-based MCP load testing for CI and local development. Measures **MCP operations** (not raw HTTP RPS) across stdio, SSE, and streamable HTTP transports. **Silent green = Fail.**
 
 ```bash
-pipx install git+https://github.com/zotoio/botz-cli.git
-pnpm add -g @zotoio/botz-mcp-swarm-cli
+npm install -g @zotoio/botz-cli
+botz plugins install mcp-swarm
+botz plugins list
 botz mcp-swarm --help
 ```
 
-The user-facing command is `botz mcp-swarm [args]`. Install the `botz` host from the public [botz-cli](https://github.com/zotoio/botz-cli) repo separately (Python 3.11+). Until a registry release is available, use the Git installation above. This extension installs `botz-mcp-swarm` on PATH so the host can discover it. It does not install or own the `botz` executable. Direct execution as `botz-mcp-swarm` (or the compatibility alias `swarm`) also works. Requires Node 22.13 or later.
+The user-facing command is `botz mcp-swarm [args]`. Both the [botz-cli](https://github.com/zotoio/botz-cli) host and this extension are TypeScript/Node packages requiring Node 22.13+. The host installs extensions into its managed directory, avoiding global npm/pnpm bin PATH problems. Use `botz plugins search`, `botz plugins info mcp-swarm`, and `botz plugins list --json` for discovery and installed versions. This extension does not own the `botz` executable. For standalone use, `npm install -g @zotoio/botz-mcp-swarm-cli` provides `botz-mcp-swarm` and the compatibility alias `swarm`. For an unpublished source revision, run `botz plugins install mcp-swarm --source --ref main`.
 
 Source and releases live in [botz-mcp-swarm-cli](https://github.com/zotoio/botz-mcp-swarm-cli). The private swarm service remains in `botz-mcp-swarm`. The engine code needed for local execution is included in `src/engine`; this repository builds without access to the private service repository.
 
@@ -147,6 +148,7 @@ The extension protocol is described in [docs/plugin-contract.md](docs/plugin-con
 CI validates the package and installs the exact tarball on Linux, macOS, and Windows.
 Releases publish that validated artifact using npm trusted publishing. Configure the
 npm trusted publisher for organization `zotoio`, repository `botz-mcp-swarm-cli`,
-and workflow `publish.yml`. Bump `package.json` and `CHANGELOG.md`, then publish a
-GitHub release tagged `v<version>`. Prereleases use npm's `next` tag.
+and workflow `publish.yml` with direct publishing allowed. A pushed `v<version>` tag
+matching `package.json` triggers validation and publishing. Stable versions use
+`latest`; prereleases use `next`. See [RELEASING.md](RELEASING.md).
 The `botz` host is separately versioned and published by [botz-cli](https://github.com/zotoio/botz-cli).
