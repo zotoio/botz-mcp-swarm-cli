@@ -3,6 +3,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      diagnose:
+        description: Check npm trusted publishing without publishing a package
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -10,6 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release-ref:
+    if: ${{ !inputs.diagnose }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -43,3 +49,18 @@ jobs:
         env:
           DIST_TAG: ${{ needs.release-ref.outputs.tag }}
         run: npm publish .artifacts/*.tgz --provenance --access public --tag "$DIST_TAG"
+  diagnose:
+    if: ${{ inputs.diagnose }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - run: node scripts/diagnose-publisher.mjs
+        env:
+          NPM_PACKAGE: "@zotoio/botz-mcp-swarm-cli"

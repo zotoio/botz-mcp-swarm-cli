@@ -45,3 +45,10 @@ account must have 2FA enabled; npm may request browser verification. Verify with
 `npm trust list <package>`. The relationship explicitly permits direct publishing
 and is restricted to this repository's `publish.yml`. Bootstrap releases lack
 GitHub provenance; subsequent workflow releases have it.
+
+## Diagnose publisher registration
+
+Run `publish.yml` manually on main with **diagnose** enabled to verify the GitHub
+identity and npm token exchange without publishing a package. This prints only
+non-secret identity claims and npm error details, never tokens. Normal manual
+releases still require an exact version tag.
