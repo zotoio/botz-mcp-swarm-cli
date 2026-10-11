@@ -24,6 +24,7 @@ jobs:
           name: cli-package
           path: .artifacts/*.tgz
           if-no-files-found: error
+          include-hidden-files: true
   consumer:
     needs: test
     strategy:
