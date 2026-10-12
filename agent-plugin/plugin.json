@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "botz-mcp-swarm",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "description": "Capture, run, and diagnose MCP test suites with the botz MCP Swarm CLI.",
   "author": {
     "name": "zotoio"

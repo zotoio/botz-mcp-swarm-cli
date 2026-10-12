@@ -1,11 +1,10 @@
 # Release notes
 
-## Unreleased
+## 0.6.0
 
 - Move CLI files under `.botz/mcp-swarm/`: suites in `suites/`, run reports in `runs/` (previously the cwd or `.runs/`), credentials in `config.json`, and skill records in `skill-installations.json`. Suites and credentials in the earlier `.botz/` locations are still read.
 - Add `.botz/mcp-swarm/settings.json` with `suitesDir` and `runsDir`. Inside a repository, the repository settings, suites, and credentials take precedence over `~/.botz/mcp-swarm`, which is a read-only fallback.
 - Use conservative load defaults and a 60-second drain allowance for new captured suites; preserve explicit stored values and overrides.
-
 - Add portable Agent Skills and explicit install/update/status/uninstall commands for Cursor, Claude Code, and Codex.
 - Bundle marketplace plugin manifests and preserve locally edited skill files.
 
