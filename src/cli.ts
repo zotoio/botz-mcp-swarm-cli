@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { registerSkillsCommands } from "./cli/skills.js";
 import { registerRefreshCommand } from "./cli/suite-refresh.js";
 import { registerRunCommand } from "./cli/run-commands.js";
 import { registerDiagnostics } from "./cli/diagnostics.js";
@@ -54,6 +55,7 @@ program
   .description("Standards-based MCP load testing — honest Pass/Fail, no silent green")
   .version(cliPackageVersion());
 
+registerSkillsCommands(program, join(dirname(fileURLToPath(import.meta.url)), ".."));
 registerRunCommand(program);
 registerRunCommand(program, "soak");
 

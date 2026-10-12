@@ -1,0 +1,5 @@
+{
+  "name": "botz-mcp-swarm",
+  "source": "./plugins/botz-mcp-swarm",
+  "description": "Capture, run, and diagnose MCP test suites with the botz MCP Swarm CLI."
+}

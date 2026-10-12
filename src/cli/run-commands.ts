@@ -7,8 +7,8 @@ import { writeReports } from "../engine/core/report.js";
 import type { LoadProfile } from "../engine/core/suite-model.js";
 import { addAuthOptions, authFlags, collect } from "./suite-commands.js";
 import type { AuthFlags } from "./suite-auth.js";
-import { cwdReportBaseName, mergeParamValues, readParamFile, runSavedSuite } from "./suite-file.js";
-import { displayPath, resolveBotzHome, resolveSuiteArg } from "./botz-home.js";
+import { runReportBaseName, mergeParamValues, readParamFile, runSavedSuite } from "./suite-file.js";
+import { displayPath, ensureBotzHome, resolveBotzHome, resolveSuiteArg, type BotzHome } from "./botz-home.js";
 import { withRunSignal } from "./run-signal.js";
 import { selectRunMode } from "./run-mode.js";
 import { addTargetOptions, targetOptions, type TargetOptions } from "./target-options.js";
@@ -38,6 +38,18 @@ function suiteLoad(opts: RunOptions, soak: boolean): Partial<LoadProfile> {
   };
   return Object.fromEntries(Object.entries(pairs).filter(([, value]) => value !== undefined));
 }
+/** `--output`, else the configured runs directory; the default location gets its `.gitignore` first. */
+async function reportDir(output: string | undefined, botz: BotzHome): Promise<string> {
+  if (output) return resolve(output);
+  await ensureBotzHome(botz);
+  return botz.runsDir;
+}
+
+function shownReports(paths: { jsonPath: string; markdownPath: string }, botz: BotzHome, output: string | undefined) {
+  const shown = (path: string) => displayPath(path, botz, output ? join(output, basename(path)) : basename(path));
+  return { jsonPath: shown(paths.jsonPath), markdownPath: shown(paths.markdownPath) };
+}
+
 export function registerRunCommand(parent: Command, name = "run", suiteOnly = false): void {
   const command = parent.command(name).description(name === "soak" ? "Run a sustained suite or manifest test" : "Execute a saved suite or test manifest")
     .option("--suite <dir|name>", "Saved suite directory or name")
@@ -54,7 +66,7 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
     .option("--jitter-ms <ms>", "Maximum random delay between suite passes")
     .option("--soak", "Sustained run; suites use the load engine (default 5000ms)")
     .option("--soak-duration-ms <ms>", "Alias for --duration-ms with soak mode")
-    .option("--output <dir>", "Report directory; defaults to cwd for suites or .runs for manifests")
+    .option("--output <dir>", "Report directory; defaults to runsDir in .botz/mcp-swarm/settings.json, else .botz/mcp-swarm/runs")
     .addOption(new Option("--format <format>", "stdout format; JSON and Markdown files are always written").choices(["text", "json", "junit"]).default("text"));
   if (!suiteOnly) command.option("--manifest <path>", "Test manifest JSON");
   if (name === "soak") command.option("--max-iterations <n>", "Maximum manifest soak passes (use --iterations for suites)");
@@ -69,13 +81,12 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         const params = mergeParamValues(opts.params ? await readParamFile(resolve(opts.params)) : undefined, opts.set ?? []);
         const botz = resolveBotzHome();
         const target = await targetOptions(opts);
+        const outputDir = await reportDir(opts.output, botz);
         const result = await withRunSignal((signal) => runSavedSuite(resolveSuiteArg(opts.suite!, botz), {
           signal, params, ...target, load: suiteLoad(opts, soak), inference: opts.inference === true,
-          outputDir: opts.output ? resolve(opts.output) : process.cwd(),
-          reportBaseName: opts.output ? undefined : cwdReportBaseName(), baseDir: process.cwd(), auth: authFlags(opts), botz,
+          outputDir, reportBaseName: opts.output ? undefined : runReportBaseName(), baseDir: process.cwd(), auth: authFlags(opts), botz,
         }));
-        const shown = (path: string) => opts.output ? displayPath(path, botz, join(opts.output, basename(path))) : basename(path);
-        printRunResult(result.report, { jsonPath: shown(result.jsonPath), markdownPath: shown(result.markdownPath) }, opts.format);
+        printRunResult(result.report, shownReports(result, botz, opts.output), opts.format);
         return;
       }
       if (opts.url || opts.targetFile || opts.params || opts.set?.length || opts.iterations || opts.concurrency || opts.rampUpMs || opts.rampDownMs || opts.dwellMs || opts.jitterMs
@@ -95,8 +106,9 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
       }
       const manifest = parseManifest(raw);
       const report = await withRunSignal((signal) => runManifest({ signal, manifest, manifestDir: dirname(path), mode: selectRunMode(manifest, explicitSoak) }));
-      const paths = await writeReports(report, opts.output ?? ".runs");
-      printRunResult(report, paths, opts.format);
+      const botz = resolveBotzHome();
+      const paths = await writeReports(report, await reportDir(opts.output, botz));
+      printRunResult(report, shownReports(paths, botz, opts.output), opts.format);
     } catch (error) {
       if (opts.format === "json") console.log(JSON.stringify({ error: diagnosticError(error) }));
       else console.error(`Error: ${error instanceof Error ? error.message : "run failed"}`);

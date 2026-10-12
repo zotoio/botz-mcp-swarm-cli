@@ -52,8 +52,8 @@ The CLI does not install or start a model server. With a loopback model endpoint
 - `SWARM_LLM_MODEL` defaults to `gpt-5.4-nano` for OpenAI/custom and `auto` for Cursor. Other providers require an explicit available model (an installed model for Ollama). GPT-5 names use `max_completion_tokens` and `reasoning_effort: none`; other names use `max_tokens`.
 - `TYPESAFE_API_KEY`, when set, sends assertion judging to hosted Jev. Generation and tool-selection probes still require the LLM key.
 - `.env.local` and `.env` load from the current directory; existing shell values win. Start a new CLI invocation after changes. Parent-directory env files are not loaded automatically.
-- Suites default to `.botz/suites/<name>/` at the git root, or `~/.botz/suites/<name>/` outside a repo. Adjust the parameter path accordingly. Literal MCP target credentials are separate from model keys and go in gitignored `.botz/config.json`.
-- Reports default to `botz-run-<timestamp>.json` and `.md` in the cwd. JSON includes `toolEvals`, observed model calls, assertion judgments, and the overall verdict. Explicit `--output <dir>` uses the run ID as the report filename.
+- Suites default to `.botz/mcp-swarm/suites/<name>/` at the git root, or `~/.botz/mcp-swarm/suites/<name>/` outside a repo; `suitesDir` in `.botz/mcp-swarm/settings.json` moves them. Adjust the parameter path accordingly. Literal MCP target credentials are separate from model keys and go in gitignored `.botz/mcp-swarm/config.json`.
+- Reports default to `botz-run-<timestamp>.json` and `.md` in `.botz/mcp-swarm/runs/` (or `runsDir` from `settings.json`). JSON includes `toolEvals`, observed model calls, assertion judgments, and the overall verdict. Explicit `--output <dir>` uses the run ID as the report filename.
 
 See [Standalone suite CLI](standalone-suite-cli.md) for storage, parameters, target credentials, and redaction.
 

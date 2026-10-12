@@ -36,6 +36,7 @@ import { introspectServer } from "../engine/core/suite-introspect.js";
 import {
   buildDefaultSuiteNodes,
   compileSuite,
+  defaultLoadProfile,
   normalizeLoadProfile,
   toolIsCalledByDefault,
   type LoadProfile,
@@ -87,16 +88,14 @@ interface Slot {
   owner: string;
 }
 
+/** Single-pass smoke capture, with the shared grace period for later timed runs. */
 export function captureLoadProfile(): LoadProfile {
   return {
+    ...defaultLoadProfile(),
     durationMs: 0,
     rampUpMs: 0,
-    maxConcurrency: 1,
     jitterMs: 0,
-    rampDownMs: 0,
     dwellMs: 0,
-    iterations: 1,
-    lanes: 1,
   };
 }
 
@@ -261,7 +260,7 @@ export async function readParamFile(path: string): Promise<Record<string, unknow
 
 /**
  * Introspects the target and writes `suite.json`. Literal header and env values never reach the suite file:
- * they become `${env:NAME}` references and the literals go to `.botz/config.json` under the suite name.
+ * they become `${env:NAME}` references and the literals go to `.botz/mcp-swarm/config.json` under the suite name.
  */
 export async function captureSuite(input: {
   force?: boolean;
@@ -446,8 +445,8 @@ export async function runSavedSuite(
   return { report, ...written };
 }
 
-/** `botz-run-<timestamp>` for a cwd report. */
-export function cwdReportBaseName(now: Date = new Date()): string {
+/** `botz-run-<timestamp>` for a report in the default runs directory. */
+export function runReportBaseName(now: Date = new Date()): string {
   return `botz-run-${now.toISOString().replace(/[:.]/g, "-")}`;
 }
 

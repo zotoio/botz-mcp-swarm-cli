@@ -1,3 +1,4 @@
+import { DEFAULT_LOAD_PROFILE } from "../core/load-defaults.js";
 import { z } from "zod";
 
 export const TransportTypeSchema = z.enum(["stdio", "sse", "streamable-http"]);
@@ -177,13 +178,13 @@ export const ProcessAssertionsSchema = z.object({
 
 export const LoadProfileSchema = z.object({
   durationMs: z.number().int().nonnegative(),
-  rampUpMs: z.number().int().nonnegative().default(0),
+  rampUpMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.rampUpMs),
   maxConcurrency: z.number().int().positive(),
-  jitterMs: z.number().int().nonnegative().default(0),
-  rampDownMs: z.number().int().nonnegative().default(0),
-  dwellMs: z.number().int().nonnegative().default(0),
-  iterations: z.number().int().positive().default(10),
-  lanes: z.number().int().positive().max(16).default(4),
+  jitterMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.jitterMs),
+  rampDownMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.rampDownMs),
+  dwellMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.dwellMs),
+  iterations: z.number().int().positive().default(DEFAULT_LOAD_PROFILE.iterations),
+  lanes: z.number().int().positive().max(16).default(DEFAULT_LOAD_PROFILE.lanes),
 });
 
 export const SoakSchema = z.object({

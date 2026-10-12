@@ -25,6 +25,19 @@ describe("standalone workflow", () => {
     await captureSuite({ target: { transport: "stdio", command: "fixture" }, outDir: dir });
     expect(model).not.toHaveBeenCalled();
   });
+  it("captures smoke defaults and preserves drain overrides without rewriting saved suites", async () => {
+    const dir = await setup();
+    const saved = await readFile(join(dir, "suite.json"), "utf8");
+    expect(JSON.parse(saved).load).toMatchObject({ durationMs: 0, rampUpMs: 0, rampDownMs: 60000, maxConcurrency: 1, iterations: 1, lanes: 1 });
+    const timed = await resolveSuiteExecution(dir, { resolveSecrets: false, load: { durationMs: 30000 } });
+    expect(timed.manifest.load?.rampDownMs).toBe(60000);
+    const zero = await resolveSuiteExecution(dir, { resolveSecrets: false, load: { rampDownMs: 0 } });
+    expect(zero.manifest.load?.rampDownMs).toBe(0);
+    expect(await readFile(join(dir, "suite.json"), "utf8")).toBe(saved);
+    const legacy = fixture(); legacy.load.rampDownMs = 0;
+    await writeSuiteDir(dir, legacy);
+    expect((await resolveSuiteExecution(dir, { resolveSecrets: false })).manifest.load?.rampDownMs).toBe(0);
+  });
   it("replaces endpoints without inheriting captured credentials and resolves explicit credentials", async () => {
     vi.stubEnv("PRODUCTION_TOKEN", "production-secret"); vi.stubEnv("STAGING_TOKEN", "staging-secret");
     const dir = await setup();

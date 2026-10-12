@@ -20,15 +20,19 @@ This is one of the CLI's two modes. The other, `worker`, is opt-in and authentic
 
 | What | Inside a git repository | Outside a git repository |
 | --- | --- | --- |
-| Suites | `<repo>/.botz/suites/<name>/` | `~/.botz/suites/<name>/` |
-| CLI config and literal credentials | `<repo>/.botz/config.json` | `~/.botz/config.json` |
-| `run --suite` reports | `botz-run-<timestamp>.json` and `.md` in the current directory | same |
+| Suites | `<repo>/.botz/mcp-swarm/suites/<name>/` | `~/.botz/mcp-swarm/suites/<name>/` |
+| Run reports (`run --suite`, `run --manifest`, `soak`) | `<repo>/.botz/mcp-swarm/runs/` | `~/.botz/mcp-swarm/runs/` |
+| Literal credentials | `<repo>/.botz/mcp-swarm/config.json` | `~/.botz/mcp-swarm/config.json` |
+| Directory settings | `<repo>/.botz/mcp-swarm/settings.json` | `~/.botz/mcp-swarm/settings.json` |
 
-- `<repo>` is the nearest ancestor of the current directory that has a `.git` entry, so a subdirectory uses the repository's `.botz/`.
-- `capture --out <dir>` overrides the suite directory. Without it the suite name (`--name`, else the host or command) becomes one path segment under `suites/`.
-- `run --suite` and `show --suite` take a directory that holds `suite.json`, or a bare suite name under `.botz/suites` (else `~/.botz/suites`).
-- Inside a repository the CLI writes `.botz/.gitignore` with a `config.json` line (appended if the file exists). `suites/` is not ignored, so suites can be committed. No `.gitignore` is written under `~/.botz/`.
-- Reports are never written under `.botz/`, `~/.botz/`, or the suite directory. `run --suite --output <dir>` writes `<dir>/<runId>.json` and `.md` instead. `run --manifest` still defaults to `.runs/`, and `soak` is unchanged.
+- `<repo>` is the nearest ancestor of the current directory that has a `.git` entry, so a subdirectory uses the repository's `.botz/mcp-swarm/`.
+- `settings.json` may set `suitesDir` and `runsDir`. Relative paths resolve from the git root for the repository file and from home for `~/.botz/mcp-swarm/settings.json`; `~/` and absolute paths also work. `capture --out <dir>` and `run --output <dir>` override both for one command.
+- Inside a repository, the repository's `.botz/mcp-swarm` takes precedence and `~/.botz/mcp-swarm` is a read-only fallback: a repository setting wins over the home one, a bare suite name is looked up in the repository suites before the home suites, and repository credentials override home credentials key by key. Writes go to the repository only, so home credentials are never copied into it.
+- Suites and credentials in the earlier `.botz/suites/` and `.botz/config.json` locations are still read; the next credential save writes `.botz/mcp-swarm/config.json`.
+- `capture` turns the suite name (`--name`, else the host or command) into one path segment under the suites directory.
+- `run --suite` and `show --suite` take a directory that holds `suite.json`, or a bare suite name.
+- Inside a repository the CLI writes `.botz/mcp-swarm/.gitignore` with `config.json` and `runs/` lines (appended if the file exists). `suites/` and `settings.json` are not ignored, so they can be committed. No `.gitignore` is written under `~/.botz/`.
+- `run --suite` names reports `botz-run-<timestamp>.json` and `.md`; `run --manifest` and `--output` runs name them `<runId>.json` and `.md`. Reports are never written inside a suite directory.
 - Printed paths use `.botz/...` inside a repository and `~/.botz/...` outside one. The expanded path is never printed.
 
 ## What already does this job
@@ -38,7 +42,7 @@ This is one of the CLI's two modes. The other, `worker`, is opt-in and authentic
 | Full introspection | `introspectServer` in `src/engine/core/suite-introspect.ts` | Connects and pages `tools`, `resources`, resource templates, and `prompts` |
 | Default suite | `buildDefaultSuiteNodes` in `src/engine/core/suite-model.ts` | One contract group: initialize, ping, each read-safe tool call, resource reads, prompt gets, teardown. Write-like tools are present and disabled |
 | Compile | `compileSuite` | Suite nodes plus a load profile become a manifest the runner already executes |
-| Run | `run` / `runManifest` | Executes a manifest. `run --manifest` writes JSON and Markdown under `.runs` |
+| Run | `run` / `runManifest` | Executes a manifest. `run --manifest` writes JSON and Markdown under the runs directory |
 | Substitution | `substituteValue` | Replaces `${name}` in step args. Built-ins `__uuid`, `__ts`, `__thread`, `__iter`, `__loop` stay reserved |
 
 `discover` and `approve` are the older file path. `discover` lists tools only, and `approve` requires `--by <principal>`. Leave that path as it is.
@@ -58,9 +62,11 @@ This is one of the CLI's two modes. The other, `worker`, is opt-in and authentic
 `capture` writes one directory. The suite file is the artifact; reports never live inside it.
 
 ```text
-.botz/
-  .gitignore      # config.json
+.botz/mcp-swarm/
+  .gitignore      # config.json, runs/
+  settings.json   # optional suitesDir / runsDir (committed)
   config.json     # literal target credentials per suite (mode 0600, not committed)
+  runs/           # run reports (not committed)
   suites/demo/
     suite.json    # target, surface, nodes, load, parameter contract
     params.example.json
@@ -105,7 +111,7 @@ botz mcp-swarm capture --command <bin> [--arg <a>]... [--name <name>] [--out <di
 3. Call `buildDefaultSuiteNodes`.
 4. Walk sampler args. Each required string that `sampleArgsForTool` would have filled becomes `${param}`, and the fixture becomes `params.<name>.example`.
 5. Write `suite.json` and `params.example.json`.
-6. Print the tool count, the disabled write-like tools, the parameter names, the names (never the values) of credentials saved to `config.json`, and the suite path in its `.botz/...` or `~/.botz/...` form.
+6. Print the tool count, the disabled write-like tools, the parameter names, the names (never the values) of credentials saved to `config.json`, and the suite path in its `.botz/mcp-swarm/...` or `~/.botz/mcp-swarm/...` form.
 
 Capture does not call tools. It only lists and reads schemas.
 
@@ -121,7 +127,7 @@ botz mcp-swarm run --suite <dir|name> --iterations <n> --concurrency <n>
 3. Fail before connecting when a declared parameter is missing, or when an argument still contains an unknown `${name}`.
 4. Resolve `${env:NAME}` references in the target. The environment wins over a value saved in `config.json`; a reference with neither fails with `missing credential: NAME`.
 5. `compileSuite` with an empty allowlist, then `runManifest` with `vars` seeded from the map and `standaloneTarget: true`. That flag skips the target allowlist check, and the runner throws if an org allowlist is passed with it. No synthetic one-entry allowlist is built.
-6. Write `botz-run-<timestamp>.json` and `botz-run-<timestamp>.md` in the current directory and print only the file names. The report includes the parameter map so two runs can be compared. It has no `principal`.
+6. Write `botz-run-<timestamp>.json` and `botz-run-<timestamp>.md` in the runs directory and print their `.botz/...` paths. The report includes the parameter map so two runs can be compared. It has no `principal`.
 
 The existing `run --manifest` stays. `--suite` and `--manifest` are mutually exclusive.
 
@@ -211,8 +217,8 @@ The studio path keeps its policy, principal, and allowlist gates. `capture` does
 - `capture` against the mock server writes a suite directory with no service process running.
 - `run --suite` twice, with two parameter files, writes two reports whose call args differ and whose verdicts follow the mock.
 - A missing parameter exits before any MCP call.
-- A suite run does not create or read `.swarm-data/policy.json`, and creates neither `.swarm-data` nor `.runs`.
-- Reports in the current directory contain no token, home path, repository path, or username.
+- A suite run does not create or read `.swarm-data/policy.json`, and does not create `.swarm-data`.
+- Run reports contain no token, home path, repository path, or username.
 - Existing `run --manifest` and `project suite run` tests stay green.
 
 

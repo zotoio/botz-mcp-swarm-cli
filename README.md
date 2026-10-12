@@ -15,6 +15,54 @@ Source and releases live in [botz-mcp-swarm-cli](https://github.com/zotoio/botz-
 
 The CLI has two modes. Neither starts a server.
 
+## Agent Skills (Cursor, Claude Code, Codex)
+
+Install the skills bundled with this CLI version:
+
+```bash
+botz mcp-swarm skills install --agent cursor --agent claude-code --agent codex
+botz mcp-swarm skills status
+botz mcp-swarm skills update
+botz mcp-swarm skills uninstall --agent cursor
+```
+
+Standalone npm users can substitute `botz-mcp-swarm` for `botz mcp-swarm`.
+`install` requires at least one `--agent`; repeat the option for multiple clients.
+Other commands default to all managed clients, except `status`, which also shows
+available uninstalled skills. Every command supports `--json` and
+`--scope user|project` (default `user`).
+
+User installs go under `~/.cursor/skills`, `~/.claude/skills`, or
+`~/.agents/skills` for Cursor, Claude Code, or Codex respectively. Project installs
+use those directories at the nearest Git root, or the current directory outside
+Git. Run update/uninstall with the same scope used at installation. Reload the
+agent after changing skills. Cursor can also discover other clients' skill
+folders; select only the integrations you need if duplicates appear.
+
+The installer records versions and file hashes in
+`.botz/mcp-swarm/skill-installations.json` in the chosen home/project root. It updates only
+managed, unchanged skill directories. Edited, partially deleted, symlinked, or
+unmanaged directories are preserved and reported with exit 1; move conflicting
+folders aside and retry. A wholly missing managed directory is restored on
+update. Uninstall removes unchanged managed skills and preserves unrelated
+skills and agent settings. Successful commands exit 0; errors exit 1. An
+interrupted operation may leave a lock; its error identifies the lock to remove
+once no skills command is running.
+
+All commands work offline using bundled files. No scheduler or background update
+is installed. After upgrading the CLI, refresh the skills explicitly:
+
+```bash
+npm install -g @zotoio/botz-mcp-swarm-cli@latest
+botz-mcp-swarm skills update
+```
+
+The [agent-plugin directory](agent-plugin/README.md) contains the canonical
+[Agent Skills](https://agentskills.io/specification), portable and native plugin
+manifests, and marketplace entry templates. Copy the entire directory into a
+marketplace monorepo to distribute the same skills through a plugin manager.
+The plugin requires the CLI to be installed separately.
+
 ## Standalone suites
 
 Save a suite from a live MCP server, then run it again with different parameters. No login, no allowlist, no org policy, and no role grant: the URL or command you type is the consent.
@@ -29,11 +77,12 @@ This first walkthrough needs only your MCP target, with no swarm service or mode
 
 For a stdio server use `--command <bin> [--arg <a>]...` instead of `--url`.
 
-- **Where files go.** Inside a git repository, suites are saved to `<repo>/.botz/suites/<name>/` and CLI config to `<repo>/.botz/config.json`, where `<repo>` is the git root above the current directory. Outside a git repository they go to `~/.botz/suites/<name>/` and `~/.botz/config.json`. `capture --out <dir>` overrides the suite directory. `--suite` takes a directory or a suite name.
+- **Where files go.** Inside a git repository, suites are saved to `<repo>/.botz/mcp-swarm/suites/<name>/`, run reports to `<repo>/.botz/mcp-swarm/runs/`, and literal credentials to `<repo>/.botz/mcp-swarm/config.json`, where `<repo>` is the git root above the current directory. Outside a git repository the same layout lives under `~/.botz/mcp-swarm/`. Inside a repository, the repository's `.botz/mcp-swarm` takes precedence and `~/.botz/mcp-swarm` is a read-only fallback for settings, suite names, and credentials. Earlier `.botz/suites/` and `.botz/config.json` files are still read.
+- **Directory settings.** `.botz/mcp-swarm/settings.json` may set `suitesDir` and `runsDir`, for example `{ "suitesDir": "qa/suites", "runsDir": "qa/runs" }`. Relative paths resolve from the git root (from home for `~/.botz/mcp-swarm/settings.json`); `~/` and absolute paths also work. `capture --out <dir>` and `run --output <dir>` override them for one command. `--suite` takes a directory or a suite name.
 - **Safe recapture.** Existing suites are preserved unless `capture --force` is passed. Default HTTP names include a host and endpoint hash; explicit `--name` values stay readable. New suite files contain `schemaVersion: 1` and a credential ID; legacy unversioned files still load.
-- **Reports.** `run --suite` writes `botz-run-<timestamp>.json` and `botz-run-<timestamp>.md` in the current directory (or under `--output <dir>`). Reports and printed output contain no home directory, username, absolute path, token, header value, or secret environment value, so they are safe to commit. A stdio command is recorded as its basename.
+- **Reports.** `run --suite` writes `botz-run-<timestamp>.json` and `botz-run-<timestamp>.md` to the runs directory (or under `--output <dir>`). Reports and printed output contain no home directory, username, absolute path, token, header value, or secret environment value, so they are safe to commit. A stdio command is recorded as its basename.
 - **Target credentials.** `--header <name:value>`, `--header-env <name=ENV>`, `--bearer-env <ENV>`, `--env <key=value>`, and `--env-from <key=ENV>` are optional credentials for the MCP server under test. They are not the worker token.
-  - Literal values are saved by suite ID to `.botz/config.json` (mode 0600), using locked, atomic updates. `.botz/.gitignore` keeps `config.json` out of git and leaves `suites/` committable.
+  - Literal values are saved by suite ID to `.botz/mcp-swarm/config.json` (mode 0600), using locked, atomic updates. `.botz/mcp-swarm/.gitignore` keeps `config.json` and `runs/` out of git and leaves `suites/` and `settings.json` committable.
   - `suite.json` keeps only references: `${env:NAME}` as you typed it, or `${env:SWARM_TARGET_HEADER_<KEY>}` / `${env:SWARM_TARGET_ENV_<KEY>}` for a moved literal. `<KEY>` is the header or env name upper-cased with other characters replaced by `_` (`X-Custom` becomes `SWARM_TARGET_HEADER_X_CUSTOM`). Every literal is moved, including harmless headers such as `Accept`.
   - At run time the environment wins over `config.json`. A teammate who clones a suite sets the matching `SWARM_TARGET_*` variables.
 - **Credentials in the URL.** Query credentials are refused by default, because a query API key is not necessarily bearer authentication. Only when your server accepts bearer auth, pass `--url-key-as-bearer` to explicitly move one recognized API-key query parameter to an Authorization header. Other secret query parameters, fragments, and URL userinfo remain refused; use `--header` or `--bearer-env`. No automatic authentication conversion occurs.
@@ -119,7 +168,7 @@ botz mcp-swarm soak --manifest manifest.json --duration-ms 5000
 botz mcp-swarm compare --base base.json --head head.json
 ```
 
-`run --manifest` writes reports under `.runs/` unless `--output` is set. On **Pass** the exit code is `0`; on **Fail** (including silent green), invalid input, or configuration errors it is `1`. Standalone manifest/soak runs only write requested reports; they do not use `.swarm-data` or service policy. Telemetry is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is explicitly configured. Reports distinguish disabled, configured, delivered, and failed export states; telemetry failure does not discard test results.
+`run --manifest` writes reports under `.botz/mcp-swarm/runs/` (or the configured `runsDir`) unless `--output` is set. On **Pass** the exit code is `0`; on **Fail** (including silent green), invalid input, or configuration errors it is `1`. Standalone manifest/soak runs only write requested reports; they do not use `.swarm-data` or service policy. Telemetry is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is explicitly configured. Reports distinguish disabled, configured, delivered, and failed export states; telemetry failure does not discard test results.
 
 On standalone runs, SIGINT requests cancellation and exits 130; SIGTERM exits 143. The runner closes MCP sessions and writes the available report. A second signal forces immediate exit. A model SDK operation already in flight may take time to finish.
 
@@ -152,3 +201,18 @@ and workflow `publish.yml` with direct publishing allowed. A pushed `v<version>`
 matching `package.json` triggers validation and publishing. Stable versions use
 `latest`; prereleases use `next`. See [RELEASING.md](RELEASING.md).
 The `botz` host is separately versioned and published by [botz-cli](https://github.com/zotoio/botz-cli).
+
+### Run configuration defaults
+
+New load-test configurations start with a 30-second hold, 5-second ramp-up,
+one virtual user, one lane, one required pass, 100 ms between steps, and up to
+100 ms jitter between passes. In-flight passes get a maximum 60-second drain
+allowance after the hold; a run finishes immediately once its work completes.
+
+CLI capture creates a single-pass smoke configuration instead: duration, ramp-up,
+dwell, and jitter are zero, with the same 60-second drain allowance ready for
+later timed runs. Saved values and CLI overrides, including explicit zero, take
+precedence. Existing suites are not rewritten. For an older suite with zero drain,
+set `load.rampDownMs` to `60000`, or use `--ramp-down-ms 60000` for one run.
+Longer multi-step or inference workloads may need a larger allowance; exceeding
+the configured drain deadline still fails the unfinished pass.

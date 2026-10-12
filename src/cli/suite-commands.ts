@@ -63,7 +63,7 @@ export function registerSuiteCommands(program: Command): void {
     .option("--force", "Replace an existing suite and parameter examples")
     .option("--name <name>", "Suite name. Defaults to an endpoint-derived name or command");
   addAuthOptions(capture)
-    .option("--out <dir>", "Directory for suite.json and params.example.json. Defaults to .botz/suites/<name> in the git repo, else ~/.botz/suites/<name>")
+    .option("--out <dir>", "Directory for suite.json and params.example.json. Defaults to <suitesDir>/<name>: .botz/mcp-swarm/suites in the git repo, else ~/.botz/mcp-swarm/suites")
     .action(async (opts: {
       url?: string;
       command?: string;
@@ -113,7 +113,7 @@ export function registerSuiteCommands(program: Command): void {
   program
     .command("show")
     .description("Print a saved suite's target, enabled steps, and parameters")
-    .requiredOption("--suite <dir>", "Suite directory, or a suite name under .botz/suites (else ~/.botz/suites)")
+    .requiredOption("--suite <dir>", "Suite directory, or a suite name under the configured suites directory")
     .action(async (opts: { suite: string }) => {
       const suite = await loadSuiteFile(resolveSuiteArg(opts.suite, resolveBotzHome()));
       console.log(formatSuiteShow(suite));

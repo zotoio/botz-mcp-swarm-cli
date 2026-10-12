@@ -1,3 +1,4 @@
+import { DEFAULT_LOAD_PROFILE } from "./load-defaults.js";
 import type { CallSlo } from "./call-slo.js";
 import { normalizeCallSlo } from "./call-slo.js";
 import type { ContractExpect } from "./contract.js";
@@ -281,16 +282,7 @@ export function newNodeId(): string {
 }
 
 export function defaultLoadProfile(): LoadProfile {
-  return {
-    durationMs: 5000,
-    rampUpMs: 1000,
-    maxConcurrency: 10,
-    jitterMs: 100,
-    rampDownMs: 500,
-    dwellMs: 1000,
-    iterations: 10,
-    lanes: 4,
-  };
+  return { ...DEFAULT_LOAD_PROFILE };
 }
 
 /** Fill a stored profile so older suites pick up dwell and the iteration floor. */

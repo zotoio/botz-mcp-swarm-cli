@@ -18,6 +18,7 @@
  * Usage: node scripts/check-cli-pack.mjs [--no-build] [--tarball <file.tgz>]
  * Exit codes: 0 clean, 1 findings, 2 the tarball could not be produced or read.
  */
+import { inspectAgentPlugin } from "./check-agent-plugin.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { builtinModules } from "node:module";
@@ -33,7 +34,7 @@ const DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"];
 const ALL_DEP_FIELDS = [...DEP_FIELDS, "devDependencies"];
 const BUNDLED_FIELDS = ["bundleDependencies", "bundledDependencies"];
 
-const ALLOWED_PATH_RE = /^(?:package\.json|(?:README|LICENSE|LICENCE|CHANGELOG)(?:\.md|\.txt)?|dist\/.+)$/i;
+const ALLOWED_PATH_RE = /^(?:package\.json|(?:README|LICENSE|LICENCE|CHANGELOG)(?:\.md|\.txt)?|dist\/.+|agent-plugin\/.+)$/i;
 
 /** @type {{ name: string; re: RegExp }[]} */
 const FORBIDDEN_PATH_RULES = [
@@ -127,7 +128,7 @@ export function inspectPackEntries(entries) {
       continue;
     }
     files.set(rel, entry);
-    if (!ALLOWED_PATH_RE.test(rel)) add(rel, "unexpected-file", "only package.json, dist/, README, LICENSE are published");
+    if (!ALLOWED_PATH_RE.test(rel)) add(rel, "unexpected-file", "only package metadata, dist/, and agent-plugin/ assets are published");
     for (const rule of FORBIDDEN_PATH_RULES) {
       if (rule.re.test(rel)) add(rel, rule.name, "forbidden path in CLI tarball");
     }
@@ -151,6 +152,11 @@ export function inspectPackEntries(entries) {
   } catch {
     add("package.json", "invalid-manifest", "packed package.json is not valid JSON");
     return { findings, manifest: undefined };
+  }
+
+  if (manifest.files?.includes("agent-plugin")) {
+    const assets = new Map([...files].map(([name, entry]) => [name, entry.content]));
+    for (const error of inspectAgentPlugin(assets, manifest.version)) add("agent-plugin", "invalid-agent-plugin", error);
   }
 
   if (manifest.name !== CLI_PACKAGE) add("package.json", "wrong-package", `expected ${CLI_PACKAGE}`);

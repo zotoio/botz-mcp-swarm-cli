@@ -3,7 +3,7 @@ import { access, readdir } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Command } from "commander";
 import { resolveInferenceConfig } from "../engine/core/inference-model.js";
-import { resolveBotzHome, resolveSuiteArg } from "./botz-home.js";
+import { resolveBotzHome, resolveSuiteArg, suiteSearchDirs } from "./botz-home.js";
 import { loadSuiteFile, resolveSuiteExecution } from "./suite-file.js";
 import { diagnosticError } from "./diagnostic-error.js";
 import { addTargetOptions, targetOptions, type TargetOptions } from "./target-options.js";
@@ -35,13 +35,21 @@ function output(value: unknown, text: string, json?: boolean): void { console.lo
 export function registerDiagnostics(program: Command, suite: Command): void {
   suite.command("list").option("--json", "Machine-readable output").action(async (opts: { json?: boolean }) => {
     const botz = resolveBotzHome();
-    const dir = join(botz.dir, "suites");
-    const entries = await readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return []; throw error;
-    });
-    const rows = await Promise.all(entries.filter((e) => e.isDirectory()).sort((a,b) => a.name.localeCompare(b.name)).map(async (entry) => {
-      try { const data = await loadSuiteFile(join(dir, entry.name)); return { name: data.name, directory: entry.name, valid: true }; }
-      catch { return { name: entry.name, directory: entry.name, valid: false }; }
+    const seen = new Set<string>();
+    const found: { dir: string; name: string }[] = [];
+    for (const dir of suiteSearchDirs(botz)) {
+      const entries = await readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return []; throw error;
+      });
+      for (const entry of entries) {
+        if (!entry.isDirectory() || seen.has(entry.name)) continue;
+        seen.add(entry.name);
+        found.push({ dir, name: entry.name });
+      }
+    }
+    const rows = await Promise.all(found.sort((a, b) => a.name.localeCompare(b.name)).map(async ({ dir, name }) => {
+      try { const data = await loadSuiteFile(join(dir, name)); return { name: data.name, directory: name, valid: true }; }
+      catch { return { name, directory: name, valid: false }; }
     }));
     output(rows, rows.map((r) => `${r.directory}\t${r.valid ? r.name : "invalid suite"}`).join("\n") || "No saved suites.", opts.json);
   });
