@@ -1,10 +1,13 @@
 # MCP Swarm agent plugin
 
 Portable Agent Skills for capturing, running, and diagnosing MCP test suites.
-Requires Node.js 22.13+ and a separately installed CLI:
+Requires Node.js 22.13+ and npm. The skills run every command as
+`botz mcp-swarm`. If the `botz` host is missing they install it, and then the
+mcp-swarm extension, on first use:
 
 ```sh
-npm install -g @zotoio/botz-mcp-swarm-cli
+npm install -g @zotoio/botz-cli
+botz plugins install mcp-swarm
 ```
 
 This directory is a self-contained plugin. `plugin.json` follows Agent Plugins
@@ -54,9 +57,9 @@ plugin skills and local skills can both appear in discovery.
 ## Install skills directly instead
 
 ```sh
-botz-mcp-swarm skills install --agent cursor --agent claude-code
-botz-mcp-swarm skills status
-botz-mcp-swarm skills update
+botz mcp-swarm skills install --agent cursor --agent claude-code
+botz mcp-swarm skills status
+botz mcp-swarm skills update
 ```
 
 These commands use bundled files offline. Updates are explicit; no scheduler,

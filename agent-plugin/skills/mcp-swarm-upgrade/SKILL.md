@@ -2,21 +2,32 @@
 name: mcp-swarm-upgrade
 description: Upgrade the botz MCP Swarm CLI and move saved suites, credentials, run reports, and service state into the current layout. Use when updating MCP Swarm, after release notes mention moved files, or when old .botz/suites, .runs, .swarm-data, or .otel directories are present.
 license: MIT
-compatibility: Requires Node.js 22.13+ and botz-mcp-swarm or botz with the mcp-swarm extension, plus shell access. The upgrade command is in CLI 0.6.1 and later.
+compatibility: Requires Node.js 22.13+, npm, and shell access. Installs the botz host (@zotoio/botz-cli) and its mcp-swarm extension if missing. The upgrade command needs mcp-swarm 0.6.1 or later.
 metadata:
   author: zotoio
+  cli-host: "@zotoio/botz-cli"
   cli-package: "@zotoio/botz-mcp-swarm-cli"
 ---
 
 # Upgrade MCP Swarm
 
-Use `botz mcp-swarm` if installed through the botz host, or `botz-mcp-swarm` for standalone npm installs. The plugin supplies instructions, not the CLI executable. Work through the steps in order and stop to ask the user before anything the CLI reports as a conflict.
+Work through the steps in order and stop to ask the user before anything the CLI reports as a conflict.
+
+## 0. Setup
+
+Run every command through the botz host as `botz mcp-swarm`. Do not use the standalone `botz-mcp-swarm` or `swarm` executables. Before the first command in a session:
+
+1. Run `botz --version`. If `botz` is not found, check `node --version` (22.13 or later is required), then install the host with `npm install -g @zotoio/botz-cli` and tell the user you installed it. If Node is too old or the global install fails, for example with a permissions error, stop and report it; do not use `sudo` or change npm configuration.
+2. Run `botz plugins info mcp-swarm --json`. If `installedVersion` is `null`, run `botz plugins install mcp-swarm`.
+3. Confirm with `botz mcp-swarm --version`, and check the relevant subcommand's `--help` before using unfamiliar options.
 
 ## 1. Check versions
 
 ```sh
-botz-mcp-swarm --version
+botz plugins info mcp-swarm --json
 npm view @zotoio/botz-mcp-swarm-cli version
+botz --version
+npm view @zotoio/botz-cli version
 ```
 
 Read the release notes between the installed and latest versions in the package `CHANGELOG.md` (https://github.com/zotoio/botz-mcp-swarm-cli/blob/main/CHANGELOG.md). Note any moved files, changed defaults, and removed flags before changing anything.
@@ -24,18 +35,19 @@ Read the release notes between the installed and latest versions in the package 
 ## 2. Update the CLI
 
 ```sh
-npm install -g @zotoio/botz-mcp-swarm-cli@latest   # standalone install
-botz plugins install mcp-swarm                     # botz host; add --version <v> to pin
+npm install -g @zotoio/botz-cli@latest   # only if the host is behind
+botz plugins install mcp-swarm           # add --version <v> to pin
+botz mcp-swarm --version
 ```
 
-Use whichever matches how the user installed it. Confirm the new version with `--version`. Do not install `next` or prerelease versions unless the user asks.
+Do not install `next` or prerelease versions unless the user asks. If a standalone `@zotoio/botz-mcp-swarm-cli` is also installed globally (`npm ls -g @zotoio/botz-mcp-swarm-cli`), tell the user it is no longer used by these skills; do not uninstall it without asking.
 
 ## 3. Preview the file moves
 
 Stop any running MCP Swarm dashboard service first; it holds the service state that may move. Then, from inside each repository that uses MCP Swarm:
 
 ```sh
-botz-mcp-swarm upgrade --json
+botz mcp-swarm upgrade --json
 ```
 
 `upgrade` only previews unless `--apply` is passed. Each action lists the migration `step`, the release it arrived in (`since`), and display paths `from` and `to`. States are `pending`, `applied`, or `conflict`. Explain the pending moves to the user in plain terms. A `merge` action folds old literal credentials into `.botz/mcp-swarm/config.json`; values already in the new file win. Never print credential values.
@@ -47,7 +59,7 @@ Inside a repository, `upgrade` handles that repository's `.botz` and its own rep
 ## 4. Apply
 
 ```sh
-botz-mcp-swarm upgrade --apply
+botz mcp-swarm upgrade --apply
 ```
 
 Exit codes: 0 when everything applied or nothing was needed, 1 when conflicts remain, 2 for errors. Running it again is safe; finished moves are not repeated.
@@ -75,8 +87,8 @@ To keep suites or reports somewhere else, set `suitesDir` or `runsDir` in `.botz
 ## 6. Refresh skills
 
 ```sh
-botz-mcp-swarm skills status
-botz-mcp-swarm skills update --scope project   # or --scope user, matching the original install
+botz mcp-swarm skills status
+botz mcp-swarm skills update --scope project   # or --scope user, matching the original install
 ```
 
 Locally edited skills are preserved and reported; leave them unless the user wants them replaced. Ask the user to reload their agent afterwards.
@@ -84,9 +96,9 @@ Locally edited skills are preserved and reported; leave them unless the user wan
 ## 7. Verify
 
 ```sh
-botz-mcp-swarm suite list --json
-botz-mcp-swarm suite validate --suite <name> --json
-botz-mcp-swarm doctor --suite <name> --json
+botz mcp-swarm suite list --json
+botz mcp-swarm suite validate --suite <name> --json
+botz mcp-swarm doctor --suite <name> --json
 ```
 
 Every previously saved suite should be listed and valid. Only run a suite against a target the user is authorized to test; when they do, the report path printed should be under `.botz/mcp-swarm/runs/` (or the configured `runsDir`). Summarize what moved, what conflicts remain, and any paths still to update by hand.
