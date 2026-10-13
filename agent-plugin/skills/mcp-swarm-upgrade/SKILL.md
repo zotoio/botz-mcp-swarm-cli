@@ -2,6 +2,7 @@
 name: mcp-swarm-upgrade
 description: Upgrade the botz MCP Swarm CLI and move saved suites, credentials, run reports, and service state into the current layout. Use when updating MCP Swarm, after release notes mention moved files, or when old .botz/suites, .runs, .swarm-data, or .otel directories are present.
 license: MIT
+disable-model-invocation: true
 compatibility: Requires Node.js 22.13+, npm, and shell access. Installs the botz host (@zotoio/botz-cli) and its mcp-swarm extension if missing. The upgrade command needs mcp-swarm 0.6.1 or later.
 metadata:
   author: zotoio

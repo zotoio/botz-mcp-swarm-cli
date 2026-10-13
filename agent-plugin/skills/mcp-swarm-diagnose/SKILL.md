@@ -2,6 +2,7 @@
 name: mcp-swarm-diagnose
 description: Diagnose failed botz MCP Swarm suites, missing credentials, invalid fixtures, execution errors, and performance regressions from CLI diagnostics and run reports.
 license: MIT
+disable-model-invocation: true
 compatibility: Requires Node.js 22.13+, npm, and shell access. Installs the botz host (@zotoio/botz-cli) and its mcp-swarm extension if missing. Offline validation and doctor do not require target access.
 metadata:
   author: zotoio

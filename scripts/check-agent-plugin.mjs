@@ -56,16 +56,20 @@ export function inspectAgentPlugin(files, version) {
           if (Object.hasOwn(fields, key)) throw new Error("duplicate frontmatter key");
           metadata = key === "metadata";
           if (metadata && raw) throw new Error("expected metadata mapping");
-          fields[key] = metadata ? {} : scalar(raw);
+          // Claude Code and Cursor read this boolean; other clients ignore it.
+          if (key === "disable-model-invocation") {
+            if (raw !== "true" && raw !== "false") throw new Error("disable-model-invocation must be true or false");
+            fields[key] = raw === "true";
+          } else fields[key] = metadata ? {} : scalar(raw);
         }
       }
-      const allowed = ["name", "description", "license", "compatibility", "metadata", "allowed-tools"];
+      const allowed = ["name", "description", "license", "compatibility", "metadata", "allowed-tools", "disable-model-invocation"];
       if (Object.keys(fields).some(key => !allowed.includes(key))) throw new Error("unsupported Agent Skills field");
       const name = path.split("/")[2];
       if (fields.name !== name || name.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw new Error("invalid skill name");
       if (typeof fields.description !== "string" || !fields.description.length || fields.description.length > 1024) throw new Error("description must have 1-1024 characters");
       if (fields.compatibility !== undefined && (typeof fields.compatibility !== "string" || !fields.compatibility.length || fields.compatibility.length > 500)) throw new Error("compatibility must have 1-500 characters");
-      if (Object.entries(fields).some(([key, value]) => key !== "metadata" && typeof value !== "string")) throw new Error("frontmatter values must be strings");
+      if (Object.entries(fields).some(([key, value]) => key !== "metadata" && key !== "disable-model-invocation" && typeof value !== "string")) throw new Error("frontmatter values must be strings");
     } catch (error) { errors.push(`${path}: ${error.message}`); }
   }
   return errors;

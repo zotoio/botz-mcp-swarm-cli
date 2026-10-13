@@ -2,6 +2,7 @@
 name: mcp-swarm
 description: Capture, validate, refresh, and run MCP test suites with the botz MCP Swarm CLI. Use for testing MCP servers, repeatable tool assertions, load tests, and CI reports.
 license: MIT
+disable-model-invocation: true
 compatibility: Requires Node.js 22.13+, npm, and shell access. Installs the botz host (@zotoio/botz-cli) and its mcp-swarm extension if missing. Live capture and runs require access to the target MCP server.
 metadata:
   author: zotoio

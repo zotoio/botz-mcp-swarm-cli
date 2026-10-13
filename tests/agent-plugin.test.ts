@@ -21,7 +21,15 @@ describe("portable release assets", () => {
   });
   it("rejects nonportable fields and invalid skill names", () => {
     const files = assets();
-    files.set("agent-plugin/skills/mcp-swarm/SKILL.md", Buffer.from("---\nname: Wrong_Name\ndescription: example\ndisable-model-invocation: true\n---\n"));
+    files.set("agent-plugin/skills/mcp-swarm/SKILL.md", Buffer.from("---\nname: Wrong_Name\ndescription: example\nuser-invocable: false\n---\n"));
     expect(inspectAgentPlugin(files, version).length).toBeGreaterThan(0);
+  });
+  it("accepts only a boolean disable-model-invocation", () => {
+    const skill = (value: string) => Buffer.from(`---\nname: mcp-swarm\ndescription: example\ndisable-model-invocation: ${value}\n---\n`);
+    const files = assets();
+    files.set("agent-plugin/skills/mcp-swarm/SKILL.md", skill("false"));
+    expect(inspectAgentPlugin(files, version)).toEqual([]);
+    files.set("agent-plugin/skills/mcp-swarm/SKILL.md", skill('"true"'));
+    expect(inspectAgentPlugin(files, version)).toEqual(["agent-plugin/skills/mcp-swarm/SKILL.md: disable-model-invocation must be true or false"]);
   });
 });
