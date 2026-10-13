@@ -1,5 +1,11 @@
 # Release notes
 
+## 0.6.1
+
+- Add `upgrade`, which previews and, with `--apply`, moves files from earlier layouts into `.botz/mcp-swarm/` through ordered, versioned migration steps. Credentials are merged without overwriting newer values; existing targets are reported as conflicts.
+- Add the `mcp-swarm-upgrade` Agent Skill to guide agents through upgrading the CLI, migrating files, fixing git tracking, refreshing skills, and verifying suites.
+- Keep studio and service state under `.botz/mcp-swarm/data/` (formerly `.swarm-data/`) and local OTLP data under `.botz/mcp-swarm/otel/` (formerly `.otel/`). Run `upgrade --apply` to move an existing `.swarm-data/` and `.otel/` there. Repository `.gitignore` files written by the CLI now also ignore `data/` and `otel/`.
+
 ## 0.6.0
 
 - Move CLI files under `.botz/mcp-swarm/`: suites in `suites/`, run reports in `runs/` (previously the cwd or `.runs/`), credentials in `config.json`, and skill records in `skill-installations.json`. Suites and credentials in the earlier `.botz/` locations are still read.
