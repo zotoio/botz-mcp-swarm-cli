@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { swarmDataDir } from "../core/data-dirs.js";
 
 export type AuditEventKind =
   | "sso_login"
@@ -58,11 +59,11 @@ export interface AuditEvent {
 }
 
 function logPath(): string {
-  return join(process.cwd(), ".swarm-data", "audit.jsonl");
+  return join(swarmDataDir(), "audit.jsonl");
 }
 
 export async function appendAudit(event: Omit<AuditEvent, "ts">): Promise<void> {
-  await mkdir(join(process.cwd(), ".swarm-data"), { recursive: true });
+  await mkdir(swarmDataDir(), { recursive: true });
   const line: AuditEvent = { ...event, ts: new Date().toISOString() };
   await appendFile(logPath(), `${JSON.stringify(line)}\n`, "utf8");
 }

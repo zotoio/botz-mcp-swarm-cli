@@ -1,8 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { OptimizeHistoryEntry } from "../core/llm-optimize.js";
+import { swarmDataDir } from "../core/data-dirs.js";
 
-const PATH = join(process.cwd(), ".swarm-data", "optimize-history.json");
+const PATH = join(swarmDataDir(), "optimize-history.json");
 
 export async function loadOptimizeHistory(): Promise<OptimizeHistoryEntry[]> {
   try {
@@ -13,7 +14,7 @@ export async function loadOptimizeHistory(): Promise<OptimizeHistoryEntry[]> {
 }
 
 export async function saveOptimizeHistory(entries: OptimizeHistoryEntry[]): Promise<void> {
-  await mkdir(join(process.cwd(), ".swarm-data"), { recursive: true });
+  await mkdir(swarmDataDir(), { recursive: true });
   await writeFile(PATH, JSON.stringify(entries, null, 2), "utf8");
 }
 

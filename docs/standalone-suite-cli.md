@@ -12,7 +12,7 @@ botz mcp-swarm run --suite demo --params ./cases/large.json
 
 `stdio` is the same shape: `--command <bin> --arg <a>` instead of `--url`.
 
-Each command is one process. It connects, writes files or a report, and exits. It does not start the admin server, read `.swarm-data/policy.json`, read role grants or `SWARM_PRINCIPAL`, or require a principal.
+Each command is one process. It connects, writes files or a report, and exits. It does not start the admin server, read `.botz/mcp-swarm/data/policy.json`, read role grants or `SWARM_PRINCIPAL`, or require a principal.
 
 This is one of the CLI's two modes. The other, `worker`, is opt-in and authenticates to a service with `SWARM_WORKER_TOKEN`; see the README. Nothing on this page uses the worker token.
 
@@ -47,11 +47,11 @@ This is one of the CLI's two modes. The other, `worker`, is opt-in and authentic
 
 `discover` and `approve` are the older file path. `discover` lists tools only, and `approve` requires `--by <principal>`. Leave that path as it is.
 
-`project add` and `project suite run` are the studio path. They write versioned projects under `.swarm-data`, and a suite run loads org policy so the host must also be on the org allowlist. That coupling is what this mode avoids.
+`project add` and `project suite run` are the studio path. They write versioned projects under `.botz/mcp-swarm/data`, and a suite run loads org policy so the host must also be on the org allowlist. That coupling is what this mode avoids.
 
 ## Original gaps (resolved by the standalone implementation)
 
-1. **No portable suite file.** A suite today is a project id plus a version under `.swarm-data`. `exportSuiteManifest` bakes one manifest; it does not keep the suite editable or parameterised.
+1. **No portable suite file.** A suite today is a project id plus a version under `.botz/mcp-swarm/data`. `exportSuiteManifest` bakes one manifest; it does not keep the suite editable or parameterised.
 2. **No run parameters.** `VarContext.vars` starts as `{}` in `runManifest`. The only way a name gets a value is an `extract` step earlier in the same run. An unknown `${name}` becomes an empty string, so a missing parameter would call the tool with a blank argument.
 3. **Allowlist is a second copy of the host.** Every target must appear in `manifest.allowlist`, and project runs also check org policy. For this mode the URL or command the operator typed is the consent.
 4. **Policy and identity leak in.** `project suite run` calls `loadPolicy()` and stamps `SWARM_PRINCIPAL` (default `cli`). `run` installs the local OTLP exporter from policy. None of that belongs on a file-only invocation.
@@ -161,7 +161,7 @@ The operator is anonymous. The target may need credentials.
 - Standalone mode does not use an allowlist. It does not read an org allowlist, a manifest allowlist, a hostname allowlist, or `policy.json`. The URL or command the operator typed is the only target consent. `standaloneTarget` is allowed only in the runner and the suite-file module; `pnpm check:no-bypass` fails anywhere else.
 - Skip `installOtelExportTarget` unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set in the environment.
 
-The studio path keeps its policy, principal, and allowlist gates. `capture` does not write `.swarm-data`.
+The studio path keeps its policy, principal, and allowlist gates. `capture` does not write `.botz/mcp-swarm/data`.
 
 ## Target credentials
 
@@ -201,7 +201,7 @@ The studio path keeps its policy, principal, and allowlist gates. `capture` does
 1. **Seeded vars.** Add `vars` to `RunOptions`. Copy them into `VarContext`. Add a contract-aware miss in `substituteString`. Unit tests: a seeded `${city}` reaches `tools/call` args; a missing name fails the step; `__iter` still wins over a param of the same name.
 2. **Suite file.** Types, parse, and write for `suite.json` in `src/cli/suite-file.ts`. Rewrite sample args into `${param}` and collect the contract. Test with a fake surface, no network.
 3. **`capture`.** Wire `introspectServer` and `buildDefaultSuiteNodes` to the file writer. Test against the mock server: directory appears, write-like tools are disabled, no tool call is recorded.
-4. **`run --suite`.** Compile, seed, execute, write the report with the parameter map. Two invocations with different `--params` files produce two reports and do not touch `.swarm-data` or `policy.json`.
+4. **`run --suite`.** Compile, seed, execute, write the report with the parameter map. Two invocations with different `--params` files produce two reports and do not touch `.botz/mcp-swarm/data` or `policy.json`.
 5. **`show`.** Offline print of steps and parameter names.
 
 ## Out of scope
@@ -217,7 +217,7 @@ The studio path keeps its policy, principal, and allowlist gates. `capture` does
 - `capture` against the mock server writes a suite directory with no service process running.
 - `run --suite` twice, with two parameter files, writes two reports whose call args differ and whose verdicts follow the mock.
 - A missing parameter exits before any MCP call.
-- A suite run does not create or read `.swarm-data/policy.json`, and does not create `.swarm-data`.
+- A suite run does not create or read `.botz/mcp-swarm/data/policy.json`, and does not create `.botz/mcp-swarm/data`.
 - Run reports contain no token, home path, repository path, or username.
 - Existing `run --manifest` and `project suite run` tests stay green.
 
@@ -228,7 +228,7 @@ Capture refuses to overwrite either saved suite file unless `--force` is passed.
 
 Use `suite list --json`, `suite validate --suite <name> --json`, and `doctor --suite <name> --json` for offline inspection. `doctor --inference` checks model configuration separately. Capture and run default to MCP-only operation and need no provider credentials. Add `--inference` explicitly to generate or evaluate model fixtures.
 
-Standalone manifest and soak execution no longer reads service policy or saves `.swarm-data` history. OTLP is disabled unless the endpoint is explicitly configured. Export failures are recorded without losing the test report.
+Standalone manifest and soak execution no longer reads service policy or saves `.botz/mcp-swarm/data` history. OTLP is disabled unless the endpoint is explicitly configured. Export failures are recorded without losing the test report.
 
 ## Unified standalone workflow
 

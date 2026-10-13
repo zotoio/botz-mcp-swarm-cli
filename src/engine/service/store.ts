@@ -6,6 +6,7 @@ import type { RunReport } from "../types/run.js";
 import type { OptimizeHistoryEntry } from "../core/llm-optimize.js";
 import { loadOptimizeHistory, saveOptimizeHistory } from "../store/optimize-history.js";
 import { normalizePolicy, type OrgPolicy } from "./policy.js";
+import { swarmDataDir } from "../core/data-dirs.js";
 
 export type { OrgPolicy } from "./policy.js";
 
@@ -25,7 +26,7 @@ export interface Schedule {
   nextRunAt?: string;
 }
 
-const DATA_DIR = join(process.cwd(), ".swarm-data");
+const DATA_DIR = swarmDataDir();
 
 export async function ensureDataDir(): Promise<void> {
   await mkdir(DATA_DIR, { recursive: true });

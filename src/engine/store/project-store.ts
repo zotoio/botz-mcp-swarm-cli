@@ -25,6 +25,7 @@ import { normalizeCallSlo, type CallSlo } from "../core/call-slo.js";
 import { tidyPositions } from "../core/suite-graph.js";
 import { forgetRunExports } from "../otel/local-collector.js";
 import type { RunReport } from "../types/run.js";
+import { swarmDataDir } from "../core/data-dirs.js";
 
 export interface ProjectIndexRow {
   id: string;
@@ -128,7 +129,7 @@ export interface RunSummary {
   mode?: RunReport["mode"];
 }
 
-const DEFAULT_DATA_DIR = join(process.cwd(), ".swarm-data");
+const DEFAULT_DATA_DIR = swarmDataDir();
 
 export interface ProjectStoreOptions {
   dataDir?: string;

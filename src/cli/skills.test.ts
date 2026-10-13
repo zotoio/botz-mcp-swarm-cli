@@ -19,7 +19,7 @@ beforeEach(() => {
 afterEach(() => { rmSync(scratch, { recursive: true, force: true }); });
 describe("managed skills", () => {
   it("reports status without creating configuration", () => {
-    expect(run("status")).toHaveLength(6);
+    expect(run("status")).toHaveLength(9);
     expect(existsSync(join(base, ".botz"))).toBe(false);
   });
   it("installs independently for all adapters and is idempotent", () => {
@@ -36,7 +36,7 @@ describe("managed skills", () => {
     writeFileSync(join(source, skill, "SKILL.md"), "new content");
     writeFileSync(join(packageRoot, "package.json"), '{"version":"2.0.0"}');
     expect(run("status", ["cursor"]).find(r => r.name === skill)?.state).toBe("outdated");
-    expect(run("update").map(r => r.state)).toEqual(["updated", "uninstalled", "installed"]);
+    expect(run("update").map(r => r.state)).toEqual(["updated", "uninstalled", "updated", "installed"]);
     expect(readFileSync(join(target(), "SKILL.md"), "utf8")).toBe("new content");
     expect(existsSync(join(base, ".claude"))).toBe(false);
     expect(run("uninstall").every(r => r.state === "uninstalled")).toBe(true);
@@ -45,7 +45,7 @@ describe("managed skills", () => {
   it("preserves edits, additions, and unrelated skills", () => {
     run("install", ["cursor"]);
     writeFileSync(join(target(), "SKILL.md"), "local changes");
-    writeFileSync(join(base, ".cursor/skills/mcp-swarm-diagnose/notes.md"), "notes");
+    for (const other of ["mcp-swarm-diagnose", "mcp-swarm-upgrade"]) writeFileSync(join(base, ".cursor/skills", other, "notes.md"), "notes");
     mkdirSync(join(base, ".cursor/skills/unrelated"));
     writeFileSync(join(base, ".cursor/skills/unrelated/SKILL.md"), "mine");
     for (const action of ["update", "uninstall"] as const) expect(run(action).every(r => r.state === "modified")).toBe(true);

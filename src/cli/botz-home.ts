@@ -38,7 +38,7 @@ export type BotzSettings = {
 
 export const PLUGIN_DIR = "mcp-swarm";
 export const SETTINGS_FILE = "settings.json";
-const GITIGNORE_LINES = ["config.json", "config.json.*", "runs/"];
+const GITIGNORE_LINES = ["config.json", "config.json.*", "runs/", "data/", "otel/"];
 
 /** Nearest ancestor of `start` (inclusive) that holds a `.git` directory or worktree file. */
 export function findGitRoot(start: string): string | null {
@@ -166,8 +166,8 @@ export function displayPath(absolute: string, botz: BotzHome, fallback: string):
 }
 
 /**
- * Creates the `.botz/mcp-swarm` directory. Inside a repo, its `.gitignore` ignores `config.json` and
- * `runs/` and leaves `suites/` and `settings.json` tracked.
+ * Creates the `.botz/mcp-swarm` directory. Inside a repo, its `.gitignore` ignores `config.json`,
+ * `runs/`, `data/`, and `otel/` and leaves `suites/` and `settings.json` tracked.
  */
 export async function ensureBotzHome(botz: BotzHome): Promise<void> {
   await mkdir(botz.dir, { recursive: true });

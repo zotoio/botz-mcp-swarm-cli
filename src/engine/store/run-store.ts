@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunReport } from "../types/run.js";
+import { swarmDataDir } from "../core/data-dirs.js";
 
 export interface StoredRun extends RunReport {
   principal?: string;
@@ -8,7 +9,7 @@ export interface StoredRun extends RunReport {
   storedAt: string;
 }
 
-const DEFAULT_DIR = join(process.cwd(), ".swarm-data", "runs");
+const DEFAULT_DIR = join(swarmDataDir(), "runs");
 
 export class RunStore {
   constructor(private readonly dir = DEFAULT_DIR) {}

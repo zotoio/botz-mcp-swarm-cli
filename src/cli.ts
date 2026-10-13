@@ -3,6 +3,7 @@ import { registerSkillsCommands } from "./cli/skills.js";
 import { registerRefreshCommand } from "./cli/suite-refresh.js";
 import { registerRunCommand } from "./cli/run-commands.js";
 import { registerDiagnostics } from "./cli/diagnostics.js";
+import { registerUpgradeCommand } from "./cli/upgrade.js";
 import { loadLocalEnv } from "./engine/load-local-env.js";
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
@@ -57,6 +58,7 @@ program
 
 registerSkillsCommands(program, join(dirname(fileURLToPath(import.meta.url)), ".."));
 registerRunCommand(program);
+registerUpgradeCommand(program);
 registerRunCommand(program, "soak");
 
 program

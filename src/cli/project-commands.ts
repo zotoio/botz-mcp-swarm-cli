@@ -416,7 +416,7 @@ export function registerProjectCommands(program: Command): void {
       for (const reason of report.failReasons) {
         console.log(`  - ${reason}`);
       }
-      console.log(`Report: .swarm-data/projects/${report.projectId}/runs/${report.id}.json`);
+      console.log(`Report: .botz/mcp-swarm/data/projects/${report.projectId}/runs/${report.id}.json`);
       for (const tool of report.toolSeries) {
         console.log(
           `${tool.toolName}: ${tool.count} calls, mean ${(tool.latencyMs.mean ?? tool.latencyMs.p50).toFixed(1)} ± ${(tool.latencyMs.std ?? 0).toFixed(1)} ms, p90 ${(tool.latencyMs.p90 ?? tool.latencyMs.p50).toFixed(1)} ms, p95 ${tool.latencyMs.p95.toFixed(1)} ms, p99 ${tool.latencyMs.p99.toFixed(1)} ms, errors ${(tool.errorRate * 100).toFixed(1)}%`,

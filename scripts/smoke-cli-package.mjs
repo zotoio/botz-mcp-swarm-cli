@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Installs and tests the actual consumer artifact. No workspace imports or local swarm service. */
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import assert from "node:assert/strict";
@@ -48,10 +48,11 @@ await server.connect(new StdioServerTransport());
   };
   // Exercise skill installation from the installed npm artifact, scoped to scratch.
   const skills = args => JSON.parse(cli(["skills", ...args, "--scope", "project", "--json"], sub)).results;
-  assert.equal(skills(["install", "--agent", "cursor", "--agent", "claude-code", "--agent", "codex"]).length, 6);
+  assert.equal(skills(["install", "--agent", "cursor", "--agent", "claude-code", "--agent", "codex"]).length, 9);
   assert.ok(skills(["status"]).every(r => r.state === "current"));
   assert.ok(skills(["update"]).every(r => r.state === "current"));
   assert.ok(skills(["uninstall"]).every(r => r.state === "uninstalled"));
+  assert.deepEqual(JSON.parse(cli(["upgrade", "--json"], sub)).actions, [], "a fresh install needs no upgrade");
   cli(["suite", "capture", "--command", process.execPath, "--arg", "fixture.mjs", "--name", "demo"], sub);
   cli(["capture", "--command", process.execPath, "--arg", "fixture.mjs", "--name", "demo", "--no-inference"], sub, 1);
   cli(["show", "--suite", "demo"]);
@@ -83,7 +84,7 @@ await server.connect(new StdioServerTransport());
   cli(["soak", "--manifest", "manifest.json", "--duration-ms", "100", "--output", "reports"]);
   cli(["run", "--manifest", "manifest.json"]);
   assert.ok(readdirSync(join(scratch, ".botz/mcp-swarm/runs")).some(n => n.endsWith(".json")), "default reports land in .botz/mcp-swarm/runs");
-  assert.ok(!readdirSync(scratch).includes(".swarm-data"));
+  assert.ok(!existsSync(join(scratch, ".botz/mcp-swarm/data")) && !existsSync(join(scratch, ".swarm-data")));
   const reports = readdirSync(join(scratch,"reports")).filter(n=>n.endsWith(".json")).map(n=>JSON.parse(readFileSync(join(scratch,"reports",n),"utf8")));
   assert.ok(reports.some(r=>r.verdict==="fail"));
   assert.ok(reports.every(r=>r.otelStatus==="disabled"));

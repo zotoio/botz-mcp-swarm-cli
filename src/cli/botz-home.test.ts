@@ -64,7 +64,7 @@ describe("botz home", () => {
     const botz = resolveBotzHome({ cwd: repo, home: join(root, "home") });
     await ensureBotzHome(botz);
     const ignore = join(repo, ".botz", "mcp-swarm", ".gitignore");
-    expect(await readFile(ignore, "utf8")).toBe("config.json\nconfig.json.*\nruns/\n");
+    expect(await readFile(ignore, "utf8")).toBe("config.json\nconfig.json.*\nruns/\ndata/\notel/\n");
     await writeFile(ignore, "*.tmp");
     await ensureBotzHome(botz);
     const lines = (await readFile(ignore, "utf8")).split("\n");
