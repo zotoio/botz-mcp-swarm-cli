@@ -1,5 +1,10 @@
 # Release notes
 
+## Unreleased
+
+- Move the Agent Skills to the `botz-mcp-swarm` plugin in [zotoio/zoto-agents](https://github.com/zotoio/zoto-agents), which publishes it for Cursor, Claude Code, and Codex. The package no longer bundles `agent-plugin/`.
+- `skills status` and `skills uninstall` now report and remove copies installed by 0.6.x; `skills install` and `skills update` print the marketplace instructions and exit 1.
+
 ## 0.6.1
 
 - Add `upgrade`, which previews and, with `--apply`, moves files from earlier layouts into `.botz/mcp-swarm/` through ordered, versioned migration steps. Credentials are merged without overwriting newer values; existing targets are reported as conflicts.

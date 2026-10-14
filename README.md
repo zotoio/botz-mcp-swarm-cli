@@ -17,51 +17,33 @@ The CLI has two modes. Neither starts a server.
 
 ## Agent Skills (Cursor, Claude Code, Codex)
 
-Install the skills bundled with this CLI version:
+The MCP Swarm skills are published as the `botz-mcp-swarm` plugin in the
+[zoto-agents](https://github.com/zotoio/zoto-agents/tree/main/plugins/botz-mcp-swarm)
+marketplace, which is where they are maintained:
+
+```text
+Claude Code:  /plugin marketplace add zotoio/zoto-agents
+              /plugin install botz-mcp-swarm@zoto-agents
+Codex:        codex plugin marketplace add zotoio/zoto-agents
+Cursor:       add zotoio/zoto-agents as a plugin marketplace, then install botz-mcp-swarm
+```
+
+The skills run when invoked by name (for example `/mcp-swarm`) and install the
+`botz` host and this extension on first use if they are missing.
+
+CLI 0.6.x bundled the skills and copied them into `.cursor/skills`,
+`.claude/skills`, or `.agents/skills`. Remove those copies before installing the
+plugin so agents do not discover the skills twice:
 
 ```bash
-botz mcp-swarm skills install --agent cursor --agent claude-code --agent codex
 botz mcp-swarm skills status
-botz mcp-swarm skills update
-botz mcp-swarm skills uninstall --agent cursor
+botz mcp-swarm skills uninstall
 ```
 
-Standalone npm users can substitute `botz-mcp-swarm` for `botz mcp-swarm`.
-`install` requires at least one `--agent`; repeat the option for multiple clients.
-Other commands default to all managed clients, except `status`, which also shows
-available uninstalled skills. Every command supports `--json` and
-`--scope user|project` (default `user`).
-
-User installs go under `~/.cursor/skills`, `~/.claude/skills`, or
-`~/.agents/skills` for Cursor, Claude Code, or Codex respectively. Project installs
-use those directories at the nearest Git root, or the current directory outside
-Git. Run update/uninstall with the same scope used at installation. Reload the
-agent after changing skills. Cursor can also discover other clients' skill
-folders; select only the integrations you need if duplicates appear.
-
-The installer records versions and file hashes in
-`.botz/mcp-swarm/skill-installations.json` in the chosen home/project root. It updates only
-managed, unchanged skill directories. Edited, partially deleted, symlinked, or
-unmanaged directories are preserved and reported with exit 1; move conflicting
-folders aside and retry. A wholly missing managed directory is restored on
-update. Uninstall removes unchanged managed skills and preserves unrelated
-skills and agent settings. Successful commands exit 0; errors exit 1. An
-interrupted operation may leave a lock; its error identifies the lock to remove
-once no skills command is running.
-
-All commands work offline using bundled files. No scheduler or background update
-is installed. After upgrading the CLI, refresh the skills explicitly:
-
-```bash
-npm install -g @zotoio/botz-mcp-swarm-cli@latest
-botz-mcp-swarm skills update
-```
-
-The [agent-plugin directory](agent-plugin/README.md) contains the canonical
-[Agent Skills](https://agentskills.io/specification), portable and native plugin
-manifests, and marketplace entry templates. Copy the entire directory into a
-marketplace monorepo to distribute the same skills through a plugin manager.
-The plugin requires the CLI to be installed separately.
+Both accept `--agent`, `--scope user|project` (default `user`; use the scope of
+the original install), and `--json`. Uninstall removes only unchanged copies;
+edited ones are reported with exit 1 and left in place. `skills install` and
+`skills update` now print the marketplace instructions and exit 1.
 
 ## Standalone suites
 
@@ -79,7 +61,7 @@ For a stdio server use `--command <bin> [--arg <a>]...` instead of `--url`.
 
 - **Where files go.** Inside a git repository, suites are saved to `<repo>/.botz/mcp-swarm/suites/<name>/`, run reports to `<repo>/.botz/mcp-swarm/runs/`, and literal credentials to `<repo>/.botz/mcp-swarm/config.json`, where `<repo>` is the git root above the current directory. Outside a git repository the same layout lives under `~/.botz/mcp-swarm/`. Inside a repository, the repository's `.botz/mcp-swarm` takes precedence and `~/.botz/mcp-swarm` is a read-only fallback for settings, suite names, and credentials. Earlier `.botz/suites/` and `.botz/config.json` files are still read.
 - **Directory settings.** `.botz/mcp-swarm/settings.json` may set `suitesDir` and `runsDir`, for example `{ "suitesDir": "qa/suites", "runsDir": "qa/runs" }`. Relative paths resolve from the git root (from home for `~/.botz/mcp-swarm/settings.json`); `~/` and absolute paths also work. `capture --out <dir>` and `run --output <dir>` override them for one command. `--suite` takes a directory or a suite name.
-- **Upgrading.** `upgrade` previews moving files from earlier layouts (`.botz/suites/`, `.botz/config.json`, `.runs/` and cwd reports, `.swarm-data/`, `.otel/`) into `.botz/mcp-swarm/`; `upgrade --apply` moves them, merging credentials without overwriting newer values. Targets that already exist are reported as conflicts and left alone (exit 1). Run it in each repository, and once outside any repository for `~/.botz`. The bundled `mcp-swarm-upgrade` skill walks an agent through the whole upgrade, including git tracking and verification.
+- **Upgrading.** `upgrade` previews moving files from earlier layouts (`.botz/suites/`, `.botz/config.json`, `.runs/` and cwd reports, `.swarm-data/`, `.otel/`) into `.botz/mcp-swarm/`; `upgrade --apply` moves them, merging credentials without overwriting newer values. Targets that already exist are reported as conflicts and left alone (exit 1). Run it in each repository, and once outside any repository for `~/.botz`. The `mcp-swarm-upgrade` skill in the [botz-mcp-swarm plugin](#agent-skills-cursor-claude-code-codex) walks an agent through the whole upgrade, including git tracking and verification.
 - **Safe recapture.** Existing suites are preserved unless `capture --force` is passed. Default HTTP names include a host and endpoint hash; explicit `--name` values stay readable. New suite files contain `schemaVersion: 1` and a credential ID; legacy unversioned files still load.
 - **Reports.** `run --suite` writes `botz-run-<timestamp>.json` and `botz-run-<timestamp>.md` to the runs directory (or under `--output <dir>`). Reports and printed output contain no home directory, username, absolute path, token, header value, or secret environment value, so they are safe to commit. A stdio command is recorded as its basename.
 - **Target credentials.** `--header <name:value>`, `--header-env <name=ENV>`, `--bearer-env <ENV>`, `--env <key=value>`, and `--env-from <key=ENV>` are optional credentials for the MCP server under test. They are not the worker token.

@@ -10,8 +10,8 @@ After CI passes on main:
 
 ```bash
 pnpm version patch --no-git-tag-version  # or minor / major / prerelease --preid rc
-# Update CHANGELOG.md and the three agent-plugin plugin.json versions to match.
-git add package.json CHANGELOG.md agent-plugin
+# Update CHANGELOG.md.
+git add package.json CHANGELOG.md
 git commit -m "chore: release <version>"
 git tag -a v<version> -m "Release <version>"
 git push origin main --follow-tags

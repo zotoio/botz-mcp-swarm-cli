@@ -14,17 +14,15 @@
   "files": [
     "dist",
     "LICENSE",
-    "CHANGELOG.md",
-    "agent-plugin"
+    "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "node scripts/check-agent-plugin.mjs && tsc --noEmit && tsdown --config-loader native",
+    "build": "tsc --noEmit && tsdown --config-loader native",
     "lint": "tsc --noEmit",
     "test": "vitest run && node --test scripts/release-policy-check.mjs",
     "check:leakage": "node scripts/check-leakage.mjs",
     "check:cli-pack": "node scripts/check-cli-pack.mjs",
-    "prepublishOnly": "pnpm run build",
-    "check:skills": "node scripts/check-agent-plugin.mjs"
+    "prepublishOnly": "pnpm run build"
   },
   "publishConfig": {
     "access": "public",
