@@ -4,6 +4,9 @@
 
 - Move the Agent Skills to the `botz-mcp-swarm` plugin in [zotoio/zoto-agents](https://github.com/zotoio/zoto-agents), which publishes it for Cursor, Claude Code, and Codex. The package no longer bundles `agent-plugin/`.
 - `skills status` and `skills uninstall` now report and remove copies installed by 0.6.x; `skills install` and `skills update` print the marketplace instructions and exit 1.
+- Run reports record `server`: the server name and version from the run's `initialize` result (saved-suite runs fall back to the suite's surface), the transport, and the endpoint actually used. HTTP endpoints drop userinfo, query, and fragment; stdio endpoints reduce the command and absolute path arguments to their basename. The Markdown report header shows the server and endpoint.
+- Saved-suite run reports include the suite's tool `catalog`, so `compare` marks tools whose schema changed as `schema-changed` and leaves them unscored, as it already did for project runs.
+- `compare` shows each side's server and warns (in Markdown and in the JSON `warnings` array) when base and head ran against a different server name, transport, or endpoint.
 
 ## 0.6.1
 

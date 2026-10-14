@@ -18,6 +18,7 @@ export class SessionPool {
   /** Every open session, idle or checked out, so `abort` can close them all. */
   private readonly live = new Set<McpSession>();
   private aborted = false;
+  private firstServerInfo?: { name?: string; version?: string };
 
   constructor(options: SessionPoolOptions) {
     this.options = options;
@@ -61,6 +62,11 @@ export class SessionPool {
     await Promise.all([...this.live].map((session) => this.close(session)));
   }
 
+  /** Name and version from the first session's `initialize` result. */
+  serverInfo(): { name?: string; version?: string } | undefined {
+    return this.firstServerInfo;
+  }
+
   getSutPids(): number[] {
     return [...this.sutPids];
   }
@@ -68,6 +74,10 @@ export class SessionPool {
   private async open(): Promise<McpSession> {
     const session = await createSession(this.options.target, this.options.headers, this.options.baseDir, this.options.onStderr);
     this.noteSutPid(session.childPid);
+    if (!this.firstServerInfo) {
+      const info = session.getServerMeta().serverInfo;
+      if (info?.name || info?.version) this.firstServerInfo = { name: info.name, version: info.version };
+    }
     if (this.aborted) {
       await session.close().catch(() => undefined);
       throw new Error("run aborted");

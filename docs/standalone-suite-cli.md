@@ -127,7 +127,7 @@ botz mcp-swarm run --suite <dir|name> --iterations <n> --concurrency <n>
 3. Fail before connecting when a declared parameter is missing, or when an argument still contains an unknown `${name}`.
 4. Resolve `${env:NAME}` references in the target. The environment wins over a value saved in `config.json`; a reference with neither fails with `missing credential: NAME`.
 5. `compileSuite` with an empty allowlist, then `runManifest` with `vars` seeded from the map and `standaloneTarget: true`. That flag skips the target allowlist check, and the runner throws if an org allowlist is passed with it. No synthetic one-entry allowlist is built.
-6. Write `botz-run-<timestamp>.json` and `botz-run-<timestamp>.md` in the runs directory and print their `.botz/...` paths. The report includes the parameter map so two runs can be compared. It has no `principal`.
+6. Write `botz-run-<timestamp>.json` and `botz-run-<timestamp>.md` in the runs directory and print their `.botz/...` paths. The report includes the parameter map, the suite's tool `catalog`, and `server` (name and version from the live `initialize` result, else the suite surface; transport; and the endpoint used, stripped of credentials and machine paths) so two runs can be compared. It has no `principal`.
 
 The existing `run --manifest` stays. `--suite` and `--manifest` are mutually exclusive.
 

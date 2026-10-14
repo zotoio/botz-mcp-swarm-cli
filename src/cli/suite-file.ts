@@ -44,6 +44,7 @@ import {
   type SuiteNode,
 } from "../engine/core/suite-model.js";
 import { runManifest } from "../engine/core/runner.js";
+import { runServer } from "../engine/core/run-server.js";
 import { applyToolEvalVerdict, evaluateSuiteTools, generateToolTestData } from "../engine/core/tool-evals.js";
 import { inferenceSecretValues } from "../engine/core/inference-model.js";
 import { TargetSchema, type Manifest, type Target } from "../engine/types/manifest.js";
@@ -431,6 +432,15 @@ export async function runSavedSuite(
     }
   }
   raw.params = params;
+  raw.server = runServer(target, {
+    name: raw.server?.name ?? suite.surface.serverName,
+    version: raw.server?.version ?? suite.surface.serverVersion,
+  });
+  raw.catalog = suite.surface.tools.map((tool) => ({
+    name: tool.name,
+    schemaHash: tool.schemaHash,
+    writeLike: tool.writeLike,
+  }));
   const scrub = makeReportScrubber({
     ...defaultScrubContext(options.botz?.cwd ?? process.cwd()),
     home,

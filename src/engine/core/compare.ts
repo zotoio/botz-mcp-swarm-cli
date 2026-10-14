@@ -4,8 +4,10 @@ import type {
   CompareDelta,
   CompareReport,
   RunReport,
+  RunServer,
   ToolSeries,
 } from "../types/run.js";
+import { formatRunServer } from "./run-server.js";
 
 export async function loadRunReport(path: string): Promise<RunReport> {
   const content = await readFile(path, "utf8");
@@ -36,6 +38,21 @@ function classifyTool(
   if (headTool && !baseTool) return "added";
   if (baseTool && !headTool) return "removed";
   return "unchanged";
+}
+
+/** Reports from before `server` was recorded are not compared. */
+function serverWarnings(base: RunServer | undefined, head: RunServer | undefined): string[] {
+  if (!base || !head) return [];
+  const warnings: string[] = [];
+  if ((base.name ?? "") !== (head.name ?? "")) {
+    warnings.push(`server differs: base ${base.name ?? "unknown"}, head ${head.name ?? "unknown"}`);
+  }
+  if (base.transport !== head.transport || base.endpoint !== head.endpoint) {
+    warnings.push(
+      `endpoint differs: base ${base.transport} ${base.endpoint}, head ${head.transport} ${head.endpoint}`,
+    );
+  }
+  return warnings;
 }
 
 function fmtMs(value: number | null): string {
@@ -111,6 +128,9 @@ export function compareRuns(base: RunReport, head: RunReport): CompareReport {
     baseRunId: base.id,
     headRunId: head.id,
     generatedAt: new Date().toISOString(),
+    ...(base.server ? { baseServer: base.server } : {}),
+    ...(head.server ? { headServer: head.server } : {}),
+    warnings: serverWarnings(base.server, head.server),
     deltas,
     regressions,
   };
@@ -120,14 +140,23 @@ export function formatCompareMarkdown(compare: CompareReport): string {
   const lines = [
     `# Compare Report`,
     ``,
-    `Base: \`${compare.baseRunId}\``,
-    `Head: \`${compare.headRunId}\``,
+    `Base: \`${compare.baseRunId}\`${compare.baseServer ? ` — ${formatRunServer(compare.baseServer)}` : ""}`,
+    `Head: \`${compare.headRunId}\`${compare.headServer ? ` — ${formatRunServer(compare.headServer)}` : ""}`,
     ``,
+  ];
+
+  if (compare.warnings?.length) {
+    lines.push(`## Warnings`, ``);
+    for (const warning of compare.warnings) lines.push(`- ${warning}`);
+    lines.push(``);
+  }
+
+  lines.push(
     `## Per-Tool Deltas`,
     ``,
     `| Tool | Catalog | Scored | Base p95 | Head p95 | Δ p95 | Base err | Head err | Δ err |`,
     `|------|---------|--------|----------|----------|-------|----------|----------|-------|`,
-  ];
+  );
 
   for (const delta of compare.deltas) {
     lines.push(

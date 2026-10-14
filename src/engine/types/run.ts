@@ -105,6 +105,16 @@ export interface GatewayMetrics {
   hopFailures: HopFailure[];
 }
 
+/** The MCP server a run exercised. */
+export interface RunServer {
+  /** From the run's live `initialize` result; a saved-suite run falls back to the suite's recorded surface. */
+  name?: string;
+  version?: string;
+  transport: TransportType;
+  /** HTTP URL without userinfo, query, or fragment, or the stdio command basename and its arguments. */
+  endpoint: string;
+}
+
 export interface RunReport {
   id: string;
   manifestName: string;
@@ -117,6 +127,7 @@ export interface RunReport {
   silentGreen: boolean;
   mode: RunMode;
   transport: TransportType;
+  server?: RunServer;
   soak?: {
     iterations: number;
     durationMs: number;
@@ -229,6 +240,10 @@ export interface CompareReport {
   baseRunId: string;
   headRunId: string;
   generatedAt: string;
+  baseServer?: RunServer;
+  headServer?: RunServer;
+  /** Base and head ran against different servers or endpoints, so deltas may not measure one server. */
+  warnings: string[];
   deltas: CompareDelta[];
   regressions: string[];
 }
