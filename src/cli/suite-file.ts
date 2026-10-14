@@ -36,12 +36,13 @@ import { introspectServer } from "../engine/core/suite-introspect.js";
 import {
   buildDefaultSuiteNodes,
   compileSuite,
-  defaultLoadProfile,
+  generatedLoadProfile,
   normalizeLoadProfile,
   toolIsCalledByDefault,
   type LoadProfile,
   type ServerSurface,
   type SuiteNode,
+  type SurfaceLatency,
 } from "../engine/core/suite-model.js";
 import { runManifest } from "../engine/core/runner.js";
 import { runServer } from "../engine/core/run-server.js";
@@ -90,9 +91,9 @@ interface Slot {
 }
 
 /** Single-pass smoke capture, with the shared grace period for later timed runs. */
-export function captureLoadProfile(): LoadProfile {
+export function captureLoadProfile(nodes: SuiteNode[] = [], latency?: SurfaceLatency): LoadProfile {
   return {
-    ...defaultLoadProfile(),
+    ...generatedLoadProfile(nodes, latency),
     durationMs: 0,
     rampUpMs: 0,
     jitterMs: 0,
@@ -319,9 +320,10 @@ export async function captureSuite(input: {
     capturedAt: new Date().toISOString(),
     name,
     target: portableStdio(referenced, { gitRoot, home, cwd }),
-    surface,
+    // Latency differs on every capture; it only sizes the load profile below.
+    surface: { ...surface, latency: undefined },
     nodes,
-    load: captureLoadProfile(),
+    load: captureLoadProfile(nodes, surface.latency),
     params,
   };
   if (!gitRoot && suite.target.transport === "stdio") {

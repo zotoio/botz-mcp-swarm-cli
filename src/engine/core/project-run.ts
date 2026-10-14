@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AllowlistEntry } from "../service/mcp-allowlist.js";
 import type { Manifest, Target } from "../types/manifest.js";
 import type { RunProgressEvent, RunReport } from "../types/run.js";
@@ -46,6 +46,8 @@ export async function startSuiteRun(input: {
   dispatch?: SuiteDispatch;
   /** Receives `worker` runs. Without it a `worker` run is refused, never run in this process. */
   workerDispatch?: (job: WorkerDispatchJob) => void;
+  /** False skips model evals for tool eval prompts. Defaults to true. */
+  evals?: boolean;
 }): Promise<{ ok: true; runId: string; dispatch: SuiteDispatch } | { ok: false; error: string }> {
   const store = input.dataDir ? { dataDir: input.dataDir } : undefined;
   const project = await getProject(input.projectId, store);
@@ -116,6 +118,7 @@ export async function startSuiteRun(input: {
     orgTargetAllowlist: input.orgTargetAllowlist,
     orgGatewayAllowlist: input.orgGatewayAllowlist,
     dataDir: input.dataDir,
+    evals: input.evals,
   });
 
   return { ok: true, runId, dispatch };
@@ -133,7 +136,10 @@ async function executeSuiteRun(input: {
   orgTargetAllowlist: AllowlistEntry[];
   orgGatewayAllowlist: AllowlistEntry[];
   dataDir?: string;
+  evals?: boolean;
 }): Promise<void> {
+  const startedAt = new Date();
+  const store = input.dataDir ? { dataDir: input.dataDir } : undefined;
   try {
     const withEvals = await runCompiledSuite({
       manifest: input.manifest,
@@ -145,6 +151,7 @@ async function executeSuiteRun(input: {
       orgTargetAllowlist: input.orgTargetAllowlist,
       orgGatewayAllowlist: input.orgGatewayAllowlist,
       onProgress: publishRunEvent,
+      evals: input.evals,
     });
     withEvals.projectId = input.projectId;
     withEvals.suiteId = input.suiteId;
@@ -156,19 +163,63 @@ async function executeSuiteRun(input: {
       attributes: { verdict: withEvals.verdict, ok: true },
     };
     withEvals.log = tailRunLog([...bufferedRunEvents(input.runId), finished]);
-    await saveProjectRun(input.projectId, withEvals, input.dataDir ? { dataDir: input.dataDir } : undefined);
+    await saveProjectRun(input.projectId, withEvals, store);
     publishRunEvent(finished);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    publishRunEvent({
+    const finished = {
       ts: new Date().toISOString(),
       runId: input.runId,
-      name: "run.finished",
+      name: "run.finished" as const,
       attributes: { verdict: "fail", ok: false, message },
-    });
+    };
+    // Keep a failed report so the run and its reason are listed even when the run never started.
+    const report = failedSuiteRunReport({ ...input, startedAt, message });
+    report.log = tailRunLog([...bufferedRunEvents(input.runId), finished]);
+    await saveProjectRun(input.projectId, report, store).catch(() => undefined);
+    publishRunEvent(finished);
   } finally {
     finishSuiteRun(input.suiteId, input.runId);
   }
+}
+
+/** Report for a run that failed before the runner produced one. */
+export function failedSuiteRunReport(input: {
+  runId: string;
+  manifest: Manifest;
+  projectId: string;
+  suiteId: string;
+  suiteVersion: number;
+  catalog: NonNullable<RunReport["catalog"]>;
+  principal: string;
+  startedAt: Date;
+  message: string;
+}): RunReport {
+  const finishedAt = new Date();
+  const transport = input.manifest.target.transport;
+  return {
+    id: input.runId,
+    manifestName: input.manifest.name,
+    manifestHash: createHash("sha256").update(JSON.stringify(input.manifest)).digest("hex").slice(0, 16),
+    startedAt: input.startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - input.startedAt.getTime(),
+    verdict: "fail",
+    failReasons: [input.message],
+    silentGreen: false,
+    mode: input.manifest.load && input.manifest.load.durationMs > 0 ? "load" : "smoke",
+    transport,
+    sessionMetrics: { transport, started: 0, active: 0, failed: 0 },
+    toolSeries: [],
+    rpcSeries: [],
+    scenarioOutcomes: [],
+    quotas: { concurrencyUsed: 0, callCount: 0, maxPayloadBytesSeen: 0 },
+    principal: input.principal,
+    projectId: input.projectId,
+    suiteId: input.suiteId,
+    suiteVersion: input.suiteVersion,
+    catalog: input.catalog,
+  };
 }
 
 /** Compile a stored project suite version. Shared by in-process runs and remote workers. */
@@ -206,6 +257,8 @@ export async function runCompiledSuite(input: {
   onProgress?: (event: RunProgressEvent) => void;
   /** Aborts the run (see `runManifest`); tool evals are skipped once aborted. */
   signal?: AbortSignal;
+  /** False skips model evals for tool eval prompts. Defaults to true. */
+  evals?: boolean;
 }): Promise<RunReport> {
   const report = await runManifest({
     manifest: input.manifest,
@@ -218,7 +271,7 @@ export async function runCompiledSuite(input: {
     signal: input.signal,
   });
   report.catalog = input.catalog;
-  if (input.signal?.aborted) return report;
+  if (input.signal?.aborted || input.evals === false) return report;
   return attachSuiteEvals(report, input.nodes, input.manifest.target);
 }
 

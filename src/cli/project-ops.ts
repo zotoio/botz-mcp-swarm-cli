@@ -18,12 +18,10 @@ import {
 } from "../engine/core/suite-model.js";
 import {
   allowlistEntryLabel,
-  enabledAllowlist,
   isMcpServerConfig,
   parseAllowlistEntryJson,
   type McpServerConfig,
 } from "../engine/service/mcp-allowlist.js";
-import { loadPolicy } from "../engine/service/store.js";
 import { LoadProfileSchema } from "../engine/types/manifest.js";
 import type { CompareReport, RunProgressEvent, RunReport } from "../engine/types/run.js";
 import {
@@ -326,7 +324,7 @@ export async function addProjectServer(
   projectRef: string,
   raw: string,
   options?: ProjectStoreOptions & { generateSuite?: boolean },
-): Promise<{ projectId: string; serverId: string; suiteId?: string }> {
+): Promise<{ projectId: string; serverId: string; suiteId?: string; introspectError?: string }> {
   const parsed = parseAllowlistEntryJson(raw);
   if (!parsed.ok) throw new Error(parsed.reason);
   if (!isMcpServerConfig(parsed.entry)) throw new Error("host_strings_do_not_create_projects");
@@ -335,7 +333,12 @@ export async function addProjectServer(
   if (!updated) throw new Error("project_not_found");
   const server = updated.servers?.[updated.servers.length - 1];
   if (!server) throw new Error("server_not_found");
-  return { projectId: updated.id, serverId: server.id, suiteId: updated.suites.at(-1)?.id };
+  return {
+    projectId: updated.id,
+    serverId: server.id,
+    suiteId: updated.suites.at(-1)?.id,
+    introspectError: server.introspectError,
+  };
 }
 
 export async function removeStructuredProject(ref: string, options?: ProjectStoreOptions): Promise<string> {
@@ -413,7 +416,9 @@ export function formatProgress(event: RunProgressEvent): string | null {
     return `${String(attrs.method ?? "rpc")} ${String(attrs.latencyMs ?? "")}ms ${String(attrs.result ?? "")}`;
   }
   if (event.name === "mcp.scenario.result") return `scenario ${String(attrs.result ?? "")}`;
-  if (event.name === "run.finished") return `finished ${String(attrs.verdict ?? "")}`;
+  if (event.name === "run.finished") {
+    return `finished ${String(attrs.verdict ?? "")}${attrs.message ? `: ${String(attrs.message)}` : ""}`;
+  }
   return null;
 }
 
@@ -459,32 +464,35 @@ export async function runProjectSuite(
   projectRef: string,
   suiteRef: string | undefined,
   onLine: (line: string) => void,
-  options?: ProjectStoreOptions & { version?: number },
+  options?: ProjectStoreOptions & { version?: number; inference?: boolean },
 ): Promise<RunReport> {
   const project = await resolveProject(projectRef, options);
   if (project.archived) throw new Error("project_archived");
   const suite = resolveSuite(project, suiteRef);
-  const policy = options?.dataDir ? null : await loadPolicy();
   const started = await startSuiteRun({
     projectId: project.id,
     suiteId: suite.id,
     version: options?.version,
     principal: process.env.SWARM_PRINCIPAL ?? "cli",
-    orgTargetAllowlist: policy
-      ? enabledAllowlist(policy.targetAllowlist, policy.disabledTargetKeys)
-      : (project.servers ?? []).flatMap((server) => projectAllowlistHosts(server.target)),
-    orgGatewayAllowlist: policy ? enabledAllowlist(policy.gatewayAllowlist, policy.disabledGatewayKeys) : [],
+    // A standalone run has no org policy: the servers the operator added to the project are the
+    // target consent, matched exactly like structured org allowlist entries.
+    orgTargetAllowlist: (project.servers ?? []).map((server) => server.target),
+    orgGatewayAllowlist: [],
     dataDir: options?.dataDir,
     dispatch: "local",
+    // Model evals are opt in, as for `suite run`.
+    evals: options?.inference === true,
   });
   if (!started.ok) throw new Error(started.error);
   onLine(`run ${started.runId}`);
-  await followSuiteRun(started.runId, (event) => {
+  const finished = await followSuiteRun(started.runId, (event) => {
     const line = formatProgress(event);
     if (line) onLine(line);
   });
   const report = await loadProjectRun(project.id, started.runId, options);
-  if (!report) throw new Error("report_missing");
+  if (!report) {
+    throw new Error(typeof finished.attributes.message === "string" ? finished.attributes.message : "report_missing");
+  }
   return report;
 }
 

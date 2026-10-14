@@ -11,7 +11,7 @@ import {
   catalogFingerprint,
   reconcileSuiteNodes,
   cloneNode,
-  defaultLoadProfile,
+  generatedLoadProfile,
   normalizeLoadProfile,
   type LoadProfile,
   type PromptCatalogEntry,
@@ -20,6 +20,7 @@ import {
   type ServerSurface,
   type SuiteNode,
   type ToolCatalogEntry,
+  type SurfaceLatency,
 } from "../core/suite-model.js";
 import { normalizeCallSlo, type CallSlo } from "../core/call-slo.js";
 import { tidyPositions } from "../core/suite-graph.js";
@@ -84,6 +85,8 @@ export interface ProjectServer {
 export interface ProjectSurface {
   serverName?: string;
   serverVersion?: string;
+  /** Measured at the last introspection; sizes the load profile of suites generated from it. */
+  latency?: SurfaceLatency;
   capabilities: string[];
   resources: ResourceCatalogEntry[];
   resourceTemplates: ResourceTemplateEntry[];
@@ -256,6 +259,7 @@ function storedSurface(surface: ServerSurface): ProjectSurface {
   return {
     serverName: surface.serverName,
     serverVersion: surface.serverVersion,
+    latency: surface.latency,
     capabilities: surface.capabilities,
     resources: surface.resources,
     resourceTemplates: surface.resourceTemplates,
@@ -362,7 +366,7 @@ async function freshSuite(
     createdAt: now,
     name,
     nodes: nodes ? built : tidyPositions(await fillGeneratedToolEvals(built, catalog)),
-    load: defaultLoadProfile(),
+    load: generatedLoadProfile(built, surface?.latency),
     catalogFingerprint: catalogFingerprint(catalog),
   };
   return { pointer, version };
@@ -567,6 +571,7 @@ async function replaceUntouchedStubSuite(
     const doc = await readJson<SuiteVersionDocument>(versionPath(project.id, suite.id, 1, options));
     if (!doc || doc.catalogFingerprint !== emptyFingerprint) continue;
     doc.nodes = tidyPositions(await fillGeneratedToolEvals(buildDefaultSuiteNodes(surface), server.catalog));
+    doc.load = generatedLoadProfile(doc.nodes, server.surface?.latency);
     doc.catalogFingerprint = catalogFingerprint(server.catalog);
     await writeSuiteVersion(project, suite, doc, options);
   }

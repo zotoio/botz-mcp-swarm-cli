@@ -90,9 +90,18 @@ export interface PromptCatalogEntry {
 }
 
 /** Live picture of one MCP server, used to build the default contract suite. */
+/** Round trips measured while introspecting, used to size a generated load profile. */
+export interface SurfaceLatency {
+  /** Session start, including process spawn for stdio and the initialize handshake. */
+  connectMs: number;
+  /** Slowest list request. */
+  rpcMs: number;
+}
+
 export interface ServerSurface {
   serverName?: string;
   serverVersion?: string;
+  latency?: SurfaceLatency;
   capabilities: string[];
   tools: ToolCatalogEntry[];
   resources: ResourceCatalogEntry[];
@@ -283,6 +292,40 @@ export function newNodeId(): string {
 
 export function defaultLoadProfile(): LoadProfile {
   return { ...DEFAULT_LOAD_PROFILE };
+}
+
+/** List round trips are a floor for tool calls, which are often far slower. */
+const DRAIN_HEADROOM = 10;
+const DRAIN_CAP_MS = 30 * 60_000;
+
+/**
+ * Load profile for a generated suite. Ramp-down covers one estimated pass with headroom, so a slow
+ * server is not cut off mid-pass with `ramp-down deadline`. Never below the default grace period.
+ */
+export function generatedLoadProfile(nodes: SuiteNode[], latency?: SurfaceLatency): LoadProfile {
+  const load = defaultLoadProfile();
+  if (!latency) return load;
+  const passMs = estimatePassMs(nodes, latency, load.dwellMs);
+  const drainMs = Math.ceil((passMs * DRAIN_HEADROOM) / 1000) * 1000;
+  load.rampDownMs = Math.min(DRAIN_CAP_MS, Math.max(load.rampDownMs, drainMs));
+  return load;
+}
+
+/** Estimated wall time of one pass, mirroring how `compileSuite` expands enabled nodes. */
+export function estimatePassMs(nodes: SuiteNode[], latency: SurfaceLatency, dwellMs = 0): number {
+  let total = 0;
+  for (const node of nodes) {
+    if (!node.enabled) continue;
+    if (node.type === "group") total += estimatePassMs(node.children ?? [], latency, dwellMs);
+    else if (node.type === "loop") {
+      const times = Math.min(Math.max(node.iterations ?? 1, 1), LOOP_EXPAND_CAP);
+      total += times * estimatePassMs(node.children ?? [], latency, dwellMs);
+    } else if (node.type === "think") total += (node.thinkMs ?? 0) + dwellMs;
+    else if (node.type === "sampler" && node.method) {
+      total += (node.method === "initialize" ? latency.connectMs : latency.rpcMs) + dwellMs;
+    }
+  }
+  return total;
 }
 
 /** Fill a stored profile so older suites pick up dwell and the iteration floor. */

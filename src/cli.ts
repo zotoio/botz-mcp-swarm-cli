@@ -54,7 +54,9 @@ const pluginName = process.env.BOTZ_PLUGIN?.trim();
 program
   .name(pluginName ? `botz ${pluginName}` : "botz-mcp-swarm")
   .description("Standards-based MCP load testing — honest Pass/Fail, no silent green")
-  .version(cliPackageVersion());
+  .version(cliPackageVersion())
+  // Root options only before the subcommand, so `project run --version <n>` is not the CLI version.
+  .enablePositionalOptions();
 
 registerSkillsCommands(program);
 registerRunCommand(program);
