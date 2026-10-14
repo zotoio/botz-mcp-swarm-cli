@@ -1,13 +1,14 @@
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { captureLoadProfile, captureSuite, resolveSuiteExecution, writeSuiteDir, type SuiteFile } from "./suite-file.js";
+import { captureLoadProfile, captureSuite, resolveSuiteExecution, runSavedSuite, writeSuiteDir, type SuiteFile } from "./suite-file.js";
 import { refreshSavedSuite, refreshSuiteModel } from "./suite-refresh.js";
 import { diagnosticError } from "./diagnostic-error.js";
 import { formatJUnit } from "./run-output.js";
 import { integer } from "./run-commands.js";
 import * as introspection from "../engine/core/suite-introspect.js";
+import * as adapters from "../engine/adapters/index.js";
 import { buildDefaultSuiteNodes, type ServerSurface } from "../engine/core/suite-model.js";
 import type { RunReport } from "../engine/types/run.js";
 
@@ -15,6 +16,17 @@ const surface: ServerSurface = { capabilities: ["tools"], tools: [{ name: "echo"
 const fixture = (): SuiteFile => ({ kind: "botz-suite", name: "demo", capturedAt: "2026-01-01", target: { transport: "streamable-http", url: "https://production.example/mcp", headers: { Authorization: "Bearer ${env:PRODUCTION_TOKEN}" } }, surface, nodes: buildDefaultSuiteNodes(surface), load: captureLoadProfile(), params: {} });
 const dirs: string[] = [];
 async function setup(suite = fixture()) { const dir = await mkdtemp(join(tmpdir(), "suite-workflow-")); dirs.push(dir); await writeSuiteDir(dir, suite); return dir; }
+const ok = (result: unknown) => async () => ({ success: true, latencyMs: 1, errorClass: "none", bytesIn: 1, bytesOut: 1, result });
+function mockServer(serverInfo?: { name: string; version: string }) {
+  return vi.spyOn(adapters, "createSession").mockImplementation(async () => ({
+    id: "fixture", transport: {} as never, close: async () => {}, setElicitAutoReply: () => {},
+    getServerMeta: () => ({ capabilities: { tools: {} }, ...(serverInfo ? { serverInfo } : {}) }),
+    serverInfo: () => ({ ...serverInfo }),
+    listTools: ok({ tools: [{ name: "echo", inputSchema: { type: "object" } }] }),
+    callTool: ok({ content: [{ type: "text", text: "ok" }] }),
+    ping: ok({}),
+  }) as unknown as adapters.McpSession);
+}
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 describe("standalone workflow", () => {
@@ -97,6 +109,35 @@ describe("standalone workflow", () => {
     vi.spyOn(introspection, "introspectServer").mockImplementation(async () => { await writeFile(join(dir, "suite.json"), "concurrent edit"); return surface; });
     await expect(refreshSavedSuite(dir)).rejects.toThrow("suite changed during discovery");
     expect(await readFile(join(dir, "suite.json"), "utf8")).toBe("concurrent edit");
+  });
+  it("records the live server, the endpoint actually used, and the suite catalog", async () => {
+    mockServer({ name: "live-server", version: "2.0.0" });
+    vi.stubEnv("STAGING_TOKEN", "staging-secret");
+    const dir = await setup({ ...fixture(), surface: { ...surface, serverName: "captured-server", serverVersion: "1.0.0" } });
+    const out = join(dir, "runs");
+    const { report, jsonPath, markdownPath } = await runSavedSuite(dir, {
+      params: {}, outputDir: out, reportBaseName: "botz-run-live",
+      url: "https://staging.example/mcp?region=eu#frag", auth: { bearerEnv: "STAGING_TOKEN" },
+    });
+    expect(report.server).toEqual({ name: "live-server", version: "2.0.0", transport: "streamable-http", endpoint: "https://staging.example/mcp" });
+    expect(report.catalog).toEqual([{ name: "echo", schemaHash: "v1", writeLike: false }]);
+    const saved = await readFile(jsonPath, "utf8");
+    expect(JSON.parse(saved).server).toEqual(report.server);
+    expect(saved).not.toContain("staging-secret");
+    expect(await readFile(markdownPath, "utf8")).toContain("| Server | live-server 2.0.0 |\n| Endpoint | `https://staging.example/mcp` |");
+  });
+  it("falls back to the suite surface and keeps stdio paths portable", async () => {
+    mockServer();
+    const home = homedir();
+    const suite: SuiteFile = {
+      ...fixture(),
+      surface: { ...surface, serverName: "captured-server", serverVersion: "1.0.0" },
+      target: { transport: "stdio", command: join(home, "bin", "mcp-fixture"), args: [join(home, "srv", "index.js"), "--verbose"] },
+    };
+    const dir = await setup(suite);
+    const { report, jsonPath } = await runSavedSuite(dir, { params: {}, outputDir: join(dir, "runs"), reportBaseName: "botz-run-stdio" });
+    expect(report.server).toEqual({ name: "captured-server", version: "1.0.0", transport: "stdio", endpoint: "mcp-fixture index.js --verbose" });
+    expect(await readFile(jsonPath, "utf8")).not.toContain(home);
   });
   it("JUnit escapes XML and includes aggregate verdict failures", () => {
     const report = { manifestName: 'demo<&"', durationMs: 50, verdict: "fail", scenarioOutcomes: [{ scenario: "passing step", outcome: "pass" }], failReasons: ["latency > threshold & SLO"] } as RunReport;

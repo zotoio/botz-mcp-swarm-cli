@@ -28,6 +28,7 @@ import {
 } from "./process-gauges.js";
 import { QuotaTracker } from "./quotas.js";
 import { SessionPool } from "./session-pool.js";
+import { runServer } from "./run-server.js";
 import { resolveStdioTarget } from "./target-resolve.js";
 import {
   capabilityForMethod,
@@ -1030,6 +1031,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     silentGreen,
     mode,
     transport: manifest.target.transport,
+    server: runServer(target, pool.serverInfo()),
     soak: mode === "soak"
       ? {
           iterations: soakIterations,

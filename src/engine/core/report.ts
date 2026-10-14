@@ -19,6 +19,12 @@ export function formatMarkdownReport(report: RunReport): string {
     `| Mode | ${report.mode} |`,
     `| Verdict | **${report.verdict.toUpperCase()}** |`,
     `| Transport | ${report.transport} |`,
+    ...(report.server
+      ? [
+          `| Server | ${[report.server.name ?? "unknown", report.server.version].filter(Boolean).join(" ")} |`,
+          `| Endpoint | \`${report.server.endpoint}\` |`,
+        ]
+      : []),
     `| Duration | ${report.durationMs}ms |`,
     `| Silent Green | ${report.silentGreen ? "YES (FAIL)" : "no"} |`,
     ``,
