@@ -18,7 +18,9 @@ export interface JsonSchema {
 
 export interface ToolDescriptor {
   name: string;
+  description?: string;
   inputSchema?: JsonSchema;
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
 
 /** Arguments that satisfy the tool input schema, with a few readable fixtures when they still validate. */

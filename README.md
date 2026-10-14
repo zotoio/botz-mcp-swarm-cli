@@ -125,6 +125,17 @@ botz mcp-swarm doctor --inference
 
 These commands do not contact target or model servers. Validation checks suite structure and parameter examples; doctor checks credential references, executable availability, and output permissions. A failed validation/check exits 1.
 
+## Tool description proposals
+
+```bash
+botz mcp-swarm optimize --target '{"transport":"stdio","command":"node","args":["server.js"]}' --allowlist stdio --tool search_docs
+botz mcp-swarm optimize --target-file target.json --allowlist api.example.com --tool search_docs
+```
+
+`optimize` reads one tool from the live `tools/list` (`--tool` is required) and proposes a clearer description from its current description, input schema, and parameter descriptions. It never calls the tool. With an inference provider configured, a model drafts the rewrite; otherwise a heuristic reports concrete gaps (missing or very short description, undocumented parameters, required parameters the description does not mention) and drafts a description only when the current one is missing or very short. Proposals are saved as drafts under `.botz/mcp-swarm/data/` and need an explicit Accept.
+
+`optimize` does not measure whether a proposal is better. To compare, run tool evals before and after applying the new description on the server: `suite run --suite <name> --inference` sends fixed prompts against the live server's descriptions, so the change in eval pass rate shows the effect.
+
 ## Worker mode (opt-in)
 
 A worker runs suites assigned by a botz mcp-swarm service. It dials out and does not listen on a port.

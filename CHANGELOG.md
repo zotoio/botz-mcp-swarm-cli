@@ -7,6 +7,11 @@
 - Run reports record `server`: the server name and version from the run's `initialize` result (saved-suite runs fall back to the suite's surface), the transport, and the endpoint actually used. HTTP endpoints drop userinfo, query, and fragment; stdio endpoints reduce the command and absolute path arguments to their basename. The Markdown report header shows the server and endpoint.
 - Saved-suite run reports include the suite's tool `catalog`, so `compare` marks tools whose schema changed as `schema-changed` and leaves them unscored, as it already did for project runs.
 - `compare` shows each side's server and warns (in Markdown and in the JSON `warnings` array) when base and head ran against a different server name, transport, or endpoint.
+- `optimize` now reads the tool's actual description and parameter descriptions; previously it treated the tool name as the current description.
+- Behavior change: `optimize` no longer calls the tool. It used to call the tool twice with hard-coded `{ "message": ... }` arguments, whatever its schema and even when the tool was write-like.
+- Remove the latency "A/B bench" and `benchDelta` from new optimize drafts and history, because a description change cannot affect server latency. To compare before and after, run `suite run --inference` tool evals.
+- `optimize --tool` is required (it previously defaulted to `echo`). An unknown tool exits 1 and lists the available tools.
+- The offline heuristic now reports concrete description gaps instead of appending the names of required arguments.
 
 ## 0.6.1
 

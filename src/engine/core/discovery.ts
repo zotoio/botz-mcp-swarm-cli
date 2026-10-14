@@ -146,10 +146,10 @@ export async function approveDiscoveryDraft(
 
 export interface OptimizeSuggestion {
   toolName: string;
+  /** The tool description as served by the live MCP server ("" when it has none). */
   before: string;
   after: string;
   rationale: string[];
-  benchDelta?: { p95BeforeMs: number; p95AfterMs: number };
   status: "draft" | "accepted" | "rejected";
   target?: Target;
   allowlist?: string[];
@@ -160,19 +160,78 @@ export interface OptimizeSuggestion {
   };
 }
 
+export interface ToolParameterSummary {
+  name: string;
+  type?: string;
+  required: boolean;
+  description: string;
+}
+
+/** Descriptions shorter than this rarely say what a tool returns or when to use it. */
+const SHORT_DESCRIPTION_CHARS = 40;
+
+/** Top-level input parameters with their schema descriptions ("" when missing). */
+export function summarizeToolParameters(tool: ToolDescriptor): ToolParameterSummary[] {
+  const props = tool.inputSchema?.properties ?? {};
+  const required = new Set(tool.inputSchema?.required ?? []);
+  return Object.entries(props).map(([name, schema]) => ({
+    name,
+    type: Array.isArray(schema.type) ? schema.type.join(" | ") : schema.type,
+    required: required.has(name),
+    description: typeof schema.description === "string" ? schema.description.trim() : "",
+  }));
+}
+
+function mentions(text: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\w])${escaped}($|[^\\w])`, "i").test(text);
+}
+
+function sentence(text: string): string {
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
+function draftFromSchema(tool: ToolDescriptor, before: string, params: ToolParameterSummary[]): string {
+  const words = tool.name.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").trim().toLowerCase();
+  const lead = before || words.charAt(0).toUpperCase() + words.slice(1);
+  if (params.length === 0) return sentence(lead);
+  const inputs = params.map((param) => {
+    const meta = [param.type, param.required ? "required" : "optional"].filter(Boolean).join(", ");
+    return `${param.name} (${meta})${param.description ? `: ${param.description}` : ""}`;
+  });
+  return `${sentence(lead)} Inputs: ${inputs.join("; ")}.`;
+}
+
+/**
+ * Offline review of a tool description. Reports concrete gaps and, when the description is
+ * missing or very short, drafts one from the schema for a human to edit.
+ */
 export function suggestDescriptionOptimization(
   tool: ToolDescriptor,
 ): OptimizeSuggestion {
-  const before = tool.name;
-  const after = `${tool.name}: ${(tool.inputSchema?.required ?? []).join(", ") || "no required args"}`;
+  const before = tool.description?.trim() ?? "";
+  const params = summarizeToolParameters(tool);
+  const tooShort = before.length < SHORT_DESCRIPTION_CHARS;
+  const rationale: string[] = [];
+  if (!before) rationale.push("No description: models see only the tool name");
+  else if (tooShort) {
+    rationale.push(`Description is ${before.length} characters; say what the tool does, what it returns, and when to use it`);
+  }
+  const undocumented = params.filter((param) => !param.description).map((param) => param.name);
+  if (undocumented.length > 0) {
+    rationale.push(`Parameters without schema descriptions: ${undocumented.join(", ")} (fix these in the input schema)`);
+  }
+  const unmentioned = params.filter((param) => param.required && !mentions(before, param.name)).map((param) => param.name);
+  if (unmentioned.length > 0 && !tooShort) {
+    rationale.push(`Required parameters not mentioned in the description: ${unmentioned.join(", ")}`);
+  }
+  if (tooShort) rationale.push("Draft built from the tool name and input schema; edit before accepting");
+  if (rationale.length === 0) rationale.push("No heuristic issues found; configure an inference provider for a model rewrite");
   return {
     toolName: tool.name,
     before,
-    after,
-    rationale: [
-      "Adds required parameter names for clarity",
-      "Bench delta requires explicit Accept before publish",
-    ],
+    after: tooShort ? draftFromSchema(tool, before, params) : before,
+    rationale,
     status: "draft",
   };
 }

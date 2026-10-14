@@ -22,18 +22,18 @@ import {
   saveDiscoveryDraft,
   approveDiscoveryDraft,
   suggestDescriptionOptimization,
+  summarizeToolParameters,
 } from "./engine/core/discovery.js";
 import type { ReplayMode } from "./engine/types/recording.js";
 import {
   generateDescriptionProposal,
-  runAbBench,
+  findToolDescriptor,
   createOptimizeHistoryEntry,
 } from "./engine/core/llm-optimize.js";
 import { appendOptimizeHistory } from "./engine/store/optimize-history.js";
 import { saveOptimizeDrafts } from "./engine/service/store.js";
 import { createSession } from "./engine/adapters/index.js";
 import { resolveStdioTarget } from "./engine/core/target-resolve.js";
-import type { ToolDescriptor } from "./engine/core/tool-args.js";
 import { assertTargetAllowlisted } from "./engine/core/allowlist.js";
 import { registerProjectCommands } from "./cli/project-commands.js";
 import { registerSuiteCommands } from "./cli/suite-commands.js";
@@ -180,11 +180,13 @@ program
 
 program
   .command("optimize")
-  .description("LLM/heuristic description proposal with A/B bench (human Accept required)")
+  .description(
+    "Propose a clearer description for one tool from its live description and schema (does not call the tool; human Accept required)",
+  )
   .option("--target <json>", "Target JSON")
   .option("--target-file <path>", "Target JSON file")
   .requiredOption("--allowlist <hosts>", "Comma-separated allowlist hosts")
-  .option("--tool <name>", "Tool to optimize", "echo")
+  .requiredOption("--tool <name>", "Tool to optimize")
   .action(
     async (opts: {
       target?: string;
@@ -197,54 +199,43 @@ program
       assertTargetAllowlisted(target, allowlist);
       const baseDir = opts.targetFile ? dirname(resolve(opts.targetFile)) : process.cwd();
       const session = await createSession(target, undefined, baseDir);
-      let tools: ToolDescriptor[] = [];
+      let found: Awaited<ReturnType<typeof findToolDescriptor>>;
       try {
-        const list = await session.listTools();
-        tools = (list.result as { tools?: ToolDescriptor[] })?.tools ?? [];
-        const before = await session.callTool(opts.tool, { message: "bench-before" });
-        const p95Before = before.latencyMs;
-        const proposal = await generateDescriptionProposal(
-          tools.find((t) => t.name === opts.tool) ?? { name: opts.tool },
-        );
-        const after = await session.callTool(opts.tool, { message: "bench-after" });
-        const benchDelta = await runAbBench(
-          opts.tool,
-          p95Before,
-          after.latencyMs,
-          before.success ? 0 : 1,
-          after.success ? 0 : 1,
-        );
-        proposal.benchDelta = {
-          p95BeforeMs: benchDelta.p95BeforeMs,
-          p95AfterMs: benchDelta.p95AfterMs,
-        };
-        const entry = createOptimizeHistoryEntry(
-          proposal,
-          benchDelta,
-          process.env.SWARM_PRINCIPAL,
-        );
-        await appendOptimizeHistory(entry);
-        const resolvedTarget =
-          target.transport === "stdio"
-            ? resolveStdioTarget(target, baseDir)
-            : target;
-        await saveOptimizeDrafts([
-          {
-            ...proposal,
-            target: resolvedTarget,
-            allowlist,
-          },
-        ]);
-        console.log(`Optimize proposal for ${opts.tool} (${proposal.source})`);
-        console.log(`Before: ${proposal.before}`);
-        console.log(`After:  ${proposal.after}`);
-        console.log(
-          `Bench Δ p95: ${benchDelta.p95BeforeMs.toFixed(1)}ms → ${benchDelta.p95AfterMs.toFixed(1)}ms`,
-        );
-        console.log("Status: draft — explicit Accept required in dashboard");
+        found = await findToolDescriptor(session, opts.tool);
       } finally {
         await session.close();
       }
+      const tool = found.tool;
+      if (!tool) {
+        console.error(`Tool not found: ${opts.tool}`);
+        console.error(`Available tools: ${found.names.join(", ") || "(none)"}`);
+        process.exitCode = 1;
+        return;
+      }
+      const proposal = await generateDescriptionProposal(tool);
+      await appendOptimizeHistory(createOptimizeHistoryEntry(proposal, process.env.SWARM_PRINCIPAL));
+      const resolvedTarget =
+        target.transport === "stdio"
+          ? resolveStdioTarget(target, baseDir)
+          : target;
+      await saveOptimizeDrafts([
+        {
+          ...proposal,
+          target: resolvedTarget,
+          allowlist,
+        },
+      ]);
+      console.log(`Optimize proposal for ${tool.name} (${proposal.source})`);
+      console.log(`Before: ${proposal.before || "(no description)"}`);
+      for (const param of summarizeToolParameters(tool)) {
+        console.log(`  ${param.name}${param.required ? "*" : ""}: ${param.description || "(no description)"}`);
+      }
+      console.log(`After:  ${proposal.after}`);
+      for (const reason of proposal.rationale) console.log(`  - ${reason}`);
+      console.log("Status: draft — explicit Accept required in dashboard");
+      console.log(
+        "To compare before/after, apply the description on the server and rerun tool evals: botz mcp-swarm suite run --suite <name> --inference",
+      );
     },
   );
 
