@@ -46,12 +46,11 @@ await server.connect(new StdioServerTransport());
     assert.equal(result.status, code, result.stderr + result.stdout);
     return result.stdout;
   };
-  // Exercise skill installation from the installed npm artifact, scoped to scratch.
+  // Skills ship in zotoio/zoto-agents; the CLI only reports and removes 0.6.x copies.
   const skills = args => JSON.parse(cli(["skills", ...args, "--scope", "project", "--json"], sub)).results;
-  assert.equal(skills(["install", "--agent", "cursor", "--agent", "claude-code", "--agent", "codex"]).length, 9);
-  assert.ok(skills(["status"]).every(r => r.state === "current"));
-  assert.ok(skills(["update"]).every(r => r.state === "current"));
-  assert.ok(skills(["uninstall"]).every(r => r.state === "uninstalled"));
+  assert.deepEqual(skills(["status"]), []);
+  assert.deepEqual(skills(["uninstall"]), []);
+  cli(["skills", "install", "--agent", "cursor"], sub, 1);
   assert.deepEqual(JSON.parse(cli(["upgrade", "--json"], sub)).actions, [], "a fresh install needs no upgrade");
   cli(["suite", "capture", "--command", process.execPath, "--arg", "fixture.mjs", "--name", "demo"], sub);
   cli(["capture", "--command", process.execPath, "--arg", "fixture.mjs", "--name", "demo", "--no-inference"], sub, 1);
@@ -95,5 +94,5 @@ await server.connect(new StdioServerTransport());
   assert.equal(exportReport.verdict, "pass");
   assert.equal(exportReport.otelStatus, "failed");
   assert.equal(exportReport.otelExported, false);
-  console.log("Consumer package smoke passed: skills install/update/status/uninstall, aliases, capture, portability, diagnostics, pass/fail, refresh, overrides, concurrency, JSON/JUnit, manifest, soak, no service state.");
+  console.log("Consumer package smoke passed: legacy skills status/uninstall, aliases, capture, portability, diagnostics, pass/fail, refresh, overrides, concurrency, JSON/JUnit, manifest, soak, no service state.");
 } finally { rmSync(scratch, { recursive: true, force: true }); }

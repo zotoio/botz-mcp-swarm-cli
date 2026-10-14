@@ -1,6 +1,0 @@
-{
-  "name": "botz-mcp-swarm",
-  "source": { "source": "local", "path": "./plugins/botz-mcp-swarm" },
-  "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
-  "category": "Developer Tools"
-}

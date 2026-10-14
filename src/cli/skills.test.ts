@@ -1,90 +1,93 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { Command } from "commander";
-import { manageSkills, registerSkillsCommands } from "./skills.js";
-let scratch: string, base: string, packageRoot: string;
+import { manageSkills, marketplaceHelp, registerSkillsCommands } from "./skills.js";
+let scratch: string, base: string;
 const skill = "mcp-swarm";
-const run = (action: "install" | "update" | "status" | "uninstall", agents?: ("cursor" | "claude-code" | "codex")[]) => manageSkills({ action, agents, base, packageRoot });
-const target = (agent = ".cursor") => join(base, agent, "skills", skill);
+const agentDirs = { cursor: ".cursor", "claude-code": ".claude", codex: ".agents" } as const;
+type Agent = keyof typeof agentDirs;
+const run = (action: "status" | "uninstall", agents?: Agent[]) => manageSkills({ action, agents, base });
+const target = (agent = ".cursor", name = skill) => join(base, agent, "skills", name);
+const registryPath = () => join(base, ".botz/mcp-swarm/skill-installations.json");
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+// Recreate what CLI 0.6.x left behind: skill directories plus a hash registry.
+function legacyInstall(agents: Agent[], names = [skill, "mcp-swarm-diagnose", "mcp-swarm-upgrade"]): void {
+  const installations = [];
+  for (const agent of agents) for (const name of names) {
+    mkdirSync(target(agentDirs[agent], name), { recursive: true });
+    writeFileSync(join(target(agentDirs[agent], name), "SKILL.md"), `skill ${name}`);
+    installations.push({ agent, name, version: "0.6.1", files: { "SKILL.md": sha(`skill ${name}`) } });
+  }
+  mkdirSync(join(base, ".botz/mcp-swarm"), { recursive: true });
+  writeFileSync(registryPath(), JSON.stringify({ schemaVersion: 1, installations }));
+}
 beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), "botz-skills-"));
   base = join(scratch, "user"); mkdirSync(base);
-  packageRoot = join(scratch, "package"); mkdirSync(packageRoot);
-  cpSync(fileURLToPath(new URL("../../agent-plugin", import.meta.url)), join(packageRoot, "agent-plugin"), { recursive: true });
-  writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ version: "1.0.0" }));
 });
-afterEach(() => { rmSync(scratch, { recursive: true, force: true }); });
-describe("managed skills", () => {
-  it("reports status without creating configuration", () => {
-    expect(run("status")).toHaveLength(9);
+afterEach(() => { rmSync(scratch, { recursive: true, force: true }); process.exitCode = undefined; vi.restoreAllMocks(); });
+describe("CLI-managed skills from 0.6.x", () => {
+  it("reports nothing and writes nothing without a registry", () => {
+    expect(run("status")).toEqual([]);
+    expect(run("uninstall")).toEqual([]);
     expect(existsSync(join(base, ".botz"))).toBe(false);
   });
-  it("installs independently for all adapters and is idempotent", () => {
-    expect(run("install", ["cursor", "claude-code", "codex"]).every(r => r.state === "installed")).toBe(true);
-    for (const agent of [".cursor", ".claude", ".agents"]) expect(existsSync(join(target(agent), "SKILL.md"))).toBe(true);
-    expect(run("install", ["cursor"]).every(r => r.state === "current")).toBe(true);
-    expect(run("status").every(r => r.installedVersion === "1.0.0")).toBe(true);
-  });
-  it("updates registered agents, adds new skills, and removes retired skills", () => {
-    run("install", ["cursor"]);
-    const source = join(packageRoot, "agent-plugin/skills");
-    rmSync(join(source, "mcp-swarm-diagnose"), { recursive: true });
-    mkdirSync(join(source, "mcp-extra")); writeFileSync(join(source, "mcp-extra/SKILL.md"), "new skill");
-    writeFileSync(join(source, skill, "SKILL.md"), "new content");
-    writeFileSync(join(packageRoot, "package.json"), '{"version":"2.0.0"}');
-    expect(run("status", ["cursor"]).find(r => r.name === skill)?.state).toBe("outdated");
-    expect(run("update").map(r => r.state)).toEqual(["updated", "uninstalled", "updated", "installed"]);
-    expect(readFileSync(join(target(), "SKILL.md"), "utf8")).toBe("new content");
-    expect(existsSync(join(base, ".claude"))).toBe(false);
-    expect(run("uninstall").every(r => r.state === "uninstalled")).toBe(true);
-    expect(run("update")).toEqual([]);
-  });
-  it("preserves edits, additions, and unrelated skills", () => {
-    run("install", ["cursor"]);
+  it("reports managed, modified, and missing copies per agent", () => {
+    legacyInstall(["cursor", "claude-code"]);
     writeFileSync(join(target(), "SKILL.md"), "local changes");
-    for (const other of ["mcp-swarm-diagnose", "mcp-swarm-upgrade"]) writeFileSync(join(base, ".cursor/skills", other, "notes.md"), "notes");
-    mkdirSync(join(base, ".cursor/skills/unrelated"));
-    writeFileSync(join(base, ".cursor/skills/unrelated/SKILL.md"), "mine");
-    for (const action of ["update", "uninstall"] as const) expect(run(action).every(r => r.state === "modified")).toBe(true);
+    rmSync(target(".claude"), { recursive: true });
+    const states = Object.fromEntries(run("status").map(r => [`${r.agent}/${r.name}`, r.state]));
+    expect(states).toMatchObject({ "cursor/mcp-swarm": "modified", "cursor/mcp-swarm-diagnose": "managed", "claude-code/mcp-swarm": "missing" });
+    expect(run("status", ["codex"])).toEqual([]);
+    expect(run("status").every(r => r.installedVersion === "0.6.1")).toBe(true);
+  });
+  it("uninstalls unchanged copies and preserves edits and unrelated skills", () => {
+    legacyInstall(["cursor", "codex"]);
+    writeFileSync(join(target(), "SKILL.md"), "local changes");
+    mkdirSync(target(".cursor", "unrelated"));
+    writeFileSync(join(target(".cursor", "unrelated"), "SKILL.md"), "mine");
+    const results = run("uninstall");
+    expect(results.find(r => r.agent === "cursor" && r.name === skill)?.state).toBe("modified");
+    expect(results.filter(r => r.state === "uninstalled")).toHaveLength(5);
     expect(readFileSync(join(target(), "SKILL.md"), "utf8")).toBe("local changes");
-    expect(existsSync(join(base, ".cursor/skills/unrelated/SKILL.md"))).toBe(true);
+    expect(existsSync(target(".agents"))).toBe(false);
+    expect(existsSync(join(target(".cursor", "unrelated"), "SKILL.md"))).toBe(true);
+    const registry = JSON.parse(readFileSync(registryPath(), "utf8"));
+    expect(registry.installations.map((i: { name: string }) => i.name)).toEqual([skill]);
   });
-  it("does not adopt unmanaged skills, including identical copies", () => {
-    mkdirSync(target(), { recursive: true });
-    cpSync(join(packageRoot, "agent-plugin/skills", skill), target(), { recursive: true });
-    expect(run("install", ["cursor"]).find(r => r.name === skill)?.state).toBe("unmanaged");
-    run("uninstall");
-    expect(existsSync(join(target(), "SKILL.md"))).toBe(true);
-  });
-  it("repairs missing installations and preserves partial deletions", () => {
-    run("install", ["cursor"]);
-    rmSync(target(), { recursive: true });
-    expect(run("status", ["cursor"])[0].state).toBe("missing");
-    expect(run("update")[0].state).toBe("updated");
-    rmSync(join(target(), "SKILL.md"));
-    expect(run("update").find(r => r.name === skill)?.state).toBe("modified");
+  it("limits uninstall to the selected agent", () => {
+    legacyInstall(["cursor", "codex"]);
+    expect(run("uninstall", ["codex"]).every(r => r.state === "uninstalled")).toBe(true);
+    expect(run("status").every(r => r.agent === "cursor" && r.state === "managed")).toBe(true);
   });
   it("refuses directory links without changing their targets", () => {
-    const external = join(scratch, "external"); mkdirSync(external);
-    mkdirSync(join(base, ".cursor"));
+    legacyInstall(["cursor"]);
+    const external = join(scratch, "external"); mkdirSync(join(external, skill), { recursive: true });
+    rmSync(join(base, ".cursor/skills"), { recursive: true });
     symlinkSync(external, join(base, ".cursor/skills"), process.platform === "win32" ? "junction" : "dir");
-    expect(run("install", ["cursor"]).every(r => r.state === "conflict")).toBe(true);
-    expect(existsSync(join(external, skill))).toBe(false);
+    expect(run("uninstall").every(r => r.state === "conflict")).toBe(true);
+    expect(existsSync(join(external, skill))).toBe(true);
   });
-  it("serializes mutations and rejects malformed records", () => {
-    mkdirSync(join(base, ".botz", "mcp-swarm"), { recursive: true });
+  it("serializes removals and rejects malformed records", () => {
+    legacyInstall(["cursor"]);
     writeFileSync(join(base, ".botz/mcp-swarm/skill-installations.lock"), "");
-    expect(() => run("install", ["cursor"])).toThrow("Another skills operation");
+    expect(() => run("uninstall")).toThrow("Another skills operation");
     rmSync(join(base, ".botz/mcp-swarm/skill-installations.lock"));
-    writeFileSync(join(base, ".botz/mcp-swarm/skill-installations.json"), '{"schemaVersion":99}');
-    expect(() => run("install", ["cursor"])).toThrow();
+    writeFileSync(registryPath(), '{"schemaVersion":99}');
+    expect(() => run("uninstall")).toThrow();
     expect(existsSync(join(base, ".botz/mcp-swarm/skill-installations.lock"))).toBe(false);
   });
-  it("rejects installation without an agent before writing", async () => {
-    const program = new Command().exitOverride(); registerSkillsCommands(program, packageRoot);
-    await expect(program.parseAsync(["skills", "install"], { from: "user" })).rejects.toThrow("requires --agent");
+  it("points install and update to the zoto-agents marketplace", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const action of ["install", "update"]) {
+      const program = new Command().exitOverride(); registerSkillsCommands(program);
+      await program.parseAsync(["skills", action, "--agent", "cursor"], { from: "user" });
+      expect(process.exitCode).toBe(1);
+    }
+    expect(error).toHaveBeenCalledWith(marketplaceHelp);
+    expect(marketplaceHelp).toContain("zotoio/zoto-agents");
   });
 });

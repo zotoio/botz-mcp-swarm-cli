@@ -17,51 +17,33 @@ The CLI has two modes. Neither starts a server.
 
 ## Agent Skills (Cursor, Claude Code, Codex)
 
-Install the skills bundled with this CLI version:
+The MCP Swarm skills are published as the `botz-mcp-swarm` plugin in the
+[zoto-agents](https://github.com/zotoio/zoto-agents/tree/main/plugins/botz-mcp-swarm)
+marketplace, which is where they are maintained:
+
+```text
+Claude Code:  /plugin marketplace add zotoio/zoto-agents
+              /plugin install botz-mcp-swarm@zoto-agents
+Codex:        codex plugin marketplace add zotoio/zoto-agents
+Cursor:       add zotoio/zoto-agents as a plugin marketplace, then install botz-mcp-swarm
+```
+
+The skills run when invoked by name (for example `/mcp-swarm`) and install the
+`botz` host and this extension on first use if they are missing.
+
+CLI 0.6.x bundled the skills and copied them into `.cursor/skills`,
+`.claude/skills`, or `.agents/skills`. Remove those copies before installing the
+plugin so agents do not discover the skills twice:
 
 ```bash
-botz mcp-swarm skills install --agent cursor --agent claude-code --agent codex
 botz mcp-swarm skills status
-botz mcp-swarm skills update
-botz mcp-swarm skills uninstall --agent cursor
+botz mcp-swarm skills uninstall
 ```
 
-Standalone npm users can substitute `botz-mcp-swarm` for `botz mcp-swarm`.
-`install` requires at least one `--agent`; repeat the option for multiple clients.
-Other commands default to all managed clients, except `status`, which also shows
-available uninstalled skills. Every command supports `--json` and
-`--scope user|project` (default `user`).
-
-User installs go under `~/.cursor/skills`, `~/.claude/skills`, or
-`~/.agents/skills` for Cursor, Claude Code, or Codex respectively. Project installs
-use those directories at the nearest Git root, or the current directory outside
-Git. Run update/uninstall with the same scope used at installation. Reload the
-agent after changing skills. Cursor can also discover other clients' skill
-folders; select only the integrations you need if duplicates appear.
-
-The installer records versions and file hashes in
-`.botz/mcp-swarm/skill-installations.json` in the chosen home/project root. It updates only
-managed, unchanged skill directories. Edited, partially deleted, symlinked, or
-unmanaged directories are preserved and reported with exit 1; move conflicting
-folders aside and retry. A wholly missing managed directory is restored on
-update. Uninstall removes unchanged managed skills and preserves unrelated
-skills and agent settings. Successful commands exit 0; errors exit 1. An
-interrupted operation may leave a lock; its error identifies the lock to remove
-once no skills command is running.
-
-All commands work offline using bundled files. No scheduler or background update
-is installed. After upgrading the CLI, refresh the skills explicitly:
-
-```bash
-npm install -g @zotoio/botz-mcp-swarm-cli@latest
-botz-mcp-swarm skills update
-```
-
-The [agent-plugin directory](agent-plugin/README.md) contains the canonical
-[Agent Skills](https://agentskills.io/specification), portable and native plugin
-manifests, and marketplace entry templates. Copy the entire directory into a
-marketplace monorepo to distribute the same skills through a plugin manager.
-The plugin requires the CLI to be installed separately.
+Both accept `--agent`, `--scope user|project` (default `user`; use the scope of
+the original install), and `--json`. Uninstall removes only unchanged copies;
+edited ones are reported with exit 1 and left in place. `skills install` and
+`skills update` now print the marketplace instructions and exit 1.
 
 ## Standalone suites
 

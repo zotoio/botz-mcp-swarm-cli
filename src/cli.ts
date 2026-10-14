@@ -56,7 +56,7 @@ program
   .description("Standards-based MCP load testing — honest Pass/Fail, no silent green")
   .version(cliPackageVersion());
 
-registerSkillsCommands(program, join(dirname(fileURLToPath(import.meta.url)), ".."));
+registerSkillsCommands(program);
 registerRunCommand(program);
 registerUpgradeCommand(program);
 registerRunCommand(program, "soak");
