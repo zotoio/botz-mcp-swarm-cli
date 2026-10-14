@@ -93,6 +93,21 @@ describe("project cli", () => {
     expect(selectRunMode({}, false)).toBe("smoke");
   });
 
+  it("sizes the generated suite's ramp-down from the server's introspection latency", async () => {
+    const surface = (connectMs: number, rpcMs: number) => async () => ({
+      capabilities: ["tools"], tools: catalog, resources: [], resourceTemplates: [], prompts: [], latency: { connectMs, rpcMs },
+    });
+    const fast = await addStructuredProject(JSON.stringify(httpServer), { dataDir: await tempDir(), introspect: surface(20, 2) });
+    const slow = await addStructuredProject(JSON.stringify(httpServer), { dataDir: await tempDir(), introspect: surface(20_000, 5_000) });
+    const rampDown = async (projectId: string, dataDir: string) => {
+      const detail = await resolveProject(projectId, { dataDir });
+      return currentVersion(detail, resolveSuite(detail)).load.rampDownMs;
+    };
+    expect(await rampDown(fast.project.id, dirs.at(-2)!)).toBe(60_000);
+    expect(await rampDown(slow.project.id, dirs.at(-1)!)).toBeGreaterThan(60_000);
+    expect(slow.project.surface?.latency).toEqual({ connectMs: 20_000, rpcMs: 5_000 });
+  });
+
   it("creates a read-safe suite and edits it with the same versioned operations as the studio", async () => {
     const dataDir = await tempDir();
     const options = { dataDir, introspect: async () => catalog };

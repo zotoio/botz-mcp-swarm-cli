@@ -12,6 +12,11 @@
 - Remove the latency "A/B bench" and `benchDelta` from new optimize drafts and history, because a description change cannot affect server latency. To compare before and after, run `suite run --inference` tool evals.
 - `optimize --tool` is required (it previously defaulted to `echo`). An unknown tool exits 1 and lists the available tools.
 - The offline heuristic now reports concrete description gaps instead of appending the names of required arguments.
+- Standalone `project run` works: the servers added to the project are the run's target consent, instead of the swarm service's org allowlist, which rejected them. Previously every standalone project run failed, stored nothing, and printed `report_missing`.
+- A project run that fails before the runner produces a report now stores a failed report with the reason, so it appears in `project runs` and `project report`, and the reason is printed.
+- `project` commands exit non-zero on failure, including an unreachable server on `add`, `introspect`, or `show`, and an invalid `run --version`.
+- `project run` runs model evals only with `--inference`, matching `suite run`. `--version <n>` now selects the suite version instead of printing the CLI version.
+- Generated suites size their ramp-down from the latency measured while introspecting, so a slow server is not cut off mid-pass with `ramp-down deadline`. It is never below the 60-second default and at most 30 minutes. The measured latency is not stored in `suite.json`.
 
 ## 0.6.1
 

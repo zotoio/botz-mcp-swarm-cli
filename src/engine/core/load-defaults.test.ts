@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultLoadProfile, normalizeLoadProfile } from "./suite-model.js";
+import { blankSuiteNode, defaultLoadProfile, estimatePassMs, generatedLoadProfile, normalizeLoadProfile, type SuiteNode } from "./suite-model.js";
 import { parseManifest } from "../types/manifest.js";
 import { runManifest } from "./runner.js";
 import * as adapters from "../adapters/index.js";
@@ -31,5 +31,16 @@ describe("run defaults", () => {
     expect(calls).toBe(rampDownMs === 0 ? 3 : 4);
     expect(report.failReasons.join(" ").includes("ramp-down deadline")).toBe(rampDownMs === 0);
     expect(report.verdict).toBe(rampDownMs === 0 ? "fail" : "pass");
+  });
+  it("sizes a generated suite's ramp-down from introspection latency", () => {
+    const sampler = (method: SuiteNode["method"]): SuiteNode => ({ ...blankSuiteNode("sampler"), method });
+    const loop: SuiteNode = { ...blankSuiteNode("loop"), iterations: 3, children: [sampler("tools/call")] };
+    const off: SuiteNode = { ...sampler("tools/call"), enabled: false };
+    const nodes = [sampler("initialize"), sampler("tools/list"), loop, { ...blankSuiteNode("think"), thinkMs: 50 }, off];
+    expect(estimatePassMs(nodes, { connectMs: 1000, rpcMs: 100 }, 10)).toBe(1000 + 100 + 300 + 50 + 6 * 10);
+    expect(generatedLoadProfile(nodes)).toEqual(defaultLoadProfile());
+    expect(generatedLoadProfile(nodes, { connectMs: 20, rpcMs: 2 }).rampDownMs).toBe(60_000);
+    expect(generatedLoadProfile(nodes, { connectMs: 15_000, rpcMs: 4_000 }).rampDownMs).toBe(317_000);
+    expect(generatedLoadProfile(nodes, { connectMs: 600_000, rpcMs: 600_000 }).rampDownMs).toBe(30 * 60_000);
   });
 });

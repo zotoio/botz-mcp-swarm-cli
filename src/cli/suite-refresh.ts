@@ -50,7 +50,7 @@ export function refreshSuiteModel(suite: SuiteFile, surface: ServerSurface) {
   const destination = nodes.find((node) => node.type === "group")?.children ?? nodes;
   const teardown = destination.findIndex((node) => node.method === "teardown");
   destination.splice(teardown < 0 ? destination.length : teardown, 0, ...additions);
-  const updated = parseSuiteFile({ ...suite, surface, nodes, capturedAt: new Date().toISOString() });
+  const updated = parseSuiteFile({ ...suite, surface: { ...surface, latency: undefined }, nodes, capturedAt: new Date().toISOString() });
   return { suite: updated, changes: { ...changes, disabledNodes: disabled, addedNodes: additions.map((node) => node.id) } };
 }
 

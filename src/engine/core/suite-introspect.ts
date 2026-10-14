@@ -31,25 +31,37 @@ export async function introspectServer(
   target: Target,
   baseDir?: string,
 ): Promise<ServerSurface> {
+  const connectStarted = performance.now();
   const session = await createSession(target, undefined, baseDir);
+  const connectMs = performance.now() - connectStarted;
   try {
     const info = session.serverInfo();
     const capabilities = Object.keys(info.capabilities ?? {});
+    let rpcMs = 0;
+    const timed = (fetchPage: (cursor?: string) => Promise<McpCallResult>) => async (cursor?: string) => {
+      const started = performance.now();
+      try {
+        return await fetchPage(cursor);
+      } finally {
+        rpcMs = Math.max(rpcMs, performance.now() - started);
+      }
+    };
     const listedTools = capabilities.includes("tools")
-      ? await listAll("tools", (cursor) => session.listTools(cursor))
+      ? await listAll("tools", timed((cursor) => session.listTools(cursor)))
       : { items: [] };
     const resources = capabilities.includes("resources")
-      ? await listAll("resources", (cursor) => session.listResources(cursor))
+      ? await listAll("resources", timed((cursor) => session.listResources(cursor)))
       : { items: [] };
     const templates = capabilities.includes("resources")
-      ? await listAll("resourceTemplates", (cursor) => session.listResourceTemplates(cursor))
+      ? await listAll("resourceTemplates", timed((cursor) => session.listResourceTemplates(cursor)))
       : { items: [] };
     const prompts = capabilities.includes("prompts")
-      ? await listAll("prompts", (cursor) => session.listPrompts(cursor))
+      ? await listAll("prompts", timed((cursor) => session.listPrompts(cursor)))
       : { items: [] };
     return {
       serverName: info.name,
       serverVersion: info.version,
+      latency: { connectMs: Math.ceil(connectMs), rpcMs: Math.ceil(rpcMs) },
       capabilities,
       tools: listedTools.items.map(toTool).filter((tool): tool is ToolCatalogEntry => tool !== null),
       resources: (resources?.items ?? []).map(toResource).filter((item): item is ResourceCatalogEntry => item !== null),

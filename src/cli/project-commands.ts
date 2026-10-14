@@ -78,6 +78,8 @@ export function registerProjectCommands(program: Command): void {
       console.log(`Project ${project.id} for ${label}`);
       console.log(`Tools: ${project.catalog.length}${project.introspectError ? ` (${project.introspectError})` : ""}`);
       console.log(`Suite: ${project.suites[0]?.name ?? "none"} v${project.suites[0]?.currentVersion ?? 0}`);
+      // The project is kept so introspect can retry, but the server was not reached.
+      if (project.introspectError) process.exitCode = 1;
     });
 
   project
@@ -94,6 +96,10 @@ export function registerProjectCommands(program: Command): void {
       const added = await addProjectServer(ref, raw, { generateSuite: opts.suite !== false });
       console.log(`Server ${added.serverId} on ${added.projectId}`);
       if (added.suiteId) console.log(`Suite ${added.suiteId}`);
+      if (added.introspectError) {
+        console.log(`Introspect error: ${added.introspectError}`);
+        process.exitCode = 1;
+      }
     });
 
   project
@@ -145,7 +151,10 @@ export function registerProjectCommands(program: Command): void {
         : updated.servers?.[0]) ?? null;
       const catalog = server?.catalog ?? updated.catalog;
       console.log(`Tools: ${catalog.length}`);
-      if (server?.introspectError) console.log(`Introspect error: ${server.introspectError}`);
+      if (server?.introspectError) {
+        console.log(`Introspect error: ${server.introspectError}`);
+        process.exitCode = 1;
+      }
       for (const tool of catalog) {
         console.log(`  ${tool.name}${tool.writeLike ? " (write, disabled)" : ""}`);
       }
@@ -402,10 +411,16 @@ export function registerProjectCommands(program: Command): void {
     .argument("<project>")
     .option("--suite <id>")
     .option("--version <n>", "Stored version to run. Defaults to the latest")
-    .action(async (ref: string, opts: { suite?: string; version?: string }) => {
-      const version = opts.version ? Number.parseInt(opts.version, 10) : undefined;
+    .option("--inference", "Opt in to model evals for the suite's eval prompts", false)
+    .option("--no-inference", "Skip model evals (the default)")
+    .action(async (ref: string, opts: { suite?: string; version?: string; inference?: boolean }) => {
+      const version = opts.version === undefined ? undefined : Number(opts.version);
+      if (version !== undefined && !(Number.isInteger(version) && version > 0)) {
+        throw new Error(`invalid_version: ${opts.version}`);
+      }
       const report = await runProjectSuite(ref, opts.suite, (line) => console.log(line), {
-        version: version && version > 0 ? version : undefined,
+        version,
+        inference: opts.inference === true,
       });
       console.log(`\nVerdict: ${report.verdict.toUpperCase()}`);
       for (const item of report.toolEvals ?? []) {
