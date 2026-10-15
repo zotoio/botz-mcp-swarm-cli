@@ -6,7 +6,7 @@ import { runManifest } from "../engine/core/runner.js";
 import { writeReports } from "../engine/core/report.js";
 import type { LoadProfile } from "../engine/core/suite-model.js";
 import { addAuthOptions, authFlags, collect } from "./suite-commands.js";
-import type { AuthFlags } from "./suite-auth.js";
+import { anyAuthFlags, type AuthFlags } from "./suite-auth.js";
 import { runReportBaseName, mergeParamValues, readParamFile, runSavedSuite } from "./suite-file.js";
 import { displayPath, ensureBotzHome, resolveBotzHome, resolveSuiteArg, type BotzHome } from "./botz-home.js";
 import { withRunSignal } from "./run-signal.js";
@@ -89,8 +89,8 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         printRunResult(result.report, shownReports(result, botz, opts.output), opts.format);
         return;
       }
-      if (opts.url || opts.targetFile || opts.params || opts.set?.length || opts.iterations || opts.concurrency || opts.rampUpMs || opts.rampDownMs || opts.dwellMs || opts.jitterMs
-        || command.getOptionValueSource("inference") === "cli" || opts.header?.length || opts.headerEnv?.length || opts.bearerEnv || opts.env?.length || opts.envFrom?.length || opts.urlKeyAsBearer) {
+      if (opts.url || opts.targetFile || opts.target?.length || opts.params || opts.set?.length || opts.iterations || opts.concurrency || opts.rampUpMs || opts.rampDownMs || opts.dwellMs || opts.jitterMs
+        || command.getOptionValueSource("inference") === "cli" || opts.header?.length || opts.headerEnv?.length || anyAuthFlags({ bearerEnv: opts.bearerEnv }) || opts.env?.length || opts.envFrom?.length || opts.urlKeyAsBearer) {
         throw new Error("target overrides, load flags, parameters, inference, and credentials apply to --suite; edit the manifest for these settings");
       }
       const path = resolve(opts.manifest!);

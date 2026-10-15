@@ -236,6 +236,26 @@ export async function saveSuiteCredentials(
   });
 }
 
+/** Renames saved credential names from one prefix to another, for a server whose alias changed. */
+export async function renameSuiteCredentials(botz: BotzHome, suiteName: string, from: string, to: string): Promise<string[]> {
+  const renamed: string[] = [];
+  await withFileLock(join(botz.dir, "config.json.lock"), async () => {
+    const config = await readConfig(botz.dir);
+    const entry = config?.suites?.[suiteName];
+    if (!config || !entry?.credentials) return;
+    const credentials: Record<string, string> = {};
+    for (const [name, value] of Object.entries(entry.credentials)) {
+      const next = name.startsWith(from) ? `${to}${name.slice(from.length)}` : name;
+      if (next !== name) renamed.push(next);
+      credentials[next] = value;
+    }
+    if (renamed.length === 0) return;
+    const suites = { ...config.suites, [suiteName]: { ...entry, credentials } };
+    await atomicWrite(join(botz.dir, "config.json"), `${JSON.stringify({ ...config, suites }, null, 2)}\n`);
+  });
+  return renamed;
+}
+
 /** Expands a leading `~/` that a portable suite stores for a path under home. */
 export function expandHome(value: string, home: string): string {
   return value === "~" ? home : value.startsWith("~/") ? join(home, value.slice(2)) : value;

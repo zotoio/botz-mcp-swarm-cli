@@ -12,14 +12,63 @@ export interface AuthFlags {
   urlKeyAsBearer?: boolean;
   header?: string[];
   headerEnv?: string[];
-  bearerEnv?: string;
+  /** One value, or one per server when values carry an `alias=` prefix. */
+  bearerEnv?: string | string[];
   env?: string[];
   envFrom?: string[];
 }
 
+function hasAuth(flags: AuthFlags): boolean {
+  const bearer = Array.isArray(flags.bearerEnv) ? flags.bearerEnv.length > 0 : Boolean(flags.bearerEnv);
+  return bearer || (flags.header?.length ?? 0) > 0 || (flags.headerEnv?.length ?? 0) > 0
+    || (flags.env?.length ?? 0) > 0 || (flags.envFrom?.length ?? 0) > 0;
+}
+
+/**
+ * Splits credential flags by server. A value for another server starts with its alias:
+ * `--bearer-env jira=JIRA_TOKEN`, `--header jira:X-Api-Key: value`, `--header-env jira:X-Api-Key=ENV`,
+ * `--env slack:KEY=value`, `--env-from slack:KEY=ENV`. Unprefixed values are for the default server.
+ * Only aliases in `aliases` are recognised, so a header that happens to be named like a server is not taken.
+ */
+export function splitAuthFlags(flags: AuthFlags = {}, aliases: string[] = []): { main: AuthFlags; byServer: Record<string, AuthFlags> } {
+  const known = new Set(aliases);
+  const byServer: Record<string, AuthFlags> = {};
+  const main: AuthFlags = { urlKeyAsBearer: flags.urlKeyAsBearer };
+  const take = (raw: string, separator: "=" | ":"): { alias?: string; rest: string } => {
+    const at = raw.indexOf(separator);
+    if (at > 0) {
+      const alias = raw.slice(0, at);
+      if (known.has(alias)) return { alias, rest: raw.slice(at + 1).trimStart() };
+    }
+    return { rest: raw };
+  };
+  const push = (alias: string | undefined, key: "header" | "headerEnv" | "env" | "envFrom", value: string) => {
+    const into = alias ? (byServer[alias] ??= {}) : main;
+    (into[key] ??= []).push(value);
+  };
+  for (const raw of flags.header ?? []) { const item = take(raw, ":"); push(item.alias, "header", item.rest); }
+  for (const raw of flags.headerEnv ?? []) { const item = take(raw, ":"); push(item.alias, "headerEnv", item.rest); }
+  for (const raw of flags.env ?? []) { const item = take(raw, ":"); push(item.alias, "env", item.rest); }
+  for (const raw of flags.envFrom ?? []) { const item = take(raw, ":"); push(item.alias, "envFrom", item.rest); }
+  const bearers = flags.bearerEnv === undefined ? [] : Array.isArray(flags.bearerEnv) ? flags.bearerEnv : [flags.bearerEnv];
+  for (const raw of bearers) {
+    const item = take(raw, "=");
+    const into = item.alias ? (byServer[item.alias] ??= {}) : main;
+    if (into.bearerEnv) throw new Error(`provide one --bearer-env${item.alias ? ` for ${item.alias}` : " for the default server"}`);
+    into.bearerEnv = item.rest;
+  }
+  return { main, byServer };
+}
+
+/** True when any credential flag was given, for any server. */
+export function anyAuthFlags(flags: AuthFlags = {}): boolean {
+  return hasAuth(flags);
+}
+
 /** Merge CLI credentials onto a target. Env-backed values stay as ${env:NAME} until connect time. */
 export function applyAuthFlags(target: Target, flags: AuthFlags = {}): Target {
-  const headerFlags = (flags.header?.length ?? 0) > 0 || (flags.headerEnv?.length ?? 0) > 0 || Boolean(flags.bearerEnv);
+  const bearerFlag = Array.isArray(flags.bearerEnv) ? flags.bearerEnv.length > 0 : Boolean(flags.bearerEnv);
+  const headerFlags = (flags.header?.length ?? 0) > 0 || (flags.headerEnv?.length ?? 0) > 0 || bearerFlag;
   const envFlags = (flags.env?.length ?? 0) > 0 || (flags.envFrom?.length ?? 0) > 0;
   if (target.transport === "stdio") {
     if (headerFlags) throw new Error("headers apply to an HTTP target");
@@ -46,9 +95,11 @@ export function applyAuthFlags(target: Target, flags: AuthFlags = {}): Target {
     assertEnvName(parsed.value);
     headers = mergeHeaders(headers, { [parsed.name]: `\${env:${parsed.value}}` });
   }
-  if (flags.bearerEnv) {
-    assertEnvName(flags.bearerEnv);
-    headers = mergeHeaders(headers, { Authorization: `Bearer \${env:${flags.bearerEnv}}` });
+  const bearer = Array.isArray(flags.bearerEnv) ? flags.bearerEnv : flags.bearerEnv ? [flags.bearerEnv] : [];
+  if (bearer.length > 1) throw new Error("provide one --bearer-env per server");
+  if (bearer[0]) {
+    assertEnvName(bearer[0]);
+    headers = mergeHeaders(headers, { Authorization: `Bearer \${env:${bearer[0]}}` });
   }
   return Object.keys(headers).length > 0 ? { ...target, headers } : target;
 }
@@ -163,7 +214,7 @@ function decodeFormComponent(text: string): string {
  * (`SWARM_TARGET_HEADER_<KEY>` / `SWARM_TARGET_ENV_<KEY>`); the literal goes to `credentials[NAME]`.
  * Only an exact `${env:NAME}` or `<scheme> ${env:NAME}` value stays as stored.
  */
-export function splitLiteralCredentials(target: Target): { target: Target; credentials: Record<string, string> } {
+export function splitLiteralCredentials(target: Target, alias?: string): { target: Target; credentials: Record<string, string> } {
   const source = target.transport === "stdio" ? "env" : "header";
   const pairs = target.transport === "stdio" ? target.env : target.headers;
   const credentials: Record<string, string> = {};
@@ -177,7 +228,7 @@ export function splitLiteralCredentials(target: Target): { target: Target; crede
       out[key] = value;
       continue;
     }
-    const base = envRefName(source, key);
+    const base = envRefName(source, key, alias);
     let name = base;
     for (let n = 2; used.has(name); n++) name = `${base}_${n}`;
     used.add(name);

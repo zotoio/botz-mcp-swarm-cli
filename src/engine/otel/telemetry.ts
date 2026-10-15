@@ -143,10 +143,12 @@ function createActiveTelemetry(): TelemetryHandle {
   return {
     recordCall(obs, transport) {
       const result = obs.errorClass === "none" ? "ok" : obs.errorClass;
+      const server = obs.server ? { "mcp.server.alias": obs.server } : {};
       instruments.rpcDuration?.record(obs.latencyMs, {
         method: obs.method,
         transport,
         result,
+        ...server,
       });
       if (obs.method === "tools/call" && obs.toolName) {
         instruments.toolDuration?.record(obs.latencyMs, {
@@ -154,6 +156,7 @@ function createActiveTelemetry(): TelemetryHandle {
           transport,
           result,
           session_reuse: String(obs.sessionReuse),
+          ...server,
         });
         if (obs.errorClass !== "none") {
           instruments.toolErrors?.add(1, {
@@ -171,6 +174,7 @@ function createActiveTelemetry(): TelemetryHandle {
           attributes: stripSecretAttributes({
             "mcp.method": obs.method,
             "mcp.tool": obs.toolName ?? "",
+            ...server,
             Authorization: "Bearer should-not-export",
           }),
         })

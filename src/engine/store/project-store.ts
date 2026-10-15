@@ -27,6 +27,8 @@ import { tidyPositions } from "../core/suite-graph.js";
 import { forgetRunExports } from "../otel/local-collector.js";
 import type { RunReport } from "../types/run.js";
 import { swarmDataDir } from "../core/data-dirs.js";
+import { aliasFromName, DEFAULT_SERVER, nodesForServer, usedServers } from "../core/servers.js";
+import { suiteEnablesDestructive } from "../core/suite-compatibility.js";
 
 export interface ProjectIndexRow {
   id: string;
@@ -67,6 +69,8 @@ export interface SuiteVersionDocument {
   load: LoadProfile;
   /** Suite objectives. A tool call can replace any field it sets. */
   slo?: CallSlo;
+  /** Objectives over every tool call on one project server, by server id. */
+  serverSlo?: Record<string, CallSlo>;
   catalogFingerprint: string;
   /** Version this snapshot was saved from. Absent on version 1. */
   basedOn?: number;
@@ -241,6 +245,91 @@ export function normalizeProject(project: ProjectRecord): ProjectRecord {
 export function serverForSuite(project: ProjectRecord, suite: { serverId?: string }): ProjectServer {
   const servers = normalizeProject(project).servers ?? [];
   return servers.find((server) => server.id === suite.serverId) ?? servers[0]!;
+}
+
+/** Readable aliases for a project's servers, from their names, stable in project order: `GitHub Prod` is `github-prod`. */
+export function projectServerAliases(project: ProjectRecord): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const server of normalizeProject(project).servers ?? []) aliases.set(server.id, aliasFromName(server.name, aliases.values()));
+  return aliases;
+}
+
+/** Project server ids on a suite's steps, so a step may also name a server by its name or alias. */
+export function projectServerId(project: ProjectRecord, ref: string): string | null {
+  const servers = normalizeProject(project).servers ?? [];
+  const aliases = projectServerAliases(project);
+  return servers.find((server) => server.id === ref || server.name === ref || aliases.get(server.id) === ref)?.id ?? null;
+}
+
+export interface ProjectSuiteServers {
+  /** Alias of the suite's own server. `default` when the suite calls only that server. */
+  defaultAlias: string;
+  target: McpServerConfig;
+  /** Other servers the suite's enabled steps call, by alias. */
+  targets: Record<string, McpServerConfig>;
+  /** Steps with project server ids replaced by aliases, ready to compile. */
+  nodes: SuiteNode[];
+  serverSlos: Record<string, CallSlo>;
+  /** Host allowlist entries for every server the suite calls. */
+  allowlist: string[];
+  /** Tools of every server the suite calls; tagged with an alias when there is more than one. */
+  catalog: Array<{ server?: string; name: string; schemaHash: string; writeLike: boolean }>;
+  /** True when an enabled step calls a tool that is not called by default, on any server. */
+  destructive: boolean;
+  /** Project server ids by alias, for the servers the suite calls. */
+  serverIds: Record<string, string>;
+}
+
+/**
+ * The servers a project suite calls. Steps store project server ids; a run sees readable aliases. A suite
+ * whose steps call only its own server compiles exactly as a single-server suite did.
+ */
+export function projectSuiteServers(
+  project: ProjectRecord,
+  pointer: { serverId?: string },
+  version: { nodes: SuiteNode[]; serverSlo?: Record<string, CallSlo> },
+): ProjectSuiteServers {
+  const servers = normalizeProject(project).servers ?? [];
+  const main = serverForSuite(project, pointer);
+  const byId = new Map(servers.map((server) => [server.id, server]));
+  const walk = (list: SuiteNode[]) => {
+    for (const node of list) {
+      if (node.server !== undefined && !byId.has(node.server)) throw new Error(`server_not_found: ${node.server}`);
+      if (node.children) walk(node.children);
+    }
+  };
+  walk(version.nodes);
+  const used = usedServers(version.nodes, main.id);
+  const multi = [...used].some((id) => id !== main.id);
+  const aliases = multi ? projectServerAliases(project) : new Map([[main.id, DEFAULT_SERVER]]);
+  const aliasOf = (id: string) => aliases.get(id) ?? id;
+  const translate = (list: SuiteNode[]): SuiteNode[] => list.map((node) => {
+    const { server, ...rest } = node;
+    const next = server === undefined ? rest : server === main.id ? rest : { ...rest, server: aliasOf(server) };
+    return node.children ? { ...next, children: translate(node.children) } : next;
+  });
+  const calls = [main.id, ...[...used].filter((id) => id !== main.id)];
+  const defaultAlias = aliasOf(main.id);
+  const targets = Object.fromEntries(calls.filter((id) => id !== main.id).map((id) => [aliasOf(id), byId.get(id)!.target]));
+  const serverSlos = Object.fromEntries(Object.entries(version.serverSlo ?? {})
+    .filter(([id]) => calls.includes(id))
+    .map(([id, slo]) => [aliasOf(id), slo]));
+  return {
+    defaultAlias,
+    target: main.target,
+    targets,
+    nodes: translate(version.nodes),
+    serverSlos,
+    allowlist: [...new Set(calls.flatMap((id) => projectAllowlistHosts(byId.get(id)!.target)))],
+    catalog: calls.flatMap((id) => byId.get(id)!.catalog.map((tool) => ({
+      ...(multi ? { server: aliasOf(id) } : {}),
+      name: tool.name,
+      schemaHash: tool.schemaHash,
+      writeLike: tool.writeLike,
+    }))),
+    destructive: calls.some((id) => suiteEnablesDestructive(nodesForServer(version.nodes, id, main.id), byId.get(id)!.catalog)),
+    serverIds: Object.fromEntries(calls.map((id) => [aliasOf(id), id])),
+  };
 }
 
 async function upsertIndex(project: ProjectRecord, options?: ProjectStoreOptions): Promise<void> {
@@ -713,7 +802,7 @@ function withStoredSuite(doc: SuiteVersionDocument): SuiteVersionDocument {
 export async function saveSuiteVersion(
   projectId: string,
   suiteId: string,
-  input: { name?: string; nodes: SuiteNode[]; load: LoadProfile; basedOn?: number; slo?: CallSlo | null },
+  input: { name?: string; nodes: SuiteNode[]; load: LoadProfile; basedOn?: number; slo?: CallSlo | null; serverSlo?: Record<string, CallSlo> | null },
   options?: ProjectStoreOptions,
 ): Promise<SuiteVersionDocument | null> {
   const project = await loadRecord(projectId, options);
@@ -727,10 +816,13 @@ export async function saveSuiteVersion(
     ? requestedParent!
     : suite.currentVersion;
   suite.basedOn = { ...suite.basedOn, [String(version)]: basedOn };
-  const parent = input.slo === undefined
+  const parent = input.slo === undefined || input.serverSlo === undefined
     ? await loadSuiteVersion(projectId, suiteId, basedOn, options)
     : null;
   const slo = input.slo === undefined ? parent?.slo : normalizeCallSlo(input.slo);
+  const serverSlo = input.serverSlo === undefined ? parent?.serverSlo : Object.fromEntries(Object.entries(input.serverSlo ?? {})
+    .map(([id, value]) => [id, normalizeCallSlo(value)] as const)
+    .filter((entry): entry is readonly [string, CallSlo] => entry[1] !== undefined));
   const doc: SuiteVersionDocument = {
     version,
     createdAt: new Date().toISOString(),
@@ -738,6 +830,7 @@ export async function saveSuiteVersion(
     nodes: input.nodes,
     load: input.load,
     ...(slo ? { slo } : {}),
+    ...(serverSlo && Object.keys(serverSlo).length > 0 ? { serverSlo } : {}),
     catalogFingerprint: catalogFingerprint(server.catalog),
     basedOn,
   };

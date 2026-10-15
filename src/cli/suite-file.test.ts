@@ -318,7 +318,7 @@ it("rejects unsupported versions, malformed nested nodes, and duplicate IDs befo
   const valid = { kind: "botz-suite", name: "test", target: { transport: "stdio", command: "node" },
     surface: surface(), nodes: [{ id: "a", type: "sampler", enabled: true, method: "ping" }], params: {}, load: {} };
   expect(parseSuiteFile(valid).schemaVersion).toBe(1);
-  expect(() => parseSuiteFile({ ...valid, schemaVersion: 2 })).toThrow(/schemaVersion/);
+  expect(() => parseSuiteFile({ ...valid, schemaVersion: 3 })).toThrow(/schemaVersion/);
   expect(() => parseSuiteFile({ ...valid, nodes: [{ id: "g", type: "group", enabled: true, children: [null] }] })).toThrow();
   expect(() => parseSuiteFile({ ...valid, nodes: [...valid.nodes, ...valid.nodes] })).toThrow(/duplicate node id/);
 });
