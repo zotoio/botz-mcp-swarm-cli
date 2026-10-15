@@ -1,4 +1,4 @@
-import { SuiteInputSchema, SuiteLoadSchema } from "./suite-schema.js";
+import { SuiteInputSchema, SuiteLoadSchema, SuiteV2Schema } from "./suite-schema.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { atomicWrite, withFileLock } from "./file-store.js";
@@ -11,6 +11,7 @@ import {
   formatAuth,
   moveUrlCredentials,
   resolveTargetSecrets,
+  splitAuthFlags,
   splitLiteralCredentials,
   type AuthFlags,
 } from "./suite-auth.js";
@@ -50,6 +51,17 @@ import { applyToolEvalVerdict, evaluateSuiteTools, generateToolTestData } from "
 import { inferenceSecretValues } from "../engine/core/inference-model.js";
 import { TargetSchema, type Manifest, type Target } from "../engine/types/manifest.js";
 import type { RunReport } from "../engine/types/run.js";
+import { normalizeCallSlo, type CallSlo } from "../engine/core/call-slo.js";
+import {
+  assertServerAlias,
+  crossServerFlows,
+  DEFAULT_SERVER,
+  formatCrossServerFlows,
+  nodesForServer,
+  resolveNodeServers,
+  serverIssues,
+  usedServers,
+} from "../engine/core/servers.js";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const TOKEN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
@@ -60,9 +72,18 @@ export interface SuiteParam {
   usedBy: string[];
 }
 
+/** One server of a suite: where it is and what it offered when captured. */
+export interface SuiteServer {
+  target: Target;
+  surface: ServerSurface;
+  capturedAt?: string;
+  /** Objectives over every tool call on this server. */
+  slo?: CallSlo;
+}
+
 export interface SuiteFile {
-  /** Unversioned files are read as legacy version 1. */
-  schemaVersion?: 1;
+  /** Unversioned files are read as legacy version 1. Version 2 holds more than one server. */
+  schemaVersion?: 1 | 2;
   /** Stable credential identity; legacy suites use their name. */
   id?: string;
   /** Outside a repo, cwd is relative to the suite directory. */
@@ -70,12 +91,75 @@ export interface SuiteFile {
   kind: "botz-suite";
   capturedAt: string;
   name: string;
+  /** The default server's target. Steps without `server` call it. */
   target: Target;
+  /** The default server's surface. */
   surface: ServerSurface;
+  /** Alias of the default server. Absent means `default`. */
+  defaultServer?: string;
+  /** The default server's objective, over every tool call on it. */
+  serverSlo?: CallSlo;
+  /** Servers other than the default, by alias. */
+  servers?: Record<string, SuiteServer>;
   nodes: SuiteNode[];
   load: LoadProfile;
   params: Record<string, SuiteParam>;
 }
+
+export function suiteDefaultAlias(suite: Pick<SuiteFile, "defaultServer">): string {
+  return suite.defaultServer ?? DEFAULT_SERVER;
+}
+
+/** Every server of a suite by alias, default first. */
+export function suiteServers(suite: SuiteFile): Record<string, SuiteServer> {
+  return {
+    [suiteDefaultAlias(suite)]: { target: suite.target, surface: suite.surface, ...(suite.serverSlo ? { slo: suite.serverSlo } : {}) },
+    ...(suite.servers ?? {}),
+  };
+}
+
+export function isMultiServer(suite: Pick<SuiteFile, "servers">): boolean {
+  return Object.keys(suite.servers ?? {}).length > 0;
+}
+
+/** Version 1 for one server called `default` with no server objective, version 2 otherwise. */
+export function suiteNeedsV2(suite: SuiteFile): boolean {
+  return isMultiServer(suite) || suiteDefaultAlias(suite) !== DEFAULT_SERVER || Boolean(suite.serverSlo);
+}
+
+/** The file form: version 1 keeps `target` and `surface` at the top, version 2 lists `servers`. */
+export function suiteToJson(suite: SuiteFile): Record<string, unknown> {
+  const { target, surface, defaultServer: _defaultServer, serverSlo: _serverSlo, servers: _servers, schemaVersion: _version, ...rest } = suite;
+  if (!suiteNeedsV2(suite)) {
+    return {
+      kind: "botz-suite",
+      schemaVersion: 1,
+      ...(rest.cwdBase ? { cwdBase: rest.cwdBase } : {}),
+      ...(rest.id ? { id: rest.id } : {}),
+      capturedAt: rest.capturedAt,
+      name: rest.name,
+      target,
+      surface,
+      nodes: rest.nodes,
+      load: rest.load,
+      params: rest.params,
+    };
+  }
+  return {
+    kind: "botz-suite",
+    schemaVersion: 2,
+    ...(rest.id ? { id: rest.id } : {}),
+    ...(rest.cwdBase ? { cwdBase: rest.cwdBase } : {}),
+    capturedAt: rest.capturedAt,
+    name: rest.name,
+    defaultServer: suiteDefaultAlias(suite),
+    servers: suiteServers(suite),
+    nodes: rest.nodes,
+    load: rest.load,
+    params: rest.params,
+  };
+}
+
 
 export interface SuiteRunResult {
   report: RunReport;
@@ -130,7 +214,9 @@ export function assertParamsReady(suite: SuiteFile, values: Record<string, strin
     .filter((key) => !Object.prototype.hasOwnProperty.call(values, key))
     .sort();
   if (missing.length > 0) throw new Error(`missing parameter: ${missing.join(", ")}`);
-  const unknown = [...suiteArgParams(suite.nodes)].filter((name) => !suite.params[name]).sort();
+  // Names an extractor sets are filled in during the run, not supplied as parameters.
+  const extracted = extractorVariables(suite.nodes);
+  const unknown = [...suiteArgParams(suite.nodes)].filter((name) => !suite.params[name] && !extracted.has(name)).sort();
   if (unknown.length > 0) throw new Error(`unknown parameter: ${unknown.join(", ")}`);
 }
 
@@ -170,20 +256,37 @@ export function mergeParamValues(
 }
 
 export function formatSuiteShow(suite: SuiteFile): string {
-  const target = suite.target.transport === "stdio"
-    ? `stdio ${suite.target.command}`
-    : `${suite.target.transport} ${suite.target.url}`;
-  const auth = formatAuth(suite.target);
-  const lines = [suite.name, `target: ${target}`];
-  if (auth.length > 0) lines.push("auth:", ...auth);
+  const describe = (target: Target) => target.transport === "stdio"
+    ? `stdio ${target.command}`
+    : `${target.transport} ${target.url}`;
+  const lines = [suite.name];
+  const multi = isMultiServer(suite);
+  const defaultAlias = suiteDefaultAlias(suite);
+  if (!multi && defaultAlias === DEFAULT_SERVER) {
+    lines.push(`target: ${describe(suite.target)}`);
+    const auth = formatAuth(suite.target);
+    if (auth.length > 0) lines.push("auth:", ...auth);
+  } else {
+    lines.push("servers:");
+    for (const [alias, server] of Object.entries(suiteServers(suite))) {
+      lines.push(`  ${alias}${alias === defaultAlias ? " (default)" : ""}: ${describe(server.target)}`);
+      for (const line of formatAuth(server.target)) lines.push(`  ${line}`);
+    }
+  }
   lines.push("", "steps:");
+  const servers = resolveNodeServers(suite.nodes, defaultAlias);
   const steps = enabledLabels(suite.nodes);
   if (steps.length === 0) lines.push("  (none)");
-  else for (const step of steps) lines.push(`  ${step}`);
+  else for (const step of steps) {
+    const alias = step.sampler ? servers.get(step.id) : undefined;
+    lines.push(`  ${multi && alias ? `[${alias}] ` : ""}${step.label}`);
+  }
   lines.push("", "parameters:");
   const names = Object.keys(suite.params).sort();
   if (names.length === 0) lines.push("  (none)");
   else for (const name of names) lines.push(`  ${name}`);
+  const flows = formatCrossServerFlows(crossServerFlows(suite.nodes, defaultAlias));
+  if (flows.length > 0) lines.push("", "Cross-server data flows", ...flows);
   return lines.join("\n");
 }
 
@@ -193,19 +296,77 @@ export function disabledToolNames(surface: ServerSurface): string[] {
 
 export function parseSuiteFile(raw: unknown): SuiteFile {
   if (!isRecord(raw) || raw.kind !== "botz-suite") throw new Error("not a botz suite");
-  if (raw.schemaVersion !== undefined && raw.schemaVersion !== 1) throw new Error("unsupported suite schemaVersion; upgrade the CLI");
+  if (raw.schemaVersion !== undefined && raw.schemaVersion !== 1 && raw.schemaVersion !== 2) throw new Error("unsupported suite schemaVersion; upgrade the CLI");
   if (raw.id !== undefined && (typeof raw.id !== "string" || !/^[a-zA-Z0-9-]+$/.test(raw.id))) throw new Error("invalid suite id");
+  const suite = raw.schemaVersion === 2 ? parseV2(raw) : parseV1(raw);
+  const surfaces = Object.fromEntries(Object.entries(suiteServers(suite)).map(([alias, server]) => [alias, server.surface]));
+  const problem = serverIssues(suite.nodes, surfaces, suiteDefaultAlias(suite)).find((issue) => !issue.warning && !issue.tool);
+  if (problem) throw new Error(`${problem.path}: ${problem.message}`);
+  return suite;
+}
+
+function parseV1(raw: Record<string, unknown>): SuiteFile {
   const validated = SuiteInputSchema.parse(raw);
   const target = TargetSchema.parse(raw.target);
   if (typeof raw.name !== "string" || raw.name.trim().length === 0) throw new Error("suite name is required");
   if (!Array.isArray(raw.nodes)) throw new Error("suite nodes are required");
   if (!isRecord(raw.params)) throw new Error("suite params are required");
-  if (!isRecord(raw.surface) || !Array.isArray(raw.surface.tools) || !Array.isArray(raw.surface.capabilities)) {
-    throw new Error("suite surface is invalid");
-  }
-  const capabilities: unknown[] = raw.surface.capabilities;
+  return {
+    ...suiteHeader(raw),
+    target,
+    surface: parseSurface(raw.surface),
+    nodes: validated.nodes,
+    load: normalizeLoadProfile(isRecord(raw.load) ? raw.load as Partial<LoadProfile> : {}),
+    params: parseParams(raw.params),
+  };
+}
+
+function parseV2(raw: Record<string, unknown>): SuiteFile {
+  const validated = SuiteV2Schema.parse(raw);
+  const defaultAlias = validated.defaultServer;
+  const servers = raw.servers as Record<string, Record<string, unknown>>;
+  const parsed = (alias: string): SuiteServer => {
+    const entry = validated.servers[alias]!;
+    const slo = normalizeCallSlo(entry.slo);
+    return {
+      target: TargetSchema.parse(entry.target),
+      surface: parseSurface(servers[alias]?.surface),
+      ...(entry.capturedAt ? { capturedAt: entry.capturedAt } : {}),
+      ...(slo ? { slo } : {}),
+    };
+  };
+  const main = parsed(defaultAlias);
+  const others = Object.keys(validated.servers).filter((alias) => alias !== defaultAlias);
+  return {
+    ...suiteHeader(raw),
+    schemaVersion: 2,
+    target: main.target,
+    surface: main.surface,
+    ...(defaultAlias !== DEFAULT_SERVER ? { defaultServer: defaultAlias } : {}),
+    ...(main.slo ? { serverSlo: main.slo } : {}),
+    ...(others.length > 0 ? { servers: Object.fromEntries(others.map((alias) => [alias, parsed(alias)])) } : {}),
+    nodes: validated.nodes,
+    load: normalizeLoadProfile(isRecord(raw.load) ? raw.load as Partial<LoadProfile> : {}),
+    params: parseParams(raw.params),
+  };
+}
+
+function suiteHeader(raw: Record<string, unknown>) {
+  if (typeof raw.name !== "string" || raw.name.trim().length === 0) throw new Error("suite name is required");
+  return {
+    kind: "botz-suite" as const,
+    schemaVersion: 1 as 1 | 2,
+    ...(raw.cwdBase === "suite" ? { cwdBase: "suite" as const } : {}),
+    ...(typeof raw.id === "string" ? { id: raw.id } : {}),
+    capturedAt: typeof raw.capturedAt === "string" ? raw.capturedAt : new Date().toISOString(),
+    name: raw.name.trim(),
+  };
+}
+
+function parseParams(raw: unknown): Record<string, SuiteParam> {
+  if (!isRecord(raw)) throw new Error("suite params are required");
   const params: Record<string, SuiteParam> = {};
-  for (const [key, value] of Object.entries(raw.params)) {
+  for (const [key, value] of Object.entries(raw)) {
     if (!isRecord(value) || typeof value.example !== "string" || !Array.isArray(value.usedBy)) {
       throw new Error(`parameter ${key} is invalid`);
     }
@@ -214,29 +375,24 @@ export function parseSuiteFile(raw: unknown): SuiteFile {
       usedBy: value.usedBy.filter((id): id is string => typeof id === "string"),
     };
   }
-  const surface = raw.surface;
+  return params;
+}
+
+function parseSurface(surface: unknown): ServerSurface {
+  if (!isRecord(surface) || !Array.isArray(surface.tools) || !Array.isArray(surface.capabilities)) {
+    throw new Error("suite surface is invalid");
+  }
+  const capabilities: unknown[] = surface.capabilities;
   return {
-    kind: "botz-suite",
-    schemaVersion: 1,
-    ...(raw.cwdBase === "suite" ? { cwdBase: "suite" as const } : {}),
-    ...(typeof raw.id === "string" ? { id: raw.id } : {}),
-    capturedAt: typeof raw.capturedAt === "string" ? raw.capturedAt : new Date().toISOString(),
-    name: raw.name.trim(),
-    target,
-    surface: {
-      serverName: typeof surface.serverName === "string" ? surface.serverName : undefined,
-      serverVersion: typeof surface.serverVersion === "string" ? surface.serverVersion : undefined,
-      capabilities: capabilities.filter((item): item is string => typeof item === "string"),
-      tools: surface.tools as ServerSurface["tools"],
-      resources: Array.isArray(surface.resources) ? surface.resources as ServerSurface["resources"] : [],
-      resourceTemplates: Array.isArray(surface.resourceTemplates)
-        ? surface.resourceTemplates as ServerSurface["resourceTemplates"]
-        : [],
-      prompts: Array.isArray(surface.prompts) ? surface.prompts as ServerSurface["prompts"] : [],
-    },
-    nodes: validated.nodes,
-    load: normalizeLoadProfile(isRecord(raw.load) ? raw.load as Partial<LoadProfile> : {}),
-    params,
+    serverName: typeof surface.serverName === "string" ? surface.serverName : undefined,
+    serverVersion: typeof surface.serverVersion === "string" ? surface.serverVersion : undefined,
+    capabilities: capabilities.filter((item): item is string => typeof item === "string"),
+    tools: surface.tools as ServerSurface["tools"],
+    resources: Array.isArray(surface.resources) ? surface.resources as ServerSurface["resources"] : [],
+    resourceTemplates: Array.isArray(surface.resourceTemplates)
+      ? surface.resourceTemplates as ServerSurface["resourceTemplates"]
+      : [],
+    prompts: Array.isArray(surface.prompts) ? surface.prompts as ServerSurface["prompts"] : [],
   };
 }
 
@@ -251,7 +407,7 @@ export async function writeSuiteDir(dir: string, suite: SuiteFile): Promise<void
   const examples: Record<string, string> = {};
   for (const [key, spec] of Object.entries(suite.params)) examples[key] = spec.example;
   await atomicWrite(join(dir, "params.example.json"), JSON.stringify(examples, null, 2), 0o644);
-  await atomicWrite(join(dir, "suite.json"), JSON.stringify(suite, null, 2), 0o644);
+  await atomicWrite(join(dir, "suite.json"), JSON.stringify(suiteToJson(suite), null, 2), 0o644);
 }
 
 export async function readParamFile(path: string): Promise<Record<string, unknown>> {
@@ -274,7 +430,10 @@ export async function captureSuite(input: {
   auth?: AuthFlags;
   /** Where literal credentials are kept. Required when the target carries a literal header or env value. */
   botz?: BotzHome;
+  /** Alias of the captured server. Defaults to `default`. */
+  alias?: string;
 }): Promise<SuiteFile & { savedCredentialNames: string[]; movedUrlParam?: string }> {
+  if (input.alias !== undefined) assertServerAlias(input.alias, "--alias");
   const assertWritable = () => {
     if (!input.force && (existsSync(join(input.outDir, "suite.json")) || existsSync(join(input.outDir, "params.example.json")))) {
       throw new Error("suite already exists; choose another name or pass --force to replace it");
@@ -322,6 +481,7 @@ export async function captureSuite(input: {
     target: portableStdio(referenced, { gitRoot, home, cwd }),
     // Latency differs on every capture; it only sizes the load profile below.
     surface: { ...surface, latency: undefined },
+    ...(input.alias && input.alias !== DEFAULT_SERVER ? { defaultServer: input.alias } : {}),
     nodes,
     load: captureLoadProfile(nodes, surface.latency),
     params,
@@ -359,29 +519,70 @@ export interface SuiteRunOptions {
     auth?: AuthFlags;
     /** Supplies literal credentials saved at capture time. The environment wins over them. */
     botz?: BotzHome;
+    /** Replaces the default server's target. */
     target?: Target;
+    /** Replaces the default server's URL. Refused on a multi-server suite. */
     url?: string;
+    /** Replaces servers by alias: a complete target, or a URL string for an HTTP server. */
+    targets?: Record<string, Target | string>;
     load?: Partial<LoadProfile>;
+}
+
+/** Prefixes an error with the server it concerns, when the suite has more than one. */
+function forServer<T>(alias: string, multi: boolean, run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    if (!multi || !(error instanceof Error)) throw error;
+    throw Object.assign(new Error(`server ${alias}: ${error.message}`, { cause: error }), { name: error.name });
+  }
 }
 
 /** Resolve the same paths, parameters, credentials, and load profile for run, doctor, and validation. */
 export async function resolveSuiteExecution(dir: string, options: Partial<SuiteRunOptions> & { resolveSecrets?: boolean } = {}) {
   const suite = await loadSuiteFile(dir);
-  const saved = !options.target && !options.url && options.botz ? await suiteCredentials(options.botz, suite.id ?? suite.name) : {};
+  const defaultAlias = suiteDefaultAlias(suite);
+  const all = suiteServers(suite);
+  const aliases = Object.keys(all);
+  const multi = aliases.length > 1;
+  const saved = options.botz ? await suiteCredentials(options.botz, suite.id ?? suite.name) : {};
   const home = options.botz?.home ?? homedir();
   const gitRoot = findGitRoot(dir) ?? options.botz?.repoRoot ?? findGitRoot(options.baseDir ?? process.cwd());
   if (options.target && options.url) throw new Error("provide --url or --target-file, not both");
-  if (options.url && suite.target.transport === "stdio") throw new Error("--url requires an HTTP suite; use --target-file to change transport");
-  // A replacement endpoint must receive explicitly supplied credentials, never the captured endpoint's secrets.
-  const selected = options.target ? TargetSchema.parse(options.target) : options.url
-    ? TargetSchema.parse({ transport: suite.target.transport, url: options.url }) : suite.target;
-  const resolvedTarget = options.target ? absoluteStdio(selected, options.baseDir ?? process.cwd(), home)
-    : runnableStdio(selected, suite.cwdBase === "suite" ? resolve(dir) : gitRoot, home);
-  const { target: keyless } = moveUrlCredentials(
-    applyAuthFlags(resolvedTarget, options.auth), options.auth?.urlKeyAsBearer,
-  );
-  assertNoUrlCredentials(keyless);
-  const target = options.resolveSecrets === false ? keyless : resolveTargetSecrets(keyless, { ...saved, ...process.env });
+  if (options.url && multi) throw new Error(`suite ${suite.name} has ${aliases.length} servers; use --target <alias>=<url>`);
+  const overrides: Record<string, Target> = {};
+  for (const [alias, value] of Object.entries(options.targets ?? {})) {
+    const server = all[alias];
+    if (!server) throw new Error(`--target: "${alias}" is not a server in suite ${suite.name}; servers: ${aliases.join(", ")}`);
+    if (typeof value === "string") {
+      if (server.target.transport === "stdio") throw new Error(`--target ${alias}=<url> requires an HTTP server; use --target-file to change transport`);
+      overrides[alias] = TargetSchema.parse({ transport: server.target.transport, url: value });
+    } else {
+      overrides[alias] = TargetSchema.parse(value);
+    }
+  }
+  if (options.target) overrides[defaultAlias] = TargetSchema.parse(options.target);
+  if (options.url) {
+    if (suite.target.transport === "stdio") throw new Error("--url requires an HTTP suite; use --target-file to change transport");
+    overrides[defaultAlias] = TargetSchema.parse({ transport: suite.target.transport, url: options.url });
+  }
+  const auth = splitAuthFlags(options.auth, aliases.filter((alias) => alias !== defaultAlias));
+  const root = suite.cwdBase === "suite" ? resolve(dir) : gitRoot;
+  const targets = new Map<string, Target>();
+  for (const alias of aliases) {
+    const server = all[alias]!;
+    const override = overrides[alias];
+    const flags = alias === defaultAlias ? auth.main : { urlKeyAsBearer: options.auth?.urlKeyAsBearer, ...auth.byServer[alias] };
+    targets.set(alias, forServer(alias, multi, () => {
+      // A replacement endpoint must receive explicitly supplied credentials, never the captured endpoint's secrets.
+      const resolvedTarget = override ? absoluteStdio(override, options.baseDir ?? process.cwd(), home)
+        : runnableStdio(server.target, root, home);
+      const { target: keyless } = moveUrlCredentials(applyAuthFlags(resolvedTarget, flags), flags.urlKeyAsBearer);
+      assertNoUrlCredentials(keyless);
+      return options.resolveSecrets === false ? keyless : resolveTargetSecrets(keyless, { ...(override ? {} : saved), ...process.env });
+    }));
+  }
+  const target = targets.get(defaultAlias)!;
   const params = await resolveSuiteParamValues(dir, suite, options.params);
   assertParamsReady(suite, params);
   const load = normalizeLoadProfile(SuiteLoadSchema.parse({
@@ -390,17 +591,23 @@ export async function resolveSuiteExecution(dir: string, options: Partial<SuiteR
     ...(options.iterations !== undefined ? { iterations: options.iterations } : {}),
     ...(options.concurrency !== undefined ? { maxConcurrency: options.concurrency } : {}),
   }));
+  const used = usedServers(suite.nodes, defaultAlias);
+  const others = Object.fromEntries([...targets].filter(([alias]) => alias !== defaultAlias && used.has(alias)));
+  const serverSlos = Object.fromEntries(Object.entries(all).flatMap(([alias, server]) => (server.slo ? [[alias, server.slo]] : [])));
   const manifest = compileSuite({
     name: suite.name,
     description: `Suite ${suite.name}`,
     target,
+    targets: others,
+    defaultServer: defaultAlias,
+    serverSlos,
     allowlist: [],
     nodes: suite.nodes,
     load,
   }) as unknown as Manifest;
-  const baseDir = (options.target ? options.baseDir ?? process.cwd() : undefined) ?? (suite.cwdBase === "suite" && target.transport === "stdio" ? target.cwd : gitRoot)
+  const baseDir = (overrides[defaultAlias] ? options.baseDir ?? process.cwd() : undefined) ?? (suite.cwdBase === "suite" && target.transport === "stdio" ? target.cwd : gitRoot)
     ?? (target.transport === "stdio" ? target.cwd : undefined) ?? options.baseDir ?? dir;
-  return { suite, saved, home, target, params, manifest, baseDir };
+  return { suite, saved: Object.keys(overrides).length === aliases.length ? {} : saved, home, target, targets, params, manifest, baseDir };
 }
 
 /**
@@ -411,7 +618,10 @@ export async function runSavedSuite(
   dir: string,
   options: SuiteRunOptions,
 ): Promise<SuiteRunResult> {
-  const { suite, saved, home, target, params, manifest, baseDir } = await resolveSuiteExecution(dir, options);
+  const { suite, saved, home, target, targets, params, manifest, baseDir } = await resolveSuiteExecution(dir, options);
+  const defaultAlias = suiteDefaultAlias(suite);
+  const all = suiteServers(suite);
+  const multi = isMultiServer(suite);
   let raw = await runManifest({
     manifest,
     mode: "load",
@@ -423,11 +633,20 @@ export async function runSavedSuite(
   });
   if (options.inference === true && !options.signal?.aborted && hasEnabledTool(suite.nodes)) {
     try {
-      const evals = await evaluateSuiteTools({ nodes: suite.nodes, target, baseDir,
-        fetchImpl: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([
-          ...(init?.signal ? [init.signal] : []), ...(options.signal ? [options.signal] : []),
-        ]) }),
-      });
+      const fetchImpl: typeof fetch = (url, init) => fetch(url, { ...init, signal: AbortSignal.any([
+        ...(init?.signal ? [init.signal] : []), ...(options.signal ? [options.signal] : []),
+      ]) });
+      const runs = [];
+      // Each tool's evals run against its own server.
+      for (const alias of Object.keys(all)) {
+        const nodes = multi ? nodesForServer(suite.nodes, alias, defaultAlias) : suite.nodes;
+        if (!hasEnabledTool(nodes)) continue;
+        const result = await evaluateSuiteTools({ nodes, target: targets.get(alias)!, baseDir, fetchImpl });
+        if (result) runs.push(result);
+      }
+      const evals = runs.length > 0
+        ? { cases: runs.flatMap((run) => run.cases), failReasons: runs.flatMap((run) => run.failReasons) }
+        : undefined;
       raw = applyToolEvalVerdict(raw, evals ?? { cases: [], failReasons: ["inference requested but suite has no enabled tool evals"] });
     } catch {
       raw = applyToolEvalVerdict(raw, { cases: [], failReasons: ["tool inference failed; check the model endpoint and configuration"] });
@@ -438,17 +657,27 @@ export async function runSavedSuite(
     name: raw.server?.name ?? suite.surface.serverName,
     version: raw.server?.version ?? suite.surface.serverVersion,
   });
-  raw.catalog = suite.surface.tools.map((tool) => ({
+  // A server's name and version fall back to what it offered when captured.
+  raw.servers = raw.servers?.map((item) => {
+    const surface = all[item.alias]?.surface;
+    return {
+      ...item,
+      ...(item.name ?? surface?.serverName ? { name: item.name ?? surface?.serverName } : {}),
+      ...(item.version ?? surface?.serverVersion ? { version: item.version ?? surface?.serverVersion } : {}),
+    };
+  });
+  raw.catalog = Object.entries(all).flatMap(([alias, server]) => server.surface.tools.map((tool) => ({
+    ...(multi ? { server: alias } : {}),
     name: tool.name,
     schemaHash: tool.schemaHash,
     writeLike: tool.writeLike,
-  }));
+  })));
   const scrub = makeReportScrubber({
     ...defaultScrubContext(options.botz?.cwd ?? process.cwd()),
     home,
-    secrets: [...targetSecretValues(target), ...Object.values(saved),
+    secrets: [...[...targets.values()].flatMap((item) => targetSecretValues(item)), ...Object.values(saved),
       ...inferenceSecretValues(), process.env.TYPESAFE_API_KEY ?? ""],
-    commands: stdioCommandPaths(target, baseDir),
+    commands: [...targets.values()].flatMap((item) => stdioCommandPaths(item, baseDir)),
   });
   const report = scrubReport(raw, scrub);
   const written = options.reportBaseName
@@ -476,7 +705,7 @@ async function writeNamedReports(
 }
 
 /** Typed stdio command and file args made absolute against the cwd, so introspection and storage agree. */
-function absoluteStdio(target: Target, cwd: string, home: string): Target {
+export function absoluteStdio(target: Target, cwd: string, home: string): Target {
   if (target.transport !== "stdio") return target;
   const absolute = (value: string, bareFiles: boolean) =>
     isPathLike(value, cwd, bareFiles) ? resolve(cwd, expandHome(value, home)) : value;
@@ -489,7 +718,7 @@ function absoluteStdio(target: Target, cwd: string, home: string): Target {
 }
 
 /** Absolute stdio paths stored relative to the git root inside a repo, else as `~/...` under home. */
-function portableStdio(target: Target, roots: PathRoots): Target {
+export function portableStdio(target: Target, roots: PathRoots): Target {
   if (target.transport !== "stdio") return target;
   const portable = (value: string) => (isAbsolute(value) ? portablePath(value, roots) : value);
   return {
@@ -501,7 +730,7 @@ function portableStdio(target: Target, roots: PathRoots): Target {
 }
 
 /** Stored stdio paths back to absolute: `~/...` under home, relative paths against the git root. */
-function runnableStdio(target: Target, gitRoot: string | null, home: string): Target {
+export function runnableStdio(target: Target, gitRoot: string | null, home: string): Target {
   if (target.transport !== "stdio") return target;
   const runnable = (value: string, bareFiles: boolean) => {
     const expanded = expandHome(value, home);
@@ -620,6 +849,15 @@ function suiteArgParams(nodes: SuiteNode[], found: Set<string> = new Set()): Set
   return found;
 }
 
+function extractorVariables(nodes: SuiteNode[], found: Set<string> = new Set()): Set<string> {
+  for (const node of nodes) {
+    if (node.enabled === false) continue;
+    if (node.type === "extractor" && node.variable?.trim()) found.add(node.variable.trim());
+    if (node.children) extractorVariables(node.children, found);
+  }
+  return found;
+}
+
 function collectTokens(value: unknown, found: Set<string>): void {
   if (typeof value === "string") {
     for (const match of value.matchAll(TOKEN)) {
@@ -637,14 +875,14 @@ function collectTokens(value: unknown, found: Set<string>): void {
   }
 }
 
-function enabledLabels(nodes: SuiteNode[], out: string[] = []): string[] {
+function enabledLabels(nodes: SuiteNode[], out: Array<{ id: string; label: string; sampler: boolean }> = []) {
   for (const node of nodes) {
     if (!node.enabled) continue;
     if (node.type === "group" || node.type === "loop") {
       if (node.children) enabledLabels(node.children, out);
       continue;
     }
-    out.push(node.label ?? node.method ?? node.type);
+    out.push({ id: node.id, label: node.label ?? node.tool ?? node.prompt ?? node.variable ?? node.method ?? node.type, sampler: node.type === "sampler" });
   }
   return out;
 }

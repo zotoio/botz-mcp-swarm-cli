@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { registerSkillsCommands } from "./cli/skills.js";
 import { registerRefreshCommand } from "./cli/suite-refresh.js";
+import { registerServerCommands } from "./cli/suite-servers.js";
 import { registerRunCommand } from "./cli/run-commands.js";
 import { registerDiagnostics } from "./cli/diagnostics.js";
 import { registerUpgradeCommand } from "./cli/upgrade.js";
@@ -262,6 +263,7 @@ const suite = program.command("suite").description("Capture, inspect, refresh, a
 registerSuiteCommands(suite);
 registerRunCommand(suite, "run", true);
 registerRefreshCommand(suite);
+registerServerCommands(suite);
 registerSuiteCommands(program); // Backward-compatible capture/show aliases.
 registerDiagnostics(program, suite);
 registerProjectCommands(program);

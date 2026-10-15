@@ -1,5 +1,20 @@
 # Release notes
 
+## Unreleased
+
+- Suites can call several MCP servers in one flow. A suite lists its servers by alias (`schemaVersion: 2`); a step's `server` names the server it calls, and frames pass theirs to their children. Single-server suites stay version 1 and behave as before. See [docs/multi-server-suites.md](docs/multi-server-suites.md).
+- Add `suite server add|list|remove|rename|default|slo`, and `capture --alias`.
+- Each server has its own session pool. A virtual user checks out a server's session when its first step on that server runs and holds it for the pass.
+- Extractor values pass between servers. `required: true` on an extractor fails it when the value is missing and skips the steps that use it, which are counted as skipped rather than as errors.
+- `run`, `validate`, and `doctor` take `--target <alias>=<url>`; `--target-file` accepts `{ "servers": { ... } }`. Credential flags take an `alias=` or `alias:` prefix for another server. `--url` on a multi-server suite exits 2 and names `--target`.
+- Another server's saved credentials use `SWARM_TARGET_<ALIAS>_HEADER_<KEY>` / `SWARM_TARGET_<ALIAS>_ENV_<KEY>`; the default server keeps the existing names.
+- `suite validate` checks server references, that variables are set before use, and duplicate extractor variables, and lists cross-server data flows. `suite refresh` refreshes every server or one with `--server`.
+- Per-server objectives: `servers.<alias>.slo` in suites, `assertions.servers` in manifests, and `project suite server-slo`.
+- Reports add `servers`, `flow`, and `variables`, tag tool, RPC, and step rows with their server on multi-server runs, and never record extracted values (`redactedArgs` shows `${name}`). Markdown adds Flow, Servers, Steps, and Variables sections; JUnit uses the server alias as `classname`. `compare` matches rows by server and tool.
+- Manifests accept `targets`, `defaultTarget`, and a step `server`. Project suites store a project server id on steps (`add-node`/`set-node --server`), and worker assignments carry `targets`.
+- Fix: a standalone suite step that used a variable set by an extractor failed with `unknown parameter`.
+- `suite show` labels unlabelled steps with their tool, prompt, or variable instead of their method.
+
 ## 0.7.0
 
 - Move the Agent Skills to the `botz-mcp-swarm` plugin in [zotoio/zoto-agents](https://github.com/zotoio/zoto-agents), which publishes it for Cursor, Claude Code, and Codex. The package no longer bundles `agent-plugin/`.

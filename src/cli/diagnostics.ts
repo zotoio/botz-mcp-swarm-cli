@@ -1,10 +1,11 @@
 import { constants } from "node:fs";
 import { access, readdir } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Command } from "commander";
 import { resolveInferenceConfig } from "../engine/core/inference-model.js";
 import { resolveBotzHome, resolveSuiteArg, suiteSearchDirs } from "./botz-home.js";
-import { loadSuiteFile, resolveSuiteExecution } from "./suite-file.js";
+import { isMultiServer, loadSuiteFile, resolveSuiteExecution, suiteDefaultAlias, suiteServers } from "./suite-file.js";
+import { crossServerFlows, DEFAULT_SERVER, formatCrossServerFlows, serverIssues, variableIssues } from "../engine/core/servers.js";
 import { diagnosticError } from "./diagnostic-error.js";
 import { addTargetOptions, targetOptions, type TargetOptions } from "./target-options.js";
 import { addAuthOptions, authFlags } from "./suite-commands.js";
@@ -60,7 +61,31 @@ export function registerDiagnostics(program: Command, suite: Command): void {
         const { suite: data } = await resolveSuiteExecution(resolveSuiteArg(opts.suite, botz), {
           botz, ...await targetOptions(opts), resolveSecrets: false,
         });
-        output({ valid: true, schemaVersion: data.schemaVersion ?? 1 }, "Suite valid (offline).", opts.json);
+        const defaultAlias = suiteDefaultAlias(data);
+        const surfaces = Object.fromEntries(Object.entries(suiteServers(data)).map(([alias, server]) => [alias, server.surface]));
+        const multi = Object.keys(surfaces).length > 1;
+        const issues = serverIssues(data.nodes, surfaces, defaultAlias);
+        // A tool missing from its server's surface is an error once steps can call different servers.
+        const warnings = issues.filter((issue) => issue.warning || (issue.tool && !multi));
+        const errors = [...issues.filter((issue) => issue.tool && multi), ...variableIssues(data.nodes, Object.keys(data.params))];
+        const flows = crossServerFlows(data.nodes, defaultAlias);
+        if (errors.length > 0) {
+          output({ valid: false, code: "invalid_suite", detail: `${errors[0]!.path}: ${errors[0]!.message}`, issues: errors },
+            ["Suite invalid:", ...errors.map((issue) => `  ${issue.path}: ${issue.message}`)].join("\n"), opts.json);
+          process.exitCode = 1;
+          return;
+        }
+        output({
+          valid: true,
+          schemaVersion: data.schemaVersion ?? 1,
+          ...(isMultiServer(data) || defaultAlias !== DEFAULT_SERVER ? { servers: Object.keys(surfaces), defaultServer: defaultAlias } : {}),
+          ...(warnings.length > 0 ? { warnings: warnings.map((issue) => `${issue.path}: ${issue.message}`) } : {}),
+          ...(flows.length > 0 ? { crossServerFlows: flows } : {}),
+        }, [
+          "Suite valid (offline).",
+          ...warnings.map((issue) => `Warning: ${issue.path}: ${issue.message}`),
+          ...(flows.length > 0 ? ["Cross-server data flows", ...formatCrossServerFlows(flows)] : []),
+        ].join("\n"), opts.json);
       } catch (error) {
         const diagnostic = diagnosticError(error);
         output({ valid: false, ...diagnostic }, `Suite invalid: ${diagnostic.detail}`, opts.json);
@@ -82,11 +107,16 @@ export function registerDiagnostics(program: Command, suite: Command): void {
       if (opts.suite) {
         try {
           const dir = resolveSuiteArg(opts.suite, botz);
-          const { target, baseDir } = await resolveSuiteExecution(dir, { botz, auth: authFlags(opts), ...await targetOptions(opts) });
+          const { targets, baseDir, suite } = await resolveSuiteExecution(dir, { botz, auth: authFlags(opts), ...await targetOptions(opts) });
           checks.push({ name: "suite", ok: true, detail: "schema, parameters, executable steps, and credentials resolved" });
-          if (target.transport === "stdio") {
+          const multi = isMultiServer(suite);
+          for (const [alias, target] of targets) {
+            if (target.transport !== "stdio") continue;
             const ok = await executable(target.command, target.cwd ?? baseDir);
-            checks.push({ name: "stdio", ok, detail: ok ? "stdio executable available" : "stdio executable missing; check target.command, target.cwd, and PATH" });
+            const where = multi ? `${alias}: ` : "";
+            checks.push({ name: multi ? `stdio ${alias}` : "stdio", ok, detail: ok ? `${where}stdio executable available`
+              : multi ? `${where}stdio executable ${basename(target.command)} missing; check its target.command, target.cwd, and PATH`
+              : "stdio executable missing; check target.command, target.cwd, and PATH" });
           }
         } catch (error) { checks.push({ name: "suite", ok: false, detail: diagnosticError(error).detail }); }
       }

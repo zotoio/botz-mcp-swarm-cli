@@ -135,8 +135,12 @@ export const ScenarioStepSchema = z.object({
     .object({
       variable: z.string().min(1),
       path: z.string(),
+      /** A missing or empty value fails the step; steps that wait on it are skipped for that pass. */
+      required: z.boolean().optional(),
     })
     .optional(),
+  /** Alias of the server this step calls: a key of `targets`. Absent means the default `target`. */
+  server: z.string().optional(),
   nodeId: z.string().optional(),
   label: z.string().optional(),
   /** Per-call wait. Set on suite steps that run an LLM eval. */
@@ -160,6 +164,12 @@ export const ScenarioSchema = z.object({
   iterations: z.number().int().positive().default(1),
 });
 
+export const ServerSloSchema = z.object({
+  maxP95Ms: z.number().positive().optional(),
+  maxP99Ms: z.number().positive().optional(),
+  maxErrorRate: z.number().min(0).max(1).optional(),
+});
+
 export const AssertionsSchema = z.object({
   maxErrorRate: z.number().min(0).max(1).default(0),
   maxP95LatencyMs: z.number().positive().optional(),
@@ -167,6 +177,8 @@ export const AssertionsSchema = z.object({
   requireScenarioOutcomes: z.boolean().default(true),
   /** Fail if negotiated protocolVersion differs from this value. */
   requireProtocolVersion: z.string().optional(),
+  /** Objectives judged over all tool calls on one server, by alias. */
+  servers: z.record(ServerSloSchema).optional(),
 });
 
 export const ProcessAssertionsSchema = z.object({
@@ -207,7 +219,12 @@ export const ManifestSchema = z.object({
    * 2025-11-25, capability-mismatch Fail honesty is on for required methods.
    */
   protocolVersion: z.string().optional(),
+  /** The default server. Steps without `server` call it. */
   target: TargetSchema,
+  /** Other servers, by alias. Each must pass the allowlist like `target`. */
+  targets: z.record(TargetSchema).optional(),
+  /** Alias that `target` stands for in reports and on steps. Defaults to `default`. */
+  defaultTarget: z.string().optional(),
   gateway: GatewayTargetSchema.optional(),
   allowlist: z.array(z.string()).min(1),
   sessionPool: SessionPoolSchema.default({}),
@@ -217,6 +234,24 @@ export const ManifestSchema = z.object({
   processAssertions: ProcessAssertionsSchema.optional(),
   soak: SoakSchema.optional(),
   load: LoadProfileSchema.optional(),
+}).superRefine((manifest, context) => {
+  const alias = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+  const defaultTarget = manifest.defaultTarget ?? "default";
+  if (!alias.test(defaultTarget)) context.addIssue({ code: "custom", path: ["defaultTarget"], message: `"${defaultTarget}" is not a valid alias` });
+  const known = new Set([defaultTarget, ...Object.keys(manifest.targets ?? {})]);
+  for (const name of Object.keys(manifest.targets ?? {})) {
+    if (!alias.test(name)) context.addIssue({ code: "custom", path: ["targets", name], message: `"${name}" is not a valid alias` });
+    if (name === defaultTarget) context.addIssue({ code: "custom", path: ["targets", name], message: `"${name}" is the default target; set it in target` });
+  }
+  if (known.size > 8) context.addIssue({ code: "custom", path: ["targets"], message: "a manifest may use at most 8 servers" });
+  manifest.scenarios.forEach((scenario, s) => scenario.steps.forEach((step, i) => {
+    if (step.server !== undefined && !known.has(step.server)) {
+      context.addIssue({ code: "custom", path: ["scenarios", s, "steps", i, "server"], message: `"${step.server}" is not a server` });
+    }
+  }));
+  for (const name of Object.keys(manifest.assertions.servers ?? {})) {
+    if (!known.has(name)) context.addIssue({ code: "custom", path: ["assertions", "servers", name], message: `"${name}" is not a server` });
+  }
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;

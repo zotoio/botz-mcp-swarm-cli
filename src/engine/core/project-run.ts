@@ -4,7 +4,7 @@ import type { Manifest, Target } from "../types/manifest.js";
 import type { RunProgressEvent, RunReport } from "../types/run.js";
 import type { CallSlo } from "./call-slo.js";
 import { compileSuite, type LoadProfile, type SuiteNode } from "./suite-model.js";
-import { suiteEnablesDestructive } from "./suite-compatibility.js";
+import { DEFAULT_SERVER, nodesForServer } from "./servers.js";
 import { applyToolEvalVerdict, evaluateSuiteTools } from "./tool-evals.js";
 import { runManifest } from "./runner.js";
 import { tailRunLog } from "./run-log.js";
@@ -13,9 +13,9 @@ import {
   getProject,
   loadProjectRun,
   loadSuiteVersion,
-  projectAllowlistHosts,
   saveProjectRun,
-  serverForSuite,
+  projectSuiteServers,
+  type ProjectSuiteServers,
   type SuiteDispatch,
 } from "../store/project-store.js";
 
@@ -59,19 +59,23 @@ export async function startSuiteRun(input: {
   if (!pointer) return { ok: false, error: "suite_not_found" };
   if (!version) return { ok: false, error: input.version ? "suite_version_not_found" : "suite_not_found" };
   if (pointer.enabled === false) return { ok: false, error: "suite_disabled" };
-  const server = serverForSuite(project, pointer);
   const dispatch: SuiteDispatch = input.dispatch ?? pointer.dispatch ?? "local";
   if (dispatch === "worker" && !input.workerDispatch) return { ok: false, error: "worker_dispatch_unavailable" };
 
   let manifest: Manifest;
+  let servers: ProjectSuiteServers;
   try {
+    servers = projectSuiteServers(project, pointer, version);
     manifest = compileProjectSuite({
       projectName: project.name,
       suiteName: version.name,
       version: version.version,
-      target: server.target,
-      allowlist: projectAllowlistHosts(server.target),
-      nodes: version.nodes,
+      target: servers.target,
+      targets: servers.targets,
+      defaultServer: servers.defaultAlias,
+      serverSlos: servers.serverSlos,
+      allowlist: servers.allowlist,
+      nodes: servers.nodes,
       load: version.load,
       slo: version.slo,
     });
@@ -94,7 +98,7 @@ export async function startSuiteRun(input: {
       projectId: project.id,
       suiteId: input.suiteId,
       version: version.version,
-      destructive: suiteEnablesDestructive(version.nodes, server.catalog),
+      destructive: servers.destructive,
       load: version.load,
       principal: input.principal,
       dataDir: input.dataDir,
@@ -108,12 +112,8 @@ export async function startSuiteRun(input: {
     projectId: project.id,
     suiteId: input.suiteId,
     suiteVersion: version.version,
-    nodes: version.nodes,
-    catalog: server.catalog.map((tool) => ({
-      name: tool.name,
-      schemaHash: tool.schemaHash,
-      writeLike: tool.writeLike,
-    })),
+    nodes: servers.nodes,
+    catalog: servers.catalog,
     principal: input.principal,
     orgTargetAllowlist: input.orgTargetAllowlist,
     orgGatewayAllowlist: input.orgGatewayAllowlist,
@@ -228,6 +228,10 @@ export function compileProjectSuite(input: {
   suiteName: string;
   version: number;
   target: Target;
+  /** Other servers the steps call, by alias. Step `server` fields hold these aliases. */
+  targets?: Record<string, Target>;
+  defaultServer?: string;
+  serverSlos?: Record<string, CallSlo>;
   allowlist: string[];
   nodes: SuiteNode[];
   load: Partial<LoadProfile>;
@@ -237,6 +241,9 @@ export function compileProjectSuite(input: {
     name: input.suiteName,
     description: `Project ${input.projectName} suite ${input.suiteName} v${input.version}`,
     target: input.target,
+    targets: input.targets,
+    defaultServer: input.defaultServer,
+    serverSlos: input.serverSlos,
     allowlist: input.allowlist,
     nodes: input.nodes,
     load: input.load,
@@ -272,16 +279,27 @@ export async function runCompiledSuite(input: {
   });
   report.catalog = input.catalog;
   if (input.signal?.aborted || input.evals === false) return report;
-  return attachSuiteEvals(report, input.nodes, input.manifest.target);
+  return attachSuiteEvals(report, input.nodes, input.manifest);
 }
 
+/** Each tool's evals run against its own server. `nodes` carry aliases, as compiled. */
 async function attachSuiteEvals(
   report: RunReport,
   nodes: SuiteNode[],
-  target: Target,
+  manifest: Manifest,
 ): Promise<RunReport> {
   try {
-    const evalReport = await evaluateSuiteTools({ nodes, target });
+    const defaultServer = manifest.defaultTarget ?? DEFAULT_SERVER;
+    const targets: Array<[string, Target]> = [[defaultServer, manifest.target], ...Object.entries(manifest.targets ?? {})];
+    const runs = [];
+    for (const [alias, target] of targets) {
+      const scoped = targets.length > 1 ? nodesForServer(nodes, alias, defaultServer) : nodes;
+      const result = await evaluateSuiteTools({ nodes: scoped, target });
+      if (result) runs.push(result);
+    }
+    const evalReport = runs.length > 0
+      ? { cases: runs.flatMap((run) => run.cases), failReasons: runs.flatMap((run) => run.failReasons) }
+      : null;
     return evalReport ? applyToolEvalVerdict(report, evalReport) : report;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -23,6 +23,8 @@ import {
   type McpServerConfig,
 } from "../engine/service/mcp-allowlist.js";
 import { LoadProfileSchema } from "../engine/types/manifest.js";
+import { normalizeCallSlo, type CallSlo } from "../engine/core/call-slo.js";
+import { nodeTakesServer, usedServers } from "../engine/core/servers.js";
 import type { CompareReport, RunProgressEvent, RunReport } from "../engine/types/run.js";
 import {
   addServerToProject,
@@ -33,8 +35,9 @@ import {
   listProjects,
   listProjectsIncludingArchived,
   loadProjectRun,
-  projectAllowlistHosts,
   addSuiteToProject,
+  projectServerId,
+  projectSuiteServers,
   reintrospectProject,
   removeSuite,
   renameProject,
@@ -42,7 +45,6 @@ import {
   setSuiteEnabled,
   updateProjectServer,
   cloneSuite,
-  serverForSuite,
   type ProjectDetail,
   type ProjectIndexRow,
   type ProjectStoreOptions,
@@ -129,8 +131,10 @@ export function formatProjectShow(project: ProjectDetail): string {
   for (const suite of project.suites) {
     const version = project.versions[suite.id];
     const serverName = project.servers?.find((server) => server.id === suite.serverId)?.name ?? "";
+    const others = version ? [...usedServers(version.nodes, suite.serverId ?? "")].filter((id) => id !== suite.serverId)
+      .map((id) => project.servers?.find((server) => server.id === id)?.name ?? id) : [];
     const parent = suite.basedOn?.[String(suite.currentVersion)] ?? version?.basedOn;
-    lines.push(`  ${suite.name} v${suite.currentVersion} (${suite.id})${parent ? ` · from v${parent}` : ""}${serverName ? ` · ${serverName}` : ""}${suite.enabled === false ? " · disabled" : ""}`);
+    lines.push(`  ${suite.name} v${suite.currentVersion} (${suite.id})${parent ? ` · from v${parent}` : ""}${serverName ? ` · ${serverName}` : ""}${others.length > 0 ? ` + ${others.join(", ")}` : ""}${suite.enabled === false ? " · disabled" : ""}`);
     if (version) {
       const load = version.load;
       lines.push(
@@ -142,6 +146,62 @@ export function formatProjectShow(project: ProjectDetail): string {
   return lines.filter((line) => line !== "").join("\n");
 }
 
+/** Compiles a suite tree against every server its steps call, so a bad edit fails before it is saved. */
+function compileProjectNodes(
+  project: ProjectDetail,
+  suite: SuitePointer,
+  nodes: SuiteNode[],
+  load: LoadProfile,
+  version: { name: string; slo?: SuiteVersionDocument["slo"]; serverSlo?: SuiteVersionDocument["serverSlo"] },
+): void {
+  const servers = projectSuiteServers(project, suite, { nodes, serverSlo: version.serverSlo });
+  compileSuite({
+    name: version.name,
+    target: servers.target,
+    targets: servers.targets,
+    defaultServer: servers.defaultAlias,
+    serverSlos: servers.serverSlos,
+    allowlist: servers.allowlist,
+    nodes: servers.nodes,
+    load,
+    slo: version.slo,
+  });
+}
+
+/** A project server named by id, name, or alias, as stored on steps: its id. */
+function stepServerId(project: ProjectDetail, ref: string | undefined): string | undefined {
+  if (ref === undefined) return undefined;
+  const id = projectServerId(project, ref);
+  if (!id) throw new Error(`server_not_found: ${ref}`);
+  return id;
+}
+
+/** Sets or clears one project server's objective on a suite, as a new version. */
+export async function setSuiteServerSlo(
+  projectRef: string,
+  serverRef: string,
+  slo: CallSlo | undefined,
+  suiteRef?: string,
+  options?: ProjectStoreOptions,
+): Promise<SuiteVersionDocument> {
+  const project = await resolveProject(projectRef, options);
+  const suite = resolveSuite(project, suiteRef);
+  const version = currentVersion(project, suite);
+  const id = stepServerId(project, serverRef)!;
+  const { [id]: _old, ...rest } = version.serverSlo ?? {};
+  const next = normalizeCallSlo(slo);
+  const saved = await saveSuiteVersion(project.id, suite.id, {
+    name: version.name,
+    nodes: version.nodes,
+    load: version.load,
+    slo: version.slo ?? null,
+    serverSlo: next ? { ...rest, [id]: next } : rest,
+    basedOn: version.version,
+  }, options);
+  if (!saved) throw new Error("suite_not_found");
+  return saved;
+}
+
 async function persistSuite(
   project: ProjectDetail,
   suite: SuitePointer,
@@ -150,15 +210,7 @@ async function persistSuite(
   load: LoadProfile,
   options?: ProjectStoreOptions,
 ): Promise<SuiteVersionDocument> {
-  const server = serverForSuite(project, suite);
-  compileSuite({
-    name: version.name,
-    target: server.target,
-    allowlist: projectAllowlistHosts(server.target),
-    nodes,
-    load,
-    slo: version.slo,
-  });
+  compileProjectNodes(project, suite, nodes, load, version);
   const saved = await saveSuiteVersion(project.id, suite.id, {
     name: version.name,
     nodes,
@@ -184,6 +236,9 @@ export async function addSuiteNode(
     variable?: string;
     path?: string;
     args?: Record<string, unknown>;
+    /** Project server id, name, or alias the step calls. */
+    server?: string;
+    required?: boolean;
   },
   options?: ProjectStoreOptions,
 ): Promise<SuiteVersionDocument> {
@@ -203,6 +258,14 @@ export async function addSuiteNode(
   if (input.variable) node.variable = input.variable;
   if (input.path) node.path = input.path;
   if (input.args) node.args = input.args;
+  if (input.server !== undefined) {
+    if (!nodeTakesServer(node)) throw new Error("server_not_allowed: extractors and think steps call no server");
+    node.server = stepServerId(project, input.server);
+  }
+  if (input.required !== undefined) {
+    if (node.type !== "extractor") throw new Error("required_not_allowed: only extractors take --required");
+    node.required = input.required;
+  }
   const nodes = insertNode(version.nodes, node, input.parent);
   return persistSuite(project, suite, version, nodes, version.load, options);
 }
@@ -246,8 +309,20 @@ export async function setSuiteNode(
   const version = currentVersion(project, suite);
   if (!findInTree(version.nodes, nodeId)) throw new Error(`node_not_found: ${nodeId}`);
   if (patch.method && !METHODS.has(patch.method)) throw new Error(`unknown_method: ${patch.method}`);
-  const defined = Object.fromEntries(Object.entries(patch).filter((entry) => entry[1] !== undefined)) as Partial<SuiteNode>;
-  return persistSuite(project, suite, version, updateNode(version.nodes, nodeId, defined), version.load, options);
+  const { server, ...others } = patch;
+  const defined = Object.fromEntries(Object.entries(others).filter((entry) => entry[1] !== undefined)) as Partial<SuiteNode>;
+  let nodes = updateNode(version.nodes, nodeId, defined);
+  if (server !== undefined) {
+    const target = findInTree(nodes, nodeId)!;
+    if (!nodeTakesServer(target)) throw new Error("server_not_allowed: extractors and think steps call no server");
+    // An empty server clears it, so the step calls its frame's server or the suite's own.
+    const id = server === "" ? undefined : stepServerId(project, server);
+    nodes = replaceInTree(nodes, nodeId, (node) => {
+      const { server: _old, ...rest } = node;
+      return id ? { ...rest, server: id } : rest;
+    });
+  }
+  return persistSuite(project, suite, version, nodes, version.load, options);
 }
 
 export async function moveSuiteNode(
@@ -273,14 +348,7 @@ export async function saveSuiteFile(
   const suite = resolveSuite(project, suiteRef);
   const load = LoadProfileSchema.parse(file.load);
   if (!Array.isArray(file.nodes)) throw new Error("nodes_invalid");
-  const server = serverForSuite(project, suite);
-  compileSuite({
-    name: file.name ?? suite.name,
-    target: server.target,
-    allowlist: projectAllowlistHosts(server.target),
-    nodes: file.nodes,
-    load,
-  });
+  compileProjectNodes(project, suite, file.nodes, load, { name: file.name ?? suite.name });
   const saved = await saveSuiteVersion(
     project.id,
     suite.id,
@@ -392,14 +460,18 @@ export async function exportSuiteManifest(
   const project = await resolveProject(projectRef, options);
   const suite = resolveSuite(project, suiteRef);
   const version = currentVersion(project, suite);
-  const server = serverForSuite(project, suite);
+  const servers = projectSuiteServers(project, suite, version);
   const manifest = compileSuite({
     name: version.name,
     description: `Project ${project.name} suite ${version.name} v${version.version}`,
-    target: server.target,
-    allowlist: projectAllowlistHosts(server.target),
-    nodes: version.nodes,
+    target: servers.target,
+    targets: servers.targets,
+    defaultServer: servers.defaultAlias,
+    serverSlos: servers.serverSlos,
+    allowlist: servers.allowlist,
+    nodes: servers.nodes,
     load: version.load,
+    slo: version.slo,
   });
   const path = resolve(output);
   await writeFile(path, JSON.stringify(manifest, null, 2));
@@ -408,12 +480,14 @@ export async function exportSuiteManifest(
 
 export function formatProgress(event: RunProgressEvent): string | null {
   const attrs = event.attributes;
+  // Multi-server runs name the server each call went to.
+  const server = typeof attrs.server === "string" && attrs.server ? `[${attrs.server}] ` : "";
   if (event.name === "mcp.load.vus") return `vus ${String(attrs.active ?? 0)}`;
   if (event.name === "mcp.tool.call.duration") {
-    return `${String(attrs.tool ?? "tool")} ${String(attrs.latencyMs ?? "")}ms ${String(attrs.result ?? "")}`;
+    return `${server}${String(attrs.tool ?? "tool")} ${String(attrs.latencyMs ?? "")}ms ${String(attrs.result ?? "")}`;
   }
   if (event.name === "mcp.rpc.duration" && !attrs.tool) {
-    return `${String(attrs.method ?? "rpc")} ${String(attrs.latencyMs ?? "")}ms ${String(attrs.result ?? "")}`;
+    return `${server}${String(attrs.method ?? "rpc")} ${String(attrs.latencyMs ?? "")}ms ${String(attrs.result ?? "")}`;
   }
   if (event.name === "mcp.scenario.result") return `scenario ${String(attrs.result ?? "")}`;
   if (event.name === "run.finished") {
@@ -519,6 +593,13 @@ export async function projectReport(projectRef: string, runId: string, options?:
   const report = await loadProjectRun(project.id, runId, options);
   if (!report) throw new Error("run_not_found");
   return report;
+}
+
+function replaceInTree(nodes: SuiteNode[], id: string, change: (node: SuiteNode) => SuiteNode): SuiteNode[] {
+  return nodes.map((node) => {
+    if (node.id === id) return change(node);
+    return node.children ? { ...node, children: replaceInTree(node.children, id, change) } : node;
+  });
 }
 
 function findInTree(nodes: SuiteNode[], id: string): SuiteNode | null {

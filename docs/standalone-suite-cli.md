@@ -57,6 +57,8 @@ This is one of the CLI's two modes. The other, `worker`, is opt-in and authentic
 4. **Policy and identity leak in.** `project suite run` calls `loadPolicy()` and stamps `SWARM_PRINCIPAL` (default `cli`). `run` installs the local OTLP exporter from policy. None of that belongs on a file-only invocation.
 5. **Sample args are not parameters.** `sampleArgsForTool` fills required fields with fixtures. Those fixtures need to be `${name}` tokens, with the sample value saved as the parameter's example.
 
+Suites that call more than one server are described in [Multi-server suites](multi-server-suites.md).
+
 ## Suite directory
 
 `capture` writes one directory. The suite file is the artifact; reports never live inside it.
