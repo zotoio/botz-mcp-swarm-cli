@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "tsdown";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -42,6 +43,8 @@ const FLOW = [
   { id: "notify", type: "sampler", enabled: true, server: "chat", method: "tools/call", tool: "read_channel", args: { text: "Opened ${ticketKey}" } },
 ];
 
+/** The CLI package root, so the test also runs from a workspace that holds this package. */
+const pkg = fileURLToPath(new URL("../..", import.meta.url));
 let root = "";
 let work = "";
 let entry = "";
@@ -62,10 +65,10 @@ const suitePath = () => join(work, ".botz", "mcp-swarm", "suites", "triage", "su
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "multi-server-e2e-"));
-  await symlink(resolve("node_modules"), join(root, "node_modules"), "dir");
+  await symlink(resolve(pkg, "node_modules"), join(root, "node_modules"), "dir");
   await writeFile(join(root, "package.json"), '{"private":true,"type":"module","version":"0.0.0-test"}');
   await build({
-    entry: { cli: resolve("src/cli.ts") }, format: "esm", platform: "node", target: "node22",
+    entry: { cli: resolve(pkg, "src/cli.ts") }, format: "esm", platform: "node", target: "node22",
     outDir: join(root, "dist"), clean: true, dts: false, sourcemap: false, fixedExtension: false,
     deps: { neverBundle: true }, config: false, logLevel: "silent",
   });
