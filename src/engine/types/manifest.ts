@@ -1,5 +1,6 @@
 import { DEFAULT_LOAD_PROFILE } from "../core/load-defaults.js";
 import { z } from "zod";
+import { RetryPolicySchema } from "../core/rate-limit-retry.js";
 
 export const TransportTypeSchema = z.enum(["stdio", "sse", "streamable-http"]);
 export type TransportType = z.infer<typeof TransportTypeSchema>;
@@ -79,6 +80,7 @@ export const ErrorClassSchema = z.enum([
   "quota",
   "allowlist",
   "auth",
+  "rate_limit",
 ]);
 
 export const ElicitAutoReplySchema = z.object({
@@ -185,6 +187,8 @@ export const LoadProfileSchema = z.object({
   dwellMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.dwellMs),
   iterations: z.number().int().positive().default(DEFAULT_LOAD_PROFILE.iterations),
   lanes: z.number().int().positive().max(16).default(DEFAULT_LOAD_PROFILE.lanes),
+  /** Rate-limit retry policy for this suite. Defaults on; set enabled=false to turn off. */
+  retry: RetryPolicySchema.partial().optional(),
 });
 
 export const SoakSchema = z.object({
@@ -217,6 +221,8 @@ export const ManifestSchema = z.object({
   processAssertions: ProcessAssertionsSchema.optional(),
   soak: SoakSchema.optional(),
   load: LoadProfileSchema.optional(),
+  /** Rate-limit retry policy for the target server; load.retry (suite) overrides it. */
+  retry: RetryPolicySchema.partial().optional(),
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;

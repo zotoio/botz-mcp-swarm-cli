@@ -8,7 +8,8 @@ export type ErrorClass =
   | "transport"
   | "quota"
   | "allowlist"
-  | "auth";
+  | "auth"
+  | "rate_limit";
 
 export type RunVerdict = "pass" | "fail";
 
@@ -171,7 +172,16 @@ export interface RunReport {
     count: number;
     errorCount: number;
     errorMessage?: string;
+    /** Rate-limited attempts that were retried (not counted in errorCount). */
+    retries?: number;
   }>;
+  /** Rate-limit retries. Only final outcomes count toward error rates. */
+  retries?: {
+    total: number;
+    reason: "rate_limit";
+    byMethod: Record<string, number>;
+    sessionSetup: number;
+  };
   /** First substituted args sample per node, with secrets redacted. */
   redactedArgs?: Array<{ nodeId: string; tool?: string; args: unknown }>;
   /** One result per eval prompt attached to a tool step. */
@@ -216,6 +226,7 @@ export interface RunProgressEvent {
     | "mcp.session.start"
     | "mcp.load.vus"
     | "mcp.step"
+    | "mcp.retry"
     | "process.runtime"
     | "sut.stderr"
     | "run.finished";
