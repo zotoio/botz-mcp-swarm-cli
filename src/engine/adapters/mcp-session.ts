@@ -1,3 +1,4 @@
+import { isRateLimitMessage } from "../core/rate-limit-retry.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
@@ -88,15 +89,18 @@ export async function createMcpSession(
       const latencyMs = performance.now() - start;
       const bytesOut = estimateBytes(result);
       const appError = isError?.(result) ?? false;
+      const appMessage = appError
+        ? ((result as { content?: Array<{ type?: string; text?: string }> }).content ?? [])
+            .filter((item) => item.type === "text" && typeof item.text === "string")
+            .map((item) => item.text).join(" ")
+            .replace(/data:[^\s,]+;base64,[A-Za-z0-9+/=]+/g, "[inline code]")
+            .slice(0, 1000) || "MCP tool returned isError=true"
+        : undefined;
       return {
         success: !appError,
         latencyMs,
-        errorClass: appError ? "application" : "none",
-        ...(appError ? { errorMessage: ((result as { content?: Array<{ type?: string; text?: string }> }).content ?? [])
-          .filter((item) => item.type === "text" && typeof item.text === "string")
-          .map((item) => item.text).join(" ")
-          .replace(/data:[^\s,]+;base64,[A-Za-z0-9+/=]+/g, "[inline code]")
-          .slice(0, 1000) || "MCP tool returned isError=true" } : {}),
+        errorClass: appError ? (isRateLimitMessage(appMessage) ? "rate_limit" : "application") : "none",
+        ...(appError ? { errorMessage: appMessage } : {}),
         bytesIn,
         bytesOut,
         result,

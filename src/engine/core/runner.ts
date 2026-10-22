@@ -27,6 +27,7 @@ import {
   checkProcessAssertions,
 } from "./process-gauges.js";
 import { QuotaTracker } from "./quotas.js";
+import { resolveRetryPolicy, retryingSession, type RetryEvent, type RetryPolicy } from "./rate-limit-retry.js";
 import { SessionPool } from "./session-pool.js";
 import { runServer } from "./run-server.js";
 import { resolveStdioTarget } from "./target-resolve.js";
@@ -147,6 +148,49 @@ interface StepTrace {
   nodeOutcomes: Map<string, NonNullable<RunReport["nodeOutcomes"]>[number]>;
   redactedArgs: Array<{ nodeId: string; tool?: string; args: unknown }>;
   seenArgs: Set<string>;
+  retryPolicy?: RetryPolicy;
+  /** Epoch ms after which no retry may start (run max duration). */
+  retryDeadline?: number;
+  retries?: NonNullable<RunReport["retries"]>;
+}
+
+function noteRetry(
+  trace: StepTrace,
+  emit: (name: RunProgressEvent["name"], attributes: Record<string, string | number | boolean>) => void,
+  method: string,
+  event: RetryEvent,
+  extra: { nodeId?: string; label?: string; tool?: string; thread?: number } = {},
+): void {
+  const retries = (trace.retries ??= { total: 0, reason: "rate_limit", byMethod: {}, sessionSetup: 0 });
+  retries.total += 1;
+  retries.byMethod[method] = (retries.byMethod[method] ?? 0) + 1;
+  if (method === "initialize") retries.sessionSetup += 1;
+  if (extra.nodeId) {
+    const current = trace.nodeOutcomes.get(extra.nodeId) ?? {
+      nodeId: extra.nodeId,
+      label: extra.label ?? extra.tool ?? method,
+      count: 0,
+      errorCount: 0,
+    };
+    current.retries = (current.retries ?? 0) + 1;
+    trace.nodeOutcomes.set(extra.nodeId, current);
+  }
+  emit("mcp.retry", {
+    reason: event.reason,
+    method,
+    attempt: event.attempt,
+    delayMs: event.delayMs,
+    ...(event.retryAfterMs !== undefined ? { retryAfterMs: event.retryAfterMs } : {}),
+    ...(extra.tool ? { tool: extra.tool } : {}),
+    ...(extra.nodeId ? { node: extra.nodeId } : {}),
+    ...(extra.thread !== undefined ? { thread: extra.thread } : {}),
+    ...(event.message ? { message: event.message.slice(0, 300) } : {}),
+  });
+}
+
+function minDeadline(...values: Array<number | undefined>): number | undefined {
+  const set = values.filter((value): value is number => value !== undefined);
+  return set.length > 0 ? Math.min(...set) : undefined;
 }
 
 function applyContract<T extends { success: boolean; errorClass: import("../types/run.js").ErrorClass; errorMessage?: string; result?: unknown }>(
@@ -515,8 +559,20 @@ async function runScenarioPass(
             thread: run.thread,
             loop: ctx.loop,
           });
+          const stepSession = run.trace.retryPolicy
+            ? retryingSession(boundSession, run.trace.retryPolicy, {
+                deadline: () => minDeadline(run.drainAt, run.trace.retryDeadline),
+                onRetry: (method, event) =>
+                  noteRetry(run.trace, run.emit, method === "callTool" ? "tools/call" : step.method, event, {
+                    nodeId: step.nodeId,
+                    label: step.label,
+                    tool: step.tool,
+                    thread: run.thread,
+                  }),
+              })
+            : boundSession;
           const result = await executeStep(
-            boundSession,
+            stepSession,
             step,
             metrics,
             quota,
@@ -855,7 +911,14 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
   const quota = new QuotaTracker(manifest.quotas);
   const failReasons: string[] = [];
   const hopObservations: HopObservation[] = [];
-  const trace: StepTrace = { nodeOutcomes: new Map(), redactedArgs: [], seenArgs: new Set() };
+  const retryPolicy = resolveRetryPolicy({ ...(manifest.retry ?? {}), ...(manifest.load?.retry ?? {}) });
+  const trace: StepTrace = {
+    nodeOutcomes: new Map(),
+    redactedArgs: [],
+    seenArgs: new Set(),
+    retryPolicy,
+    retryDeadline: Date.now() + manifest.quotas.maxDurationMs,
+  };
   const emit = (
     name: RunProgressEvent["name"],
     attributes: Record<string, string | number | boolean>,
@@ -878,6 +941,11 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     reuse: manifest.sessionPool.reuse,
     target,
     baseDir: manifestDir,
+    retry: {
+      policy: retryPolicy,
+      deadline: () => trace.retryDeadline,
+      onRetry: (event) => noteRetry(trace, emit, "initialize", event),
+    },
     onSutPid: (pid) => processCollector.trackSutPid(pid),
     onStderr: (line) => {
       const node = exclusiveActiveNode(activeNodes);
@@ -1059,5 +1127,6 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     loadProfile: mode === "load" ? manifest.load : undefined,
     nodeOutcomes: [...trace.nodeOutcomes.values()],
     redactedArgs: trace.redactedArgs,
+    ...(trace.retries ? { retries: trace.retries } : {}),
   };
 }

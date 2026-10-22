@@ -1,6 +1,7 @@
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { ErrorClass } from "../types/run.js";
 import type { Target } from "../types/manifest.js";
+import { isRateLimitMessage } from "../core/rate-limit-retry.js";
 
 export interface McpCallResult {
   success: boolean;
@@ -75,6 +76,8 @@ export function estimateBytes(value: unknown): number {
 export function classifyError(error: unknown): ErrorClass {
   if (error instanceof Error) {
     const msg = error.message.toLowerCase();
+    // Before auth: rate-limit bodies often mention API keys / Authorization headers.
+    if (isRateLimitMessage(error.message)) return "rate_limit";
     if (msg.includes("timeout")) return "timeout";
     if (msg.includes("auth") || msg.includes("unauthorized") || msg.includes("401")) {
       return "auth";
