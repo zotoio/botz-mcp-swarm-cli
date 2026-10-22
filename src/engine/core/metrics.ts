@@ -108,6 +108,7 @@ export class MetricsCollector {
         quota: 0,
         allowlist: 0,
         auth: 0,
+        rate_limit: 0,
       };
       for (const o of obs) {
         errorClass[o.errorClass]++;

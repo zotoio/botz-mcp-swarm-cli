@@ -1,5 +1,6 @@
 import type { SessionReuse, Target } from "../types/manifest.js";
 import { createSession, type McpSession } from "../adapters/index.js";
+import { withRateLimitRetry, type RetryEvent, type RetryPolicy } from "./rate-limit-retry.js";
 
 export interface SessionPoolOptions {
   size: number;
@@ -9,6 +10,12 @@ export interface SessionPoolOptions {
   baseDir?: string;
   onSutPid?: (pid: number | null | undefined) => void;
   onStderr?: (line: string) => void;
+  /** Retry session setup (connect + initialize) when the server rate-limits it. */
+  retry?: {
+    policy: RetryPolicy;
+    deadline?: () => number | undefined;
+    onRetry?: (event: RetryEvent) => void;
+  };
 }
 
 export class SessionPool {
@@ -66,7 +73,18 @@ export class SessionPool {
   }
 
   private async open(): Promise<McpSession> {
-    const session = await createSession(this.options.target, this.options.headers, this.options.baseDir, this.options.onStderr);
+    const connect = () =>
+      createSession(this.options.target, this.options.headers, this.options.baseDir, this.options.onStderr);
+    const retry = this.options.retry;
+    const session = retry
+      ? await withRateLimitRetry(connect, {
+          policy: retry.policy,
+          deadline: retry.deadline?.(),
+          onRetry: (event) => {
+            if (!this.aborted) retry.onRetry?.(event);
+          },
+        })
+      : await connect();
     this.noteSutPid(session.childPid);
     if (this.aborted) {
       await session.close().catch(() => undefined);
