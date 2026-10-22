@@ -1,5 +1,13 @@
 # Release notes
 
+## 0.8.0
+
+- Retry MCP calls that fail because of rate limiting, on by default. Rate limiting is detected from HTTP 429, a `Retry-After` header, or rate limit / too many requests / quota text in JSON-RPC errors, error data, or tool error text. Such errors now use the new `rate_limit` error class; previously messages that mentioned API keys could be counted as `auth`.
+- Exponential backoff with full jitter (defaults: base 500ms, factor 2, max delay 30s, max 5 retries). `Retry-After` is honoured, and a `Retry-After` longer than the max delay stops retrying. Covers session setup (connect and initialize) and every step; other error classes are never retried.
+- Configure with `load.retry` (suite) or top-level `retry` (manifest/server); `{ "enabled": false }` turns it off. Retries never wait past ramp-down or the run's max duration.
+- Only final outcomes count toward error rates. Each retry emits an `mcp.retry` event (reason `rate_limit`), and reports include `retries` totals and per-node `retries` counts.
+- Release workflow: pushing a tag that is not `v<package version>` (for example a submodule pin tag) now skips publishing with a warning instead of failing.
+
 ## 0.7.0
 
 - Move the Agent Skills to the `botz-mcp-swarm` plugin in [zotoio/zoto-agents](https://github.com/zotoio/zoto-agents), which publishes it for Cursor, Claude Code, and Codex. The package no longer bundles `agent-plugin/`.
