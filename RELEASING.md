@@ -18,8 +18,10 @@ git push origin main --follow-tags
 ```
 
 A `v<package.json version>` tag starts publish.yml. The workflow rejects mismatched
-tags, leading-zero numeric identifiers, and build metadata (npm does not use it
-to distinguish versions). Stable releases publish to `latest`; versions such as
+tags on manual runs, leading-zero numeric identifiers, and build metadata (npm does not use it
+to distinguish versions). A pushed tag that is not `v<package.json version>`, such
+as a pin tag for a consumer submodule (`v0.6.1-sdk1.0.40`), skips validation and
+publishing with a warning instead of failing the run. Stable releases publish to `latest`; versions such as
 `0.3.0-rc.1` publish to `next`. Consumers opt in with `--version next`.
 
 The publish workflow reruns CI, including installed-artifact smoke tests, and
