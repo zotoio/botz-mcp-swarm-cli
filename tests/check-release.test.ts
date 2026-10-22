@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
-function check(version: string, ref: string, prerelease?: boolean) {
+function check(version: string, ref: string, prerelease?: boolean, event?: string) {
   const dir = mkdtempSync(join(tmpdir(), "release-guard-"));
   try {
     mkdirSync(join(dir, "scripts")); mkdirSync(join(dir, "packages/cli"), { recursive: true });
@@ -15,17 +15,21 @@ function check(version: string, ref: string, prerelease?: boolean) {
     const output = join(dir, "output");
     const result = spawnSync(process.execPath, [join(dir, "scripts/check-release.mjs")], { encoding: "utf8", env: {
       ...process.env, GITHUB_REF: ref, GITHUB_OUTPUT: output,
-      GITHUB_EVENT_NAME: prerelease === undefined ? "workflow_dispatch" : "release", GITHUB_EVENT_PATH: join(dir, "event.json"),
+      GITHUB_EVENT_NAME: event ?? (prerelease === undefined ? "workflow_dispatch" : "release"), GITHUB_EVENT_PATH: join(dir, "event.json"),
     } });
     return { code: result.status, output: result.status === 0 ? readFileSync(output, "utf8") : "" };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 describe("release guard", () => {
-  it("permits stable tags and chooses latest", () => expect(check("1.2.3", "refs/tags/v1.2.3", false)).toEqual({ code: 0, output: "tag=latest\n" }));
-  it("permits prerelease tags and chooses next", () => expect(check("1.2.3-rc.1", "refs/tags/v1.2.3-rc.1", true)).toEqual({ code: 0, output: "tag=next\n" }));
+  it("permits stable tags and chooses latest", () => expect(check("1.2.3", "refs/tags/v1.2.3", false)).toEqual({ code: 0, output: "publish=true\ntag=latest\n" }));
+  it("permits prerelease tags and chooses next", () => expect(check("1.2.3-rc.1", "refs/tags/v1.2.3-rc.1", true)).toEqual({ code: 0, output: "publish=true\ntag=next\n" }));
   it("rejects branches and mismatched tags", () => {
     expect(check("1.2.3", "refs/heads/main").code).not.toBe(0);
     expect(check("1.2.3", "refs/tags/v1.2.4").code).not.toBe(0);
   });
+  it("skips (does not fail) pushed non-release tags such as submodule pins", () =>
+    expect(check("1.2.3", "refs/tags/v0.6.1-sdk1.0.40", undefined, "push")).toEqual({ code: 0, output: "publish=false\n" }));
+  it("still publishes the matching pushed tag", () =>
+    expect(check("1.2.3", "refs/tags/v1.2.3", undefined, "push")).toEqual({ code: 0, output: "publish=true\ntag=latest\n" }));
   it("rejects mismatched prerelease metadata", () => expect(check("1.2.3-rc.1", "refs/tags/v1.2.3-rc.1", false).code).not.toBe(0));
 });
