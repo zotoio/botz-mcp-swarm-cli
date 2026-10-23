@@ -2,7 +2,7 @@
 
 ## 0.10.0
 
-- Suite `maxCallCount` and `maxPayloadBytes` are configurable. Set `limits` in a suite file or project suite version, pass `--max-call-count` / `--max-payload-bytes` to `run --suite`, or set `SWARM_MAX_CALL_COUNT` / `SWARM_MAX_PAYLOAD_BYTES`. The suite value wins, then flags, then env vars, then the unchanged defaults (100000 calls, 1048576 bytes).
+- Suite `maxCallCount` and `maxPayloadBytes` are configurable. Set `limits` in a suite file or project suite version, pass `--max-call-count` / `--max-payload-bytes` to `run --suite`, or set `SWARM_MAX_CALL_COUNT` / `SWARM_MAX_PAYLOAD_BYTES`. Flags win, then the suite value, then env vars, then the unchanged defaults (100000 calls, 1048576 bytes).
 - Values must be positive integers up to 10000000 calls and 67108864 bytes. Manifest `quotas.maxCallCount` and `quotas.maxPayloadBytes` are validated against the same ceilings.
 - Remote workers apply `suite.limits` from the execution payload.
 - Run reports record the enforced values in `limits` (optional; older reports still load).

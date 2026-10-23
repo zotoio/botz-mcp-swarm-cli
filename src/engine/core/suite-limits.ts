@@ -36,7 +36,7 @@ export function parseSuiteLimit(key: Key, value: string | number | undefined, la
 }
 
 /**
- * Effective limits. Precedence: suite definition, then CLI flags, then env vars
+ * Effective limits. Precedence per field: CLI flags, then the suite definition, then env vars
  * (SWARM_MAX_CALL_COUNT, SWARM_MAX_PAYLOAD_BYTES), then defaults.
  */
 export function resolveSuiteLimits(input: {
@@ -51,8 +51,8 @@ export function resolveSuiteLimits(input: {
   for (const key of KEYS) {
     const flag = input.flags?.[key] !== undefined ? parseSuiteLimit(key, input.flags[key]) : undefined;
     const env = input.env ? parseSuiteLimit(key, input.env[SUITE_LIMIT_ENV[key]], SUITE_LIMIT_ENV[key]) : undefined;
-    const [value, source]: [number, SuiteLimitSource] = suite[key] !== undefined ? [suite[key], "suite"]
-      : flag !== undefined ? [flag, "flag"] : env !== undefined ? [env, "env"] : [defaults[key], "default"];
+    const [value, source]: [number, SuiteLimitSource] = flag !== undefined ? [flag, "flag"]
+      : suite[key] !== undefined ? [suite[key], "suite"] : env !== undefined ? [env, "env"] : [defaults[key], "default"];
     out[key] = value;
     out.source[key] = source;
   }

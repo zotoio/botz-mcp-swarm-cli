@@ -237,8 +237,8 @@ The CLI now groups saved-suite operations under `suite capture|show|list|validat
 
 ## Limits
 
-`limits.maxCallCount` and `limits.maxPayloadBytes` are optional. The suite file wins,
-then `--max-call-count` / `--max-payload-bytes`, then `SWARM_MAX_CALL_COUNT` /
+`limits.maxCallCount` and `limits.maxPayloadBytes` are optional. `--max-call-count` /
+`--max-payload-bytes` win, then the suite file, then `SWARM_MAX_CALL_COUNT` /
 `SWARM_MAX_PAYLOAD_BYTES`, then defaults of 100000 and 1048576. Each must be a positive
 integer up to 10000000 calls and 67108864 bytes. The report's `limits` field shows the
 values enforced.

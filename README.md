@@ -231,8 +231,8 @@ in `suite.json`:
 "limits": { "maxCallCount": 50000, "maxPayloadBytes": 4194304 }
 ```
 
-Precedence, per field: the suite's `limits`, then `--max-call-count` /
-`--max-payload-bytes` on `run --suite`, then `SWARM_MAX_CALL_COUNT` /
+Precedence, per field: `--max-call-count` / `--max-payload-bytes` on `run --suite`,
+then the suite's `limits`, then `SWARM_MAX_CALL_COUNT` /
 `SWARM_MAX_PAYLOAD_BYTES`, then the defaults (100000 calls, 1048576 bytes; unchanged
 from earlier releases). Values must be positive integers no larger than the safety
 ceilings of 10000000 calls and 67108864 bytes (64 MiB). Project suite versions accept

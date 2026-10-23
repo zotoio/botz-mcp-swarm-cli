@@ -74,7 +74,7 @@ export interface SuiteFile {
   target: Target;
   surface: ServerSurface;
   nodes: SuiteNode[];
-  /** Call-count and payload limits. These win over --max-call-count, --max-payload-bytes, and env vars. */
+  /** Call-count and payload limits. --max-call-count / --max-payload-bytes win over these; these win over env vars. */
   limits?: SuiteLimitsInput;
   load: LoadProfile;
   params: Record<string, SuiteParam>;
@@ -365,7 +365,7 @@ export interface SuiteRunOptions {
     target?: Target;
     url?: string;
     load?: Partial<LoadProfile>;
-    /** --max-call-count / --max-payload-bytes. The suite file's `limits` wins over these. */
+    /** --max-call-count / --max-payload-bytes. These win over the suite file's `limits`. */
     limits?: Partial<SuiteLimits>;
     /** Environment for SWARM_MAX_CALL_COUNT / SWARM_MAX_PAYLOAD_BYTES. Defaults to process.env. */
     env?: NodeJS.ProcessEnv;

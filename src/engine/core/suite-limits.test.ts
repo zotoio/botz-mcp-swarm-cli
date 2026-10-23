@@ -39,11 +39,13 @@ describe("suite limits precedence", () => {
   it("uses defaults when nothing is set", () => {
     expect(resolveSuiteLimits({ env: {} })).toEqual({ ...DEFAULT_SUITE_LIMITS, source: { maxCallCount: "default", maxPayloadBytes: "default" } });
   });
-  it("suite > flag > env > default, per field", () => {
-    expect(resolveSuiteLimits({ suite: { maxCallCount: 10 }, flags: { maxCallCount: 20, maxPayloadBytes: 200 }, env }))
-      .toEqual({ maxCallCount: 10, maxPayloadBytes: 200, source: { maxCallCount: "suite", maxPayloadBytes: "flag" } });
-    expect(resolveSuiteLimits({ flags: { maxCallCount: 20 }, env }))
-      .toEqual({ maxCallCount: 20, maxPayloadBytes: 300, source: { maxCallCount: "flag", maxPayloadBytes: "env" } });
+  it("flag > suite > env > default, per field", () => {
+    expect(resolveSuiteLimits({ suite: { maxCallCount: 10, maxPayloadBytes: 100 }, flags: { maxCallCount: 20 }, env }))
+      .toEqual({ maxCallCount: 20, maxPayloadBytes: 100, source: { maxCallCount: "flag", maxPayloadBytes: "suite" } });
+    expect(resolveSuiteLimits({ suite: { maxCallCount: 10 }, env }))
+      .toEqual({ maxCallCount: 10, maxPayloadBytes: 300, source: { maxCallCount: "suite", maxPayloadBytes: "env" } });
+    expect(resolveSuiteLimits({ flags: { maxPayloadBytes: 200 }, env: {} }))
+      .toEqual({ maxCallCount: 100_000, maxPayloadBytes: 200, source: { maxCallCount: "default", maxPayloadBytes: "flag" } });
   });
   it("validates env values", () => {
     expect(() => resolveSuiteLimits({ env: { SWARM_MAX_CALL_COUNT: "nope" } })).toThrow(/SWARM_MAX_CALL_COUNT/);
