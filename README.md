@@ -168,6 +168,13 @@ botz mcp-swarm worker --server https://swarm.example.com
 
 Each assignment lists the environment variables the worker needs: `${env:NAME}` references stored on the target, and `SWARM_TARGET_HEADER_<KEY>` / `SWARM_TARGET_ENV_<KEY>` for values the service will not send. Set each to the full value, scheme included (`SWARM_TARGET_HEADER_AUTHORIZATION="Bearer <token>"`). A missing variable rejects the run with `missing credential: NAME`. A revoked or unknown token stops the worker with exit 1; other disconnects reconnect with backoff.
 
+## Run report data
+
+Besides the summary series, every run report JSON includes two optional fields:
+
+- `sampleResults`: per tool, the first successful call (`success`) and the first failed call (`error`), each with `atMs`, `latencyMs`, redacted `args`, the redacted `response` (or `errorClass` / `errorMessage`). Payloads over 4KB are stored as a truncated JSON string and flagged `truncated: true`.
+- `timeSeries`: per-second buckets for the whole run, independent of the log tail: `{ t, calls, errors, byTool: { <tool>: { calls, errors } }, vus, latency: { p50, p95 }, byToolLatency: { <tool>: { p50, p95 } } }`. Idle seconds are included, up to 24 hours.
+
 ## Manifests
 
 ```bash

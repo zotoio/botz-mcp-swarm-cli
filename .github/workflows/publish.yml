@@ -20,15 +20,18 @@ jobs:
     timeout-minutes: 10
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      publish: ${{ steps.release.outputs.publish }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - id: release
         run: node scripts/check-release.mjs
   validate:
     needs: release-ref
+    if: ${{ needs.release-ref.outputs.publish == 'true' }}
     uses: ./.github/workflows/ci.yml
   publish:
     needs: [release-ref, validate]
+    if: ${{ needs.release-ref.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

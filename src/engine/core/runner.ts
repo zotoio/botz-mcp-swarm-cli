@@ -1,8 +1,10 @@
+import { LoadTimelineCollector } from "./load-timeline.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Manifest, Scenario, ScenarioStep, Target } from "../types/manifest.js";
 import type { RunMode, RunProgressEvent, RunReport, RunServerSummary } from "../types/run.js";
 import { contractFailure, validateAgainstSchema } from "./contract.js";
 import { redactValue } from "./redaction.js";
+import { RunRecorder } from "./run-recorder.js";
 import {
   drainDeadlineMs,
   mayStartIteration,
@@ -30,6 +32,7 @@ import {
 import { QuotaTracker } from "./quotas.js";
 import { SessionPoolSet } from "./session-pool.js";
 import { DEFAULT_SERVER } from "./servers.js";
+import { resolveRetryPolicy, retryingSession, type RetryEvent, type RetryPolicy } from "./rate-limit-retry.js";
 import { runServer } from "./run-server.js";
 import { resolveStdioTarget } from "./target-resolve.js";
 import {
@@ -151,6 +154,52 @@ interface StepTrace {
   seenArgs: Set<string>;
   /** Set on multi-server runs: node outcomes then carry the alias of the server each step calls. */
   defaultServer?: string;
+  retryPolicy?: RetryPolicy;
+  /** Epoch ms after which no retry may start (run max duration). */
+  retryDeadline?: number;
+  retries?: NonNullable<RunReport["retries"]>;
+  recorder?: RunRecorder;
+  /** The manifest has extract steps: sample responses are not recorded, so extracted values never reach the report. */
+  hasExtractors?: boolean;
+}
+
+function noteRetry(
+  trace: StepTrace,
+  emit: (name: RunProgressEvent["name"], attributes: Record<string, string | number | boolean>) => void,
+  method: string,
+  event: RetryEvent,
+  extra: { nodeId?: string; label?: string; tool?: string; thread?: number } = {},
+): void {
+  const retries = (trace.retries ??= { total: 0, reason: "rate_limit", byMethod: {}, sessionSetup: 0 });
+  retries.total += 1;
+  retries.byMethod[method] = (retries.byMethod[method] ?? 0) + 1;
+  if (method === "initialize") retries.sessionSetup += 1;
+  if (extra.nodeId) {
+    const current = trace.nodeOutcomes.get(extra.nodeId) ?? {
+      nodeId: extra.nodeId,
+      label: extra.label ?? extra.tool ?? method,
+      count: 0,
+      errorCount: 0,
+    };
+    current.retries = (current.retries ?? 0) + 1;
+    trace.nodeOutcomes.set(extra.nodeId, current);
+  }
+  emit("mcp.retry", {
+    reason: event.reason,
+    method,
+    attempt: event.attempt,
+    delayMs: event.delayMs,
+    ...(event.retryAfterMs !== undefined ? { retryAfterMs: event.retryAfterMs } : {}),
+    ...(extra.tool ? { tool: extra.tool } : {}),
+    ...(extra.nodeId ? { node: extra.nodeId } : {}),
+    ...(extra.thread !== undefined ? { thread: extra.thread } : {}),
+    ...(event.message ? { message: event.message.slice(0, 300) } : {}),
+  });
+}
+
+function minDeadline(...values: Array<number | undefined>): number | undefined {
+  const set = values.filter((value): value is number => value !== undefined);
+  return set.length > 0 ? Math.min(...set) : undefined;
 }
 
 function applyContract<T extends { success: boolean; errorClass: import("../types/run.js").ErrorClass; errorMessage?: string; result?: unknown }>(
@@ -271,16 +320,16 @@ async function executeStep(
       return { ok: false, message: `arguments do not match inputSchema: ${inputError}` };
     }
   }
+  // Extracted values come from another call's result and may be private, so they are shown as ${name}.
+  const shown = ctx.extracted?.size
+    ? (substituteValue(step.args ?? {}, {
+      ...ctx,
+      strict: false,
+      vars: { ...ctx.vars, ...Object.fromEntries([...ctx.extracted].map((name) => [name, `\${${name}}`])) },
+    }, randomUUID) ?? {}) as Record<string, unknown>
+    : args;
   if (step.nodeId && !trace.seenArgs.has(step.nodeId)) {
     trace.seenArgs.add(step.nodeId);
-    // Extracted values come from another call's result and may be private, so they are shown as ${name}.
-    const shown = ctx.extracted?.size
-      ? (substituteValue(step.args ?? {}, {
-        ...ctx,
-        strict: false,
-        vars: { ...ctx.vars, ...Object.fromEntries([...ctx.extracted].map((name) => [name, `\${${name}}`])) },
-      }, randomUUID) ?? {}) as Record<string, unknown>
-      : args;
     trace.redactedArgs.push({
       nodeId: step.nodeId,
       tool: step.tool,
@@ -332,6 +381,17 @@ async function executeStep(
       if (result.errorClass !== "none") {
         emit("mcp.tool.call.errors", { tool: toolName, error_class: result.errorClass, ...serverAttr });
       }
+      trace.recorder?.recordToolCall({
+        tool: toolName,
+        ok: result.errorClass === "none" && expected.ok,
+        latencyMs: result.latencyMs,
+        args: shown,
+        // Results that feed extractors would put the extracted values in the report; keep only their size.
+        result: trace.hasExtractors ? undefined : contracted.result,
+        errorClass: result.errorClass === "none" && !expected.ok ? "protocol" : result.errorClass,
+        errorMessage: expected.message ?? contracted.errorMessage,
+        nodeId: step.nodeId,
+      });
     }
     if (contracted.result !== undefined) {
       try {
@@ -640,8 +700,20 @@ async function runScenarioPass(
                 bound = undefined;
               }
             }
+            const stepSession = bound && run.trace.retryPolicy
+              ? retryingSession(bound, run.trace.retryPolicy, {
+                  deadline: () => minDeadline(run.drainAt, run.trace.retryDeadline),
+                  onRetry: (method, event) =>
+                    noteRetry(run.trace, run.emit, method === "callTool" ? "tools/call" : step.method, event, {
+                      nodeId: step.nodeId,
+                      label: step.label,
+                      tool: step.tool,
+                      thread: run.thread,
+                    }),
+                })
+              : bound;
             result ??= await executeStep(
-              bound,
+              stepSession,
               step,
               metrics,
               quota,
@@ -1095,16 +1167,27 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
   const quota = new QuotaTracker(manifest.quotas);
   const failReasons: string[] = [];
   const hopObservations: HopObservation[] = [];
+  const retryPolicy = resolveRetryPolicy({ ...(manifest.retry ?? {}), ...(manifest.load?.retry ?? {}) });
   const trace: StepTrace = {
     nodeOutcomes: new Map(),
     redactedArgs: [],
     seenArgs: new Set(),
     ...(multiServer ? { defaultServer } : {}),
+    retryPolicy,
+    retryDeadline: Date.now() + manifest.quotas.maxDurationMs,
+    recorder: new RunRecorder(Date.now()),
+    hasExtractors: manifest.scenarios.some((scenario) => scenario.steps.some((step) => step.method === "extract")),
   };
+  const timeline = new LoadTimelineCollector();
   const emit = (
     name: RunProgressEvent["name"],
     attributes: Record<string, string | number | boolean>,
   ) => {
+    if (name === "mcp.load.vus" && typeof attributes.active === "number") trace.recorder?.setVus(attributes.active);
+    if (name === "mcp.load.vus") timeline.setVus(Number(attributes.active) || 0);
+    else if (name === "mcp.tool.call.duration") {
+      timeline.recordToolCall(String(attributes.tool), Number(attributes.latencyMs) || 0, attributes.result === "ok");
+    }
     options.onProgress?.({ ts: new Date().toISOString(), runId, name, attributes });
   };
   const telemetry = await initTelemetry(runId);
@@ -1122,6 +1205,11 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
         : manifest.sessionPool.size,
     reuse: manifest.sessionPool.reuse,
     baseDir: manifestDir,
+    retry: {
+      policy: retryPolicy,
+      deadline: () => trace.retryDeadline,
+      onRetry: (event) => noteRetry(trace, emit, "initialize", event),
+    },
     onSutPid: (pid, alias) => processCollector.trackSutPid(pid, alias),
     onStderr: (line, alias) => {
       const node = exclusiveActiveNode(activeNodes);
@@ -1294,6 +1382,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       : undefined,
     sessionMetrics: metrics.getSessionMetrics(manifest.target.transport),
     processSeries,
+    loadTimeline: timeline.finish(),
     processSummary,
     toolSeries,
     rpcSeries,
@@ -1312,5 +1401,9 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     loadProfile: mode === "load" ? manifest.load : undefined,
     nodeOutcomes: [...trace.nodeOutcomes.values()],
     redactedArgs: trace.redactedArgs,
+    ...(trace.recorder
+      ? { sampleResults: trace.recorder.sampleResults(), timeSeries: trace.recorder.timeSeries() }
+      : {}),
+    ...(trace.retries ? { retries: trace.retries } : {}),
   };
 }

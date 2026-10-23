@@ -31,6 +31,8 @@ describe("run defaults", () => {
     expect(calls).toBe(rampDownMs === 0 ? 3 : 4);
     expect(report.failReasons.join(" ").includes("ramp-down deadline")).toBe(rampDownMs === 0);
     expect(report.verdict).toBe(rampDownMs === 0 ? "fail" : "pass");
+    expect(report.sampleResults?.[0]).toMatchObject({ tool: "echo", success: { response: { content: [{ type: "text", text: "ok" }] } } });
+    expect(report.timeSeries?.reduce((n, b) => n + (b.byTool.echo?.calls ?? 0), 0)).toBe(calls);
   });
   it("sizes a generated suite's ramp-down from introspection latency", () => {
     const sampler = (method: SuiteNode["method"]): SuiteNode => ({ ...blankSuiteNode("sampler"), method });

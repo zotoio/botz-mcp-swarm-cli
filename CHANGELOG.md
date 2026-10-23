@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `sampleResults` on runs with extractors records args with extracted values shown as `${name}` and omits response bodies, so extracted values never reach the report.
 - Suites can call several MCP servers in one flow. A suite lists its servers by alias (`schemaVersion: 2`); a step's `server` names the server it calls, and frames pass theirs to their children. Single-server suites stay version 1 and behave as before. See [docs/multi-server-suites.md](docs/multi-server-suites.md).
 - Add `suite server add|list|remove|rename|default|slo`, and `capture --alias`.
 - Each server has its own session pool. A virtual user checks out a server's session when its first step on that server runs and holds it for the pass.
@@ -14,6 +15,23 @@
 - Manifests accept `targets`, `defaultTarget`, and a step `server`. Project suites store a project server id on steps (`add-node`/`set-node --server`), and worker assignments carry `targets`.
 - Fix: a standalone suite step that used a variable set by an extractor failed with `unknown parameter`.
 - `suite show` labels unlabelled steps with their tool, prompt, or variable instead of their method.
+
+## 0.9.0
+
+- New `suite analyse <suite>`: the configured model reads a failed run's errors, the suite steps and the server's tool schemas (secrets and headers redacted) and proposes fixes. Each proposal has an id, category (`suite_bug`, `server_bug`, `environment`), confidence, rationale and evidence; only suite bugs carry a JSON patch, validated against the suite before it is offered. Nothing changes unless you name ids: `--from <analysis.json> --apply <ids>` writes `suite.proposed.json` (or `suite.json` with `--in-place`, keeping a `.bak`), and `--reject <ids>` records a rejection. Enabling write-like tools needs `--allow-destructive`. `SWARM_ANALYSE=off` disables it.
+- Run reports record `loadTimeline`: active VUs and TPS over time, overall and per tool (1s buckets, widened for long runs to at most 600 points), with peak/avg VUs and TPS. Run output and the Markdown report show a peak/avg table with sparklines. Manifest runs without VU events use calls in flight for overall VUs.
+- `@modelcontextprotocol/sdk` ^1.32.1, matching botz-mcp-swarm.
+- Run reports record `sampleResults`: per tool, the first successful response and the first error, with redacted args and payloads truncated to 4KB (`truncated: true` when cut).
+- Run reports record `timeSeries`: per-second buckets for the whole run with `calls`, `errors`, `byTool`, `vus`, `latency` (p50/p95), and `byToolLatency`. Not limited by the run log's line cap, so report tooling can use it instead of parsing logs.
+- Both fields are optional; older reports still load.
+
+## 0.8.0
+
+- Retry MCP calls that fail because of rate limiting, on by default. Rate limiting is detected from HTTP 429, a `Retry-After` header, or rate limit / too many requests / quota text in JSON-RPC errors, error data, or tool error text. Such errors now use the new `rate_limit` error class; previously messages that mentioned API keys could be counted as `auth`.
+- Exponential backoff with full jitter (defaults: base 500ms, factor 2, max delay 30s, max 5 retries). `Retry-After` is honoured, and a `Retry-After` longer than the max delay stops retrying. Covers session setup (connect and initialize) and every step; other error classes are never retried.
+- Configure with `load.retry` (suite) or top-level `retry` (manifest/server); `{ "enabled": false }` turns it off. Retries never wait past ramp-down or the run's max duration.
+- Only final outcomes count toward error rates. Each retry emits an `mcp.retry` event (reason `rate_limit`), and reports include `retries` totals and per-node `retries` counts.
+- Release workflow: pushing a tag that is not `v<package version>` (for example a submodule pin tag) now skips publishing with a warning instead of failing.
 
 ## 0.7.0
 
