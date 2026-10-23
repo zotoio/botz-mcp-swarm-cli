@@ -188,8 +188,45 @@ export interface RunReport {
   toolEvals?: ToolEvalCaseResult[];
   /** Active VUs and TPS over time, overall and per tool, with peak/avg summary. */
   loadTimeline?: import("../core/load-timeline.js").LoadTimeline;
+  /** Per tool: first successful and first failed call, args redacted, payloads truncated to 4KB. */
+  sampleResults?: RunSample[];
+  /** Per-second buckets covering the whole run (not limited by the log tail). */
+  timeSeries?: RunTimeBucket[];
   /** Tail of the run log, newest lines last. */
   log?: string[];
+}
+
+export interface RunSampleEntry {
+  /** Ms since run start when the call completed. */
+  atMs: number;
+  latencyMs: number;
+  nodeId?: string;
+  /** Redacted call arguments (a truncated JSON string when over the limit). */
+  args: unknown;
+  /** Redacted tool result (a truncated JSON string when over the limit). */
+  response?: unknown;
+  responseBytes?: number;
+  errorClass?: ErrorClass;
+  errorMessage?: string;
+  truncated?: boolean;
+}
+
+export interface RunSample {
+  tool: string;
+  success?: RunSampleEntry;
+  error?: RunSampleEntry;
+}
+
+export interface RunTimeBucket {
+  /** Seconds since run start. */
+  t: number;
+  calls: number;
+  errors: number;
+  byTool: Record<string, { calls: number; errors: number }>;
+  /** Active virtual users at the end of the second (load mode; 0 otherwise unless set). */
+  vus: number;
+  latency: { p50: number; p95: number };
+  byToolLatency: Record<string, { p50: number; p95: number }>;
 }
 
 export interface ToolEvalAssertionResult {

@@ -1,5 +1,11 @@
 # Release notes
 
+## 0.9.0
+
+- Run reports record `sampleResults`: per tool, the first successful response and the first error, with redacted args and payloads truncated to 4KB (`truncated: true` when cut).
+- Run reports record `timeSeries`: per-second buckets for the whole run with `calls`, `errors`, `byTool`, `vus`, `latency` (p50/p95), and `byToolLatency`. Not limited by the run log's line cap, so report tooling can use it instead of parsing logs.
+- Both fields are optional; older reports still load.
+
 ## 0.8.0
 
 - Retry MCP calls that fail because of rate limiting, on by default. Rate limiting is detected from HTTP 429, a `Retry-After` header, or rate limit / too many requests / quota text in JSON-RPC errors, error data, or tool error text. Such errors now use the new `rate_limit` error class; previously messages that mentioned API keys could be counted as `auth`.

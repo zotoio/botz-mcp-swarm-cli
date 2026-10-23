@@ -4,6 +4,7 @@ import type { Manifest, Scenario, ScenarioStep, Target } from "../types/manifest
 import type { RunMode, RunProgressEvent, RunReport } from "../types/run.js";
 import { contractFailure, validateAgainstSchema } from "./contract.js";
 import { redactValue } from "./redaction.js";
+import { RunRecorder } from "./run-recorder.js";
 import {
   drainDeadlineMs,
   mayStartIteration,
@@ -153,6 +154,7 @@ interface StepTrace {
   /** Epoch ms after which no retry may start (run max duration). */
   retryDeadline?: number;
   retries?: NonNullable<RunReport["retries"]>;
+  recorder?: RunRecorder;
 }
 
 function noteRetry(
@@ -328,6 +330,16 @@ async function executeStep(
       if (result.errorClass !== "none") {
         emit("mcp.tool.call.errors", { tool: toolName, error_class: result.errorClass });
       }
+      trace.recorder?.recordToolCall({
+        tool: toolName,
+        ok: result.errorClass === "none" && expected.ok,
+        latencyMs: result.latencyMs,
+        args,
+        result: contracted.result,
+        errorClass: result.errorClass === "none" && !expected.ok ? "protocol" : result.errorClass,
+        errorMessage: expected.message ?? contracted.errorMessage,
+        nodeId: step.nodeId,
+      });
     }
     if (contracted.result !== undefined) {
       try {
@@ -919,12 +931,14 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     seenArgs: new Set(),
     retryPolicy,
     retryDeadline: Date.now() + manifest.quotas.maxDurationMs,
+    recorder: new RunRecorder(Date.now()),
   };
   const timeline = new LoadTimelineCollector();
   const emit = (
     name: RunProgressEvent["name"],
     attributes: Record<string, string | number | boolean>,
   ) => {
+    if (name === "mcp.load.vus" && typeof attributes.active === "number") trace.recorder?.setVus(attributes.active);
     if (name === "mcp.load.vus") timeline.setVus(Number(attributes.active) || 0);
     else if (name === "mcp.tool.call.duration") {
       timeline.recordToolCall(String(attributes.tool), Number(attributes.latencyMs) || 0, attributes.result === "ok");
@@ -1134,6 +1148,9 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     loadProfile: mode === "load" ? manifest.load : undefined,
     nodeOutcomes: [...trace.nodeOutcomes.values()],
     redactedArgs: trace.redactedArgs,
+    ...(trace.recorder
+      ? { sampleResults: trace.recorder.sampleResults(), timeSeries: trace.recorder.timeSeries() }
+      : {}),
     ...(trace.retries ? { retries: trace.retries } : {}),
   };
 }
