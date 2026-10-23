@@ -1,6 +1,8 @@
 # Release notes
 
-## Unreleased
+## 0.11.1
+
+First npm release since 0.9.0; it also contains 0.10.0 and 0.11.0, which were not published separately.
 
 - Graceful ramp-down covers multi-server suites: calls cut off by the drain deadline on any server, and a server session that fails to open after the deadline, count as ramp-down (`cancelledByRampDown`, `incompletePasses`), not as errors or an unreachable server. Cut-off passes are not counted as flow passes.
 - `sampleResults` on runs with extractors records args with extracted values shown as `${name}` and omits response bodies, so extracted values never reach the report.
