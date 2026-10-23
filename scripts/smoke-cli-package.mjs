@@ -91,7 +91,7 @@ await server.connect(new StdioServerTransport());
   const project = (args, code = 0) => cli(["project", ...args], sub, code);
   const projectJson = args => JSON.parse(project([...args, "--json"]));
   assert.match(project(["add", "--name", "fxp", "--target", JSON.stringify({transport:"stdio",command:process.execPath,args:["fixture.mjs"]})]), /Tools: 1\n/);
-  project(["load", "fxp", "--duration-ms", "200", "--ramp-up-ms", "0", "--jitter-ms", "0", "--dwell-ms", "0"]);
+  project(["load", "fxp", "--duration-ms", "200", "--ramp-down-ms", "300", "--ramp-up-ms", "0", "--jitter-ms", "0", "--dwell-ms", "0"]);
   assert.match(project(["run", "fxp"]), /Verdict: PASS/);
   const flatNodes = nodes => nodes.flatMap(n => [n, ...flatNodes(n.children ?? [])]);
   const echoNode = flatNodes(projectJson(["suite", "show", "fxp"]).nodes).find(n => n.tool === "echo");

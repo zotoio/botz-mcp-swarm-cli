@@ -26,7 +26,9 @@ const node: z.ZodType<SuiteNode, z.ZodTypeDef, unknown> = z.lazy(() => z.object(
 
 export const SuiteLoadSchema = z.object({ durationMs: nonnegative.optional(), rampUpMs: nonnegative.optional(),
     maxConcurrency: positive.optional(), jitterMs: nonnegative.optional(), rampDownMs: nonnegative.optional(),
-    dwellMs: nonnegative.optional(), iterations: positive.optional(), lanes: positive.optional() });
+    dwellMs: nonnegative.optional(), iterations: positive.optional(), lanes: positive.optional(),
+    rampDown: z.object({ strategy: z.enum(["graceful", "immediate"]).optional(), drainTimeoutMs: nonnegative.optional(),
+      passEstimateMs: nonnegative.optional() }).strict().optional() });
 
 /** Version 1 accepts legacy unversioned suites; later versions require an explicit migration. */
 export const SuiteInputSchema = z.object({

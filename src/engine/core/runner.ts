@@ -7,7 +7,10 @@ import { redactValue } from "./redaction.js";
 import { RunRecorder } from "./run-recorder.js";
 import {
   drainDeadlineMs,
-  mayStartIteration,
+  mayStartPass,
+  passEstimateMs,
+  rampDownStrategy,
+  vuRetireAtMs,
   readPath,
   substituteValue,
   UnresolvedParamError,
@@ -155,6 +158,14 @@ interface StepTrace {
   retryDeadline?: number;
   retries?: NonNullable<RunReport["retries"]>;
   recorder?: RunRecorder;
+  /** Work cut off by ramp-down; never counted as errors. */
+  rampDown?: { cancelled: number; incomplete: number; skipped: number };
+  rampDownSummary?: { strategy: "graceful" | "immediate"; drainDeadlineMs: number; passEstimateMs?: number };
+}
+
+function noteRampDown(trace: StepTrace, key: "cancelled" | "incomplete" | "skipped"): void {
+  const counts = (trace.rampDown ??= { cancelled: 0, incomplete: 0, skipped: 0 });
+  counts[key] += 1;
 }
 
 function noteRetry(
@@ -236,7 +247,7 @@ async function executeStep(
   trace: StepTrace,
   emit: (name: RunProgressEvent["name"], attributes: Record<string, string | number | boolean>) => void,
   prior?: { value: unknown },
-): Promise<{ ok: boolean; message?: string; result?: unknown }> {
+): Promise<{ ok: boolean; message?: string; result?: unknown; cancelled?: boolean }> {
   if (step.method === "think") {
     await sleep(step.thinkMs ?? 0);
     noteNode(trace, step, true);
@@ -302,6 +313,11 @@ async function executeStep(
       method === "tools/call" && step.expectErrorClass && expected.ok
         ? { ...contracted, success: true, errorClass: "none" as const }
         : contracted;
+    if (!expected.ok && ctx.cancelAfter !== undefined && Date.now() >= ctx.cancelAfter) {
+      // Cut off by the drain deadline: not a server error, so it stays out of error rate and SLOs.
+      noteRampDown(trace, "cancelled");
+      return { ok: false, cancelled: true, message: "cancelled by ramp-down" };
+    }
     const obs = {
       method,
       toolName,
@@ -528,11 +544,13 @@ async function runScenarioPass(
   telemetry: TelemetryHandle,
   run: ScenarioRunContext,
   i: number,
-): Promise<void> {
+): Promise<PassResult> {
   await quota.acquireConcurrency({ wait: true });
+    const passStarted = Date.now();
     let session: McpSession | undefined;
     let reused = false;
     let scenarioOk = true;
+    let cancelled = false;
     let lastMessage: string | undefined;
     const ctx: VarContext = {
       thread: run.thread,
@@ -540,6 +558,7 @@ async function runScenarioPass(
       loop: 0,
       vars: { ...(run.seedVars ?? {}) },
       strict: run.strictParams === true,
+      ...(run.drainAt !== undefined ? { cancelAfter: run.drainAt } : {}),
     };
 
     try {
@@ -553,7 +572,7 @@ async function runScenarioPass(
       run.emit("mcp.session.start", { transport: run.transport, result: "started", thread: run.thread });
 
       const results = new Map<number, unknown>();
-      const runOne = async (index: number): Promise<{ ok: boolean; message?: string }> => {
+      const runOne = async (index: number): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> => {
         const step = scenario.steps[index]!;
         ctx.loop = step.loopIndex ?? 0;
         const stepStarted = Date.now();
@@ -619,16 +638,17 @@ async function runScenarioPass(
           if (nodeId) run.activeNodes.delete(nodeId);
         }
       };
-      const note = (result: { ok: boolean; message?: string }) => {
-        if (!result.ok) {
+      const note = (result: { ok: boolean; message?: string; cancelled?: boolean }) => {
+        if (result.cancelled) cancelled = true;
+        else if (!result.ok) {
           scenarioOk = false;
           lastMessage = result.message;
         }
       };
       const drained = (): boolean => {
+        if (cancelled) return true;
         if (run.drainAt === undefined || Date.now() <= run.drainAt) return false;
-        scenarioOk = false;
-        lastMessage = "ramp-down deadline";
+        cancelled = true;
         return true;
       };
       const dag = scenario.steps.some((step) => step.waitFor !== undefined);
@@ -670,6 +690,14 @@ async function runScenarioPass(
         }
       }
 
+      if (cancelled && scenarioOk) {
+        // Stopped by the drain deadline with no real failure: incomplete, not failed.
+        noteRampDown(run.trace, "incomplete");
+        run.emit("mcp.scenario.result", { scenario: scenario.name, outcome: "cancelled", thread: run.thread });
+        metrics.recordSessionEnd(true);
+        await pool.release(session, true);
+        return { durationMs: Date.now() - passStarted, completed: false };
+      }
       const outcome = scenarioOk ? "pass" : "fail";
       metrics.recordScenarioOutcome({
         scenario: scenario.name,
@@ -681,7 +709,13 @@ async function runScenarioPass(
       metrics.recordSessionEnd(scenarioOk);
       telemetry.recordSessionStart(run.transport, scenarioOk ? "ok" : "fail");
       await pool.release(session, true);
+      return { durationMs: Date.now() - passStarted, completed: !cancelled };
     } catch (error) {
+      if (run.drainAt !== undefined && Date.now() >= run.drainAt) {
+        noteRampDown(run.trace, "incomplete");
+        if (session) await pool.release(session, false);
+        return { durationMs: Date.now() - passStarted, completed: false };
+      }
       metrics.recordSessionEnd(false);
       metrics.recordScenarioOutcome({
         scenario: scenario.name,
@@ -694,9 +728,16 @@ async function runScenarioPass(
         thread: run.thread,
       });
       if (session) await pool.release(session, false);
+      return { durationMs: Date.now() - passStarted, completed: false };
     } finally {
       quota.releaseConcurrency();
     }
+}
+
+interface PassResult {
+  durationMs: number;
+  /** False when the pass errored or was cut off before its last step. */
+  completed: boolean;
 }
 
 function scenarioContext(
@@ -766,31 +807,43 @@ async function runLoadProfile(
   const origin = Date.now();
   const vuCount = load.maxConcurrency;
   const minPasses = Math.max(1, load.iterations ?? 1);
+  const strategy = rampDownStrategy(load);
+  const drainAt = drainDeadlineMs(origin, load);
+  const durations: number[] = [];
+  const estimate = () => passEstimateMs(durations, load.rampDown?.passEstimateMs);
   let active = 0;
   const publishVus = () => emit("mcp.load.vus", { active, max: vuCount });
+  trace.rampDown ??= { cancelled: 0, incomplete: 0, skipped: 0 };
 
   await Promise.all(
     Array.from({ length: vuCount }, async (_unused, index) => {
       const delay = vuStartOffsetMs(index, vuCount, load.rampUpMs);
       if (delay > 0) await sleep(delay);
+      const retireAt = vuRetireAtMs(index, vuCount, origin, load);
       active += 1;
       publishVus();
       let passes = 0;
       try {
-        while (!signal?.aborted && (passes < minPasses || mayStartIteration(Date.now(), origin, load))) {
+        while (!signal?.aborted) {
+          const required = passes < minPasses;
+          if (!required && !mayStartPass(Date.now(), retireAt, drainAt, estimate(), strategy)) {
+            // Still inside the window but the pass would not plausibly finish: skip, don't start.
+            if (Date.now() < retireAt) noteRampDown(trace, "skipped");
+            break;
+          }
           const scenario = manifest.scenarios[index % manifest.scenarios.length] ?? manifest.scenarios[0];
           if (!scenario) break;
-          const required = passes < minPasses;
-          await runScenario({ ...scenario, iterations: 1 }, pool, metrics, quota, telemetry, scenarioContext(manifest, hopObservations, trace, emit, {
+          const result = await runScenarioPass({ ...scenario, iterations: 1 }, pool, metrics, quota, telemetry, scenarioContext(manifest, hopObservations, trace, emit, {
             thread: index + 1,
             iter: passes,
             waitForSlot: true,
-            drainAt: required ? undefined : drainDeadlineMs(origin, load),
+            drainAt: required ? undefined : drainAt,
             activeNodes,
             ...seed,
-          }));
+          }), 0);
+          if (result.completed) durations.push(result.durationMs);
           passes += 1;
-          if (passes >= minPasses && !mayStartIteration(Date.now(), origin, load)) break;
+          if (passes >= minPasses && Date.now() >= retireAt) break;
           if (load.jitterMs > 0) await sleep(Math.floor(Math.random() * (load.jitterMs + 1)));
         }
       } finally {
@@ -799,6 +852,11 @@ async function runLoadProfile(
       }
     }),
   );
+  trace.rampDownSummary = {
+    strategy,
+    drainDeadlineMs: drainAt - origin,
+    ...(estimate() !== undefined ? { passEstimateMs: estimate() } : {}),
+  };
 }
 
 function resolveTarget(manifest: Manifest, baseDir?: string) {
@@ -1153,5 +1211,15 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       ? { sampleResults: trace.recorder.sampleResults(), timeSeries: trace.recorder.timeSeries() }
       : {}),
     ...(trace.retries ? { retries: trace.retries } : {}),
+    ...(mode === "load" && trace.rampDownSummary
+      ? {
+          rampDown: {
+            ...trace.rampDownSummary,
+            cancelledByRampDown: trace.rampDown?.cancelled ?? 0,
+            incompletePasses: trace.rampDown?.incomplete ?? 0,
+            skippedPasses: trace.rampDown?.skipped ?? 0,
+          },
+        }
+      : {}),
   };
 }

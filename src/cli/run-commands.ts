@@ -15,13 +15,14 @@ import { selectRunMode } from "./run-mode.js";
 import { addTargetOptions, targetOptions, type TargetOptions } from "./target-options.js";
 import { printRunResult, type OutputFormat } from "./run-output.js";
 import { diagnosticError } from "./diagnostic-error.js";
+import { rampDownFlags } from "./ramp-down-flags.js";
 
 interface RunOptions extends AuthFlags, TargetOptions {
   manifest?: string; suite?: string; params?: string; set?: string[]; inference?: boolean;
   iterations?: string; concurrency?: string; durationMs?: string; rampUpMs?: string;
   rampDownMs?: string; dwellMs?: string; jitterMs?: string; output?: string;
   soak?: boolean; soakDurationMs?: string; maxIterations?: string; format: OutputFormat;
-  maxCallCount?: string; maxPayloadBytes?: string;
+  maxCallCount?: string; maxPayloadBytes?: string; rampDownStrategy?: string; drainTimeoutMs?: string;
 }
 export function integer(value: string | undefined, label: string, minimum = 0): number | undefined {
   if (value === undefined) return undefined;
@@ -38,7 +39,10 @@ function suiteLoad(opts: RunOptions, soak: boolean): Partial<LoadProfile> {
     rampUpMs: integer(opts.rampUpMs, "ramp-up-ms"), rampDownMs: integer(opts.rampDownMs, "ramp-down-ms"),
     dwellMs: integer(opts.dwellMs, "dwell-ms"), jitterMs: integer(opts.jitterMs, "jitter-ms"),
   };
-  return Object.fromEntries(Object.entries(pairs).filter(([, value]) => value !== undefined));
+  const load: Partial<LoadProfile> = Object.fromEntries(Object.entries(pairs).filter(([, value]) => value !== undefined));
+  const rampDown = rampDownFlags(opts);
+  if (rampDown) load.rampDown = rampDown;
+  return load;
 }
 export function suiteLimitFlags(opts: { maxCallCount?: string; maxPayloadBytes?: string }): Partial<SuiteLimits> {
   const pairs = { maxCallCount: parseSuiteLimit("maxCallCount", opts.maxCallCount), maxPayloadBytes: parseSuiteLimit("maxPayloadBytes", opts.maxPayloadBytes) };
@@ -68,6 +72,8 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
     .option("--duration-ms <ms>", "Suite load hold duration, or manifest soak duration")
     .option("--ramp-up-ms <ms>", "Suite virtual-user ramp-up duration")
     .option("--ramp-down-ms <ms>", "Suite drain duration")
+    .option("--ramp-down-strategy <strategy>", "graceful (default: retire VUs across the ramp-down window) or immediate")
+    .option("--drain-timeout-ms <ms>", "Extra grace after ramp-down before in-flight passes are cancelled (default 0)")
     .option("--dwell-ms <ms>", "Delay between suite steps")
     .option("--jitter-ms <ms>", "Maximum random delay between suite passes")
     .option("--max-call-count <n>", `Suite call-count limit (overrides suite limits; env SWARM_MAX_CALL_COUNT; default 100000; max ${SUITE_LIMIT_CEILINGS.maxCallCount})`)
@@ -97,7 +103,7 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         printRunResult(result.report, shownReports(result, botz, opts.output), opts.format);
         return;
       }
-      if (opts.url || opts.targetFile || opts.params || opts.set?.length || opts.iterations || opts.concurrency || opts.rampUpMs || opts.rampDownMs || opts.dwellMs || opts.jitterMs || opts.maxCallCount || opts.maxPayloadBytes
+      if (opts.url || opts.targetFile || opts.params || opts.set?.length || opts.iterations || opts.concurrency || opts.rampUpMs || opts.rampDownMs || opts.rampDownStrategy || opts.drainTimeoutMs || opts.dwellMs || opts.jitterMs || opts.maxCallCount || opts.maxPayloadBytes
         || command.getOptionValueSource("inference") === "cli" || opts.header?.length || opts.headerEnv?.length || opts.bearerEnv || opts.env?.length || opts.envFrom?.length || opts.urlKeyAsBearer) {
         throw new Error("target overrides, load flags, parameters, inference, and credentials apply to --suite; edit the manifest for these settings");
       }

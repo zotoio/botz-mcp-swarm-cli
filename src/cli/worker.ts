@@ -125,7 +125,7 @@ export function runnerLimitViolation(suite: Pick<WorkerSuite, "suite" | "limits"
   if (!suite.limits.runnerConstrained) return null;
   const load = normalizeLoadProfile(suite.suite.load);
   const limit = suite.limits.runner;
-  const window = load.durationMs + load.rampUpMs + load.rampDownMs;
+  const window = load.durationMs + load.rampUpMs + load.rampDownMs + (load.rampDown?.drainTimeoutMs ?? 0);
   if (window > limit.maxDurationMs) return `duration ${window}ms exceeds ${limit.maxDurationMs}ms`;
   if (load.maxConcurrency > limit.maxConcurrency) return `concurrency ${load.maxConcurrency} exceeds ${limit.maxConcurrency}`;
   if (load.iterations > limit.maxIterations) return `iterations ${load.iterations} exceeds ${limit.maxIterations}`;

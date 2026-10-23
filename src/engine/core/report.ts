@@ -110,6 +110,23 @@ export function formatMarkdownReport(report: RunReport): string {
     lines.push(``);
   }
 
+  if (report.rampDown) {
+    const r = report.rampDown;
+    lines.push(
+      `## Ramp-down`,
+      ``,
+      `- Strategy: ${r.strategy}`,
+      `- Drain deadline: ${r.drainDeadlineMs}ms after start`,
+      ...(r.passEstimateMs !== undefined ? [`- Pass estimate (p90): ${r.passEstimateMs}ms`] : []),
+      `- Incomplete passes (cut off by drain deadline): ${r.incompletePasses}`,
+      `- Calls cancelled by ramp-down: ${r.cancelledByRampDown}`,
+      `- Passes not started (would not finish in time): ${r.skippedPasses}`,
+      ``,
+      `_Cancelled calls and incomplete passes are excluded from error rate, thresholds and pass/fail._`,
+      ``,
+    );
+  }
+
   if (report.loadTimeline && report.loadTimeline.summary.overall.calls > 0) {
     lines.push(`## Load over time`, ``, "```", ...formatLoadTimeline(report.loadTimeline, { width: 60 }), "```", ``);
   }
