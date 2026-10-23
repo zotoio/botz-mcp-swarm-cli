@@ -126,9 +126,9 @@ export function formatAuth(target: Target): string[] {
 
 /**
  * Refuses URL userinfo and turns an API-key query parameter (`api_key`, `apikey`, `api-key`, `x-api-key`,
- * `subscription-key`, `key`, `token`, `access_token`) into `Authorization: Bearer <value>`, removing it from
- * the raw query so the other parameters keep their encoding. Fails when an Authorization header is already
- * set, so the two never compete.
+ * `subscription-key`, `ocp-apim-subscription-key`, other `*subscription-key*` names, `key`, `token`,
+ * `access_token`) into `Authorization: Bearer <value>`, removing it from the raw query so the other
+ * parameters keep their encoding. Fails when an Authorization header is already set, so the two never compete.
  */
 export function moveUrlCredentials(target: Target, asBearer = false): { target: Target; movedParam?: string } {
   if (target.transport === "stdio") return { target };

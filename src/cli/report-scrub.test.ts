@@ -60,12 +60,15 @@ describe("report scrubber", () => {
     expect(scrubbed).toContain("http://[redacted]@127.0.0.1:9/mcp?api_key=[redacted]&mode=fast");
     expect(scrub(`https://bot@example.com/mcp?Token=${key}`)).toBe("https://[redacted]@example.com/mcp?Token=[redacted]");
     for (const name of ["apikey", "api-key", "key", "access_token", "password", "sig", "x-api-key", "subscription-key",
-      "private_key", "client_key", "auth", "pwd"]) {
+      "Ocp-Apim-Subscription-Key", "private_key", "client_key", "auth", "pwd", "session", "sid", "jwt", "bearer",
+      "pass", "hmac", "code"]) {
       expect(scrub(`?${name}=${key}`)).toBe(`?${name}=[redacted]`);
     }
     expect(scrub(`GET /cb#access_token=${key}&token_type=bearer&state=s1`))
-      .toBe("GET /cb#access_token=[redacted]&token_type=[redacted]&state=s1");
-    expect(scrub("?auth_mode=none&author=me")).toBe("?auth_mode=none&author=me");
+      .toBe("GET /cb#access_token=[redacted]&token_type=bearer&state=s1");
+    expect(scrub(`GET /cb#code=${key}&state=s1`)).toBe("GET /cb#code=[redacted]&state=s1");
+    expect(scrub("?auth_mode=none&author=me&max_tokens=128&page_token=abc&tokenizer=bpe&secretary=none"))
+      .toBe("?auth_mode=none&author=me&max_tokens=128&page_token=abc&tokenizer=bpe&secretary=none");
     const nested = scrubReport({
       id: "r",
       failReasons: [JSON.stringify({ error: { message: `GET ${url}` } })],

@@ -40,12 +40,20 @@ export const API_KEY_PARAMS: readonly string[] = [
   "api-key",
   "x-api-key",
   "subscription-key",
+  "ocp-apim-subscription-key",
   "key",
   "token",
   "access_token",
 ];
+/**
+ * Credential-shaped names as whole segments (`token`, `session`, `code`, …), not substrings of
+ * `tokenizer` / `secretary` / `max_tokens`.
+ */
 const SECRET_PARAM =
-  /secret|password|passwd|^pwd$|signature|token|(?:^|[_-])sig(?:$|[_-])|credential|private[_-]?key|client[_-]?key|^auth$/i;
+  /(?:^|[_-])(?:secret|password|passwd|pwd|signature|token|sig|credential|private[_-]?key|client[_-]?key|auth|session|sid|jwt|bearer|pass|hmac|code)(?:$|[_-])/i;
+/** Pagination / limit / OAuth metadata names that look secret-shaped but are not credentials. */
+const SAFE_PARAM =
+  /^(?:max_tokens|page_token|next_page_token|nextpagetoken|tokenizer|secretary|token_type|auth_mode|author|keyword|page|client_id|state)$/i;
 const MIN_SECRET = 4;
 const MIN_USERNAME = 3;
 
@@ -101,7 +109,10 @@ export function scrubUrlCredentials(text: string): string {
 }
 
 export function isApiKeyParam(name: string): boolean {
-  return API_KEY_PARAMS.includes(name.toLowerCase());
+  const lower = name.toLowerCase();
+  if (API_KEY_PARAMS.includes(lower)) return true;
+  // Vendor headers such as Ocp-Apim-Subscription-Key embed the subscription-key segment.
+  return lower.includes("subscription-key");
 }
 
 export function isSecretParam(name: string): boolean {
@@ -111,6 +122,7 @@ export function isSecretParam(name: string): boolean {
   } catch {
     // Keep the raw name.
   }
+  if (SAFE_PARAM.test(decoded)) return false;
   return isApiKeyParam(decoded) || SECRET_PARAM.test(decoded);
 }
 
