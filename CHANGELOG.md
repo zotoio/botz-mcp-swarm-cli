@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Graceful ramp-down covers multi-server suites: calls cut off by the drain deadline on any server, and a server session that fails to open after the deadline, count as ramp-down (`cancelledByRampDown`, `incompletePasses`), not as errors or an unreachable server. Cut-off passes are not counted as flow passes.
 - `sampleResults` on runs with extractors records args with extracted values shown as `${name}` and omits response bodies, so extracted values never reach the report.
 - Suites can call several MCP servers in one flow. A suite lists its servers by alias (`schemaVersion: 2`); a step's `server` names the server it calls, and frames pass theirs to their children. Single-server suites stay version 1 and behave as before. See [docs/multi-server-suites.md](docs/multi-server-suites.md).
 - Add `suite server add|list|remove|rename|default|slo`, and `capture --alias`.
@@ -15,6 +16,20 @@
 - Manifests accept `targets`, `defaultTarget`, and a step `server`. Project suites store a project server id on steps (`add-node`/`set-node --server`), and worker assignments carry `targets`.
 - Fix: a standalone suite step that used a variable set by an extractor failed with `unknown parameter`.
 - `suite show` labels unlabelled steps with their tool, prompt, or variable instead of their method.
+
+## 0.11.0
+
+- Ramp-down no longer fails a suite. Passes cut off by the drain deadline are recorded as `rampDown.incompletePasses`, and calls that fail after it as `rampDown.cancelledByRampDown`; both are excluded from error rate, SLO thresholds, scenario outcomes and pass/fail. Errors before the deadline still count. Previously every unfinished pass failed with `ramp-down deadline` (a 500-VU soak failed with 458 such passes).
+- Graceful ramp-down is the new default: VUs retire linearly across the `rampDownMs` window, each finishing its current pass, and an optional pass starts only if the rolling p90 pass duration (or `rampDown.passEstimateMs`) fits before the drain deadline. Skipped passes are counted in `rampDown.skippedPasses`. Timed runs can therefore last up to `rampDownMs` longer than with 0.10; runs with `durationMs: 0` are unchanged. The VU series in `loadTimeline` and `timeSeries` steps down across the window.
+- New `load.rampDown: { strategy: "graceful" | "immediate", drainTimeoutMs, passEstimateMs }` in suites and manifests, and `--ramp-down-strategy` / `--drain-timeout-ms` on `run --suite`. `immediate` keeps the old schedule. `--ramp-down-ms` is unchanged. The drain deadline is hold end + `rampDownMs` + `drainTimeoutMs` (default 0, so run length is unchanged).
+- Run reports include `rampDown` (optional; older reports still load) and the Markdown report has a Ramp-down section.
+
+## 0.10.0
+
+- Suite `maxCallCount` and `maxPayloadBytes` are configurable. Set `limits` in a suite file or project suite version, pass `--max-call-count` / `--max-payload-bytes` to `run --suite`, or set `SWARM_MAX_CALL_COUNT` / `SWARM_MAX_PAYLOAD_BYTES`. Flags win, then the suite value, then env vars, then the unchanged defaults (100000 calls, 1048576 bytes).
+- Values must be positive integers up to 10000000 calls and 67108864 bytes. Manifest `quotas.maxCallCount` and `quotas.maxPayloadBytes` are validated against the same ceilings.
+- Remote workers apply `suite.limits` from the execution payload.
+- Run reports record the enforced values in `limits` (optional; older reports still load).
 
 ## 0.9.0
 

@@ -7,7 +7,10 @@ import { redactValue } from "./redaction.js";
 import { RunRecorder } from "./run-recorder.js";
 import {
   drainDeadlineMs,
-  mayStartIteration,
+  mayStartPass,
+  passEstimateMs,
+  rampDownStrategy,
+  vuRetireAtMs,
   readPath,
   substituteValue,
   UnresolvedParamError,
@@ -161,6 +164,14 @@ interface StepTrace {
   recorder?: RunRecorder;
   /** The manifest has extract steps: sample responses are not recorded, so extracted values never reach the report. */
   hasExtractors?: boolean;
+  /** Work cut off by ramp-down; never counted as errors. */
+  rampDown?: { cancelled: number; incomplete: number; skipped: number };
+  rampDownSummary?: { strategy: "graceful" | "immediate"; drainDeadlineMs: number; passEstimateMs?: number };
+}
+
+function noteRampDown(trace: StepTrace, key: "cancelled" | "incomplete" | "skipped"): void {
+  const counts = (trace.rampDown ??= { cancelled: 0, incomplete: 0, skipped: 0 });
+  counts[key] += 1;
 }
 
 function noteRetry(
@@ -258,7 +269,7 @@ async function executeStep(
   prior?: { value: unknown; server?: string },
   /** Alias of the step's server, on multi-server runs only. */
   server?: string,
-): Promise<{ ok: boolean; message?: string; result?: unknown }> {
+): Promise<{ ok: boolean; message?: string; result?: unknown; cancelled?: boolean }> {
   if (step.method === "think") {
     await sleep(step.thinkMs ?? 0);
     noteNode(trace, step, true);
@@ -350,6 +361,11 @@ async function executeStep(
       method === "tools/call" && step.expectErrorClass && expected.ok
         ? { ...contracted, success: true, errorClass: "none" as const }
         : contracted;
+    if (!expected.ok && ctx.cancelAfter !== undefined && Date.now() >= ctx.cancelAfter) {
+      // Cut off by the drain deadline: not a server error, so it stays out of error rate and SLOs.
+      noteRampDown(trace, "cancelled");
+      return { ok: false, cancelled: true, message: "cancelled by ramp-down" };
+    }
     const obs = {
       ...serverAttr,
       method,
@@ -592,8 +608,10 @@ async function runScenarioPass(
   telemetry: TelemetryHandle,
   run: ScenarioRunContext,
   i: number,
-): Promise<void> {
+): Promise<PassResult> {
   await quota.acquireConcurrency({ wait: true });
+    const passBegan = Date.now();
+    let cancelled = false;
     // Sessions this pass holds, one per server, checked out when a step first needs that server.
     const held = new Map<string, Promise<HeldSession>>();
     const opened = new Map<string, HeldSession>();
@@ -608,7 +626,9 @@ async function runScenarioPass(
       loop: 0,
       vars: { ...(run.seedVars ?? {}) },
       strict: run.strictParams === true,
+      ...(run.drainAt !== undefined ? { cancelAfter: run.drainAt } : {}),
     };
+    const pastDrain = () => run.drainAt !== undefined && Date.now() >= run.drainAt;
     const aliasOf = (step: ScenarioStep) => step.server ?? run.defaultServer;
     const serverAttr = (alias: string): Record<string, string> => (run.multiServer ? { server: alias } : {});
     const checkout = (alias: string): Promise<HeldSession> => {
@@ -645,7 +665,7 @@ async function runScenarioPass(
       const results = new Map<number, { value: unknown; server?: string }>();
       // Steps that did not run, or a required extractor that found nothing. Steps waiting on them are skipped.
       const blocked = new Set<number>();
-      const runOne = async (index: number): Promise<{ ok: boolean; message?: string }> => {
+      const runOne = async (index: number): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> => {
         const step = scenario.steps[index]!;
         ctx.loop = step.loopIndex ?? 0;
         const stepStarted = Date.now();
@@ -681,7 +701,7 @@ async function runScenarioPass(
             ...(callsServer ? serverAttr(alias) : {}),
           });
           let reused = false;
-          let result: { ok: boolean; message?: string; result?: unknown } | undefined;
+          let result: { ok: boolean; message?: string; result?: unknown; cancelled?: boolean } | undefined;
           const down = callsServer ? unreachable.get(alias) : undefined;
           if (down) {
             result = recordUnreachable(step, alias, down, metrics, run);
@@ -692,6 +712,11 @@ async function runScenarioPass(
                 bound = acquired.session;
                 reused = acquired.reused;
               } catch (error) {
+                // Past the drain deadline a server that will not open is ramp-down, not an outage.
+                if (pastDrain()) {
+                  noteRampDown(run.trace, "cancelled");
+                  return { ok: false, cancelled: true, message: "cancelled by ramp-down" };
+                }
                 const message = unreachable.get(alias) ?? `session failed on ${alias}: ${describeSessionFailure(error, pools.target(alias))}`;
                 // Steps in one wave share the failed checkout; count the failed session once.
                 if (!unreachable.has(alias)) metrics.recordSessionEnd(false, alias);
@@ -751,16 +776,17 @@ async function runScenarioPass(
           if (nodeId) run.activeNodes.delete(nodeId);
         }
       };
-      const note = (result: { ok: boolean; message?: string }) => {
-        if (!result.ok) {
+      const note = (result: { ok: boolean; message?: string; cancelled?: boolean }) => {
+        if (result.cancelled) cancelled = true;
+        else if (!result.ok) {
           scenarioOk = false;
           lastMessage = result.message;
         }
       };
       const drained = (): boolean => {
+        if (cancelled) return true;
         if (run.drainAt === undefined || Date.now() <= run.drainAt) return false;
-        scenarioOk = false;
-        lastMessage = "ramp-down deadline";
+        cancelled = true;
         return true;
       };
       const skipChained = (index: number): { ok: boolean } => {
@@ -817,6 +843,13 @@ async function runScenarioPass(
         }
       }
 
+      if (cancelled && scenarioOk) {
+        // Stopped by the drain deadline with no real failure: incomplete, not failed. Not counted as a flow pass.
+        noteRampDown(run.trace, "incomplete");
+        run.emit("mcp.scenario.result", { scenario: scenario.name, outcome: "cancelled", thread: run.thread });
+        await releaseAll(true, true);
+        return { durationMs: Date.now() - passBegan, completed: false };
+      }
       const outcome = scenarioOk ? "pass" : "fail";
       metrics.recordScenarioOutcome({
         scenario: scenario.name,
@@ -827,7 +860,14 @@ async function runScenarioPass(
       telemetry.recordScenario(scenario.name, outcome);
       run.emit("mcp.scenario.result", { scenario: scenario.name, outcome, thread: run.thread });
       await releaseAll(true, scenarioOk);
+      return { durationMs: Date.now() - passBegan, completed: !cancelled };
     } catch (error) {
+      if (pastDrain()) {
+        noteRampDown(run.trace, "incomplete");
+        for (const [alias, item] of opened) await pools.release(alias, item.session, false);
+        opened.clear();
+        return { durationMs: Date.now() - passBegan, completed: false };
+      }
       metrics.recordScenarioOutcome({
         scenario: scenario.name,
         outcome: "error",
@@ -841,9 +881,16 @@ async function runScenarioPass(
       });
       if (opened.size === 0) metrics.recordSessionEnd(false, run.defaultServer);
       await releaseAll(false, false);
+      return { durationMs: Date.now() - passBegan, completed: false };
     } finally {
       quota.releaseConcurrency();
     }
+}
+
+interface PassResult {
+  durationMs: number;
+  /** False when the pass errored or was cut off before its last step. */
+  completed: boolean;
 }
 
 /** A step whose server could not be reached: a transport failure counted against that server. */
@@ -941,31 +988,43 @@ async function runLoadProfile(
   const origin = Date.now();
   const vuCount = load.maxConcurrency;
   const minPasses = Math.max(1, load.iterations ?? 1);
+  const strategy = rampDownStrategy(load);
+  const drainAt = drainDeadlineMs(origin, load);
+  const durations: number[] = [];
+  const estimate = () => passEstimateMs(durations, load.rampDown?.passEstimateMs);
   let active = 0;
   const publishVus = () => emit("mcp.load.vus", { active, max: vuCount });
+  trace.rampDown ??= { cancelled: 0, incomplete: 0, skipped: 0 };
 
   await Promise.all(
     Array.from({ length: vuCount }, async (_unused, index) => {
       const delay = vuStartOffsetMs(index, vuCount, load.rampUpMs);
       if (delay > 0) await sleep(delay);
+      const retireAt = vuRetireAtMs(index, vuCount, origin, load);
       active += 1;
       publishVus();
       let passes = 0;
       try {
-        while (!signal?.aborted && (passes < minPasses || mayStartIteration(Date.now(), origin, load))) {
+        while (!signal?.aborted) {
+          const required = passes < minPasses;
+          if (!required && !mayStartPass(Date.now(), retireAt, drainAt, estimate(), strategy)) {
+            // Still inside the window but the pass would not plausibly finish: skip, don't start.
+            if (Date.now() < retireAt) noteRampDown(trace, "skipped");
+            break;
+          }
           const scenario = manifest.scenarios[index % manifest.scenarios.length] ?? manifest.scenarios[0];
           if (!scenario) break;
-          const required = passes < minPasses;
-          await runScenario({ ...scenario, iterations: 1 }, pool, metrics, quota, telemetry, scenarioContext(manifest, hopObservations, trace, emit, {
+          const result = await runScenarioPass({ ...scenario, iterations: 1 }, pool, metrics, quota, telemetry, scenarioContext(manifest, hopObservations, trace, emit, {
             thread: index + 1,
             iter: passes,
             waitForSlot: true,
-            drainAt: required ? undefined : drainDeadlineMs(origin, load),
+            drainAt: required ? undefined : drainAt,
             activeNodes,
             ...seed,
-          }));
+          }), 0);
+          if (result.completed) durations.push(result.durationMs);
           passes += 1;
-          if (passes >= minPasses && !mayStartIteration(Date.now(), origin, load)) break;
+          if (passes >= minPasses && Date.now() >= retireAt) break;
           if (load.jitterMs > 0) await sleep(Math.floor(Math.random() * (load.jitterMs + 1)));
         }
       } finally {
@@ -974,6 +1033,11 @@ async function runLoadProfile(
       }
     }),
   );
+  trace.rampDownSummary = {
+    strategy,
+    drainDeadlineMs: drainAt - origin,
+    ...(estimate() !== undefined ? { passEstimateMs: estimate() } : {}),
+  };
 }
 
 function resolveTarget(target: Target, baseDir?: string): Target {
@@ -1392,6 +1456,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       callCount: quota.calls,
       maxPayloadBytesSeen: quota.largestPayload,
     },
+    limits: { maxCallCount: manifest.quotas.maxCallCount, maxPayloadBytes: manifest.quotas.maxPayloadBytes },
     principal: options.principal,
     scheduleId: options.scheduleId,
     ...(options.vars ? { params: options.vars } : {}),
@@ -1405,5 +1470,15 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       ? { sampleResults: trace.recorder.sampleResults(), timeSeries: trace.recorder.timeSeries() }
       : {}),
     ...(trace.retries ? { retries: trace.retries } : {}),
+    ...(mode === "load" && trace.rampDownSummary
+      ? {
+          rampDown: {
+            ...trace.rampDownSummary,
+            cancelledByRampDown: trace.rampDown?.cancelled ?? 0,
+            incompletePasses: trace.rampDown?.incomplete ?? 0,
+            skippedPasses: trace.rampDown?.skipped ?? 0,
+          },
+        }
+      : {}),
   };
 }

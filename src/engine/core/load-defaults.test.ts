@@ -10,7 +10,7 @@ describe("run defaults", () => {
     expect(defaultLoadProfile()).toEqual({ durationMs: 30000, rampUpMs: 5000, maxConcurrency: 1, jitterMs: 100, rampDownMs: 60000, dwellMs: 100, iterations: 1, lanes: 1 });
     expect(normalizeLoadProfile({ durationMs: 0, rampUpMs: 0, rampDownMs: 0, dwellMs: 0, jitterMs: 0, iterations: 3, lanes: 2 })).toMatchObject({ durationMs: 0, rampUpMs: 0, rampDownMs: 0, dwellMs: 0, jitterMs: 0, iterations: 3, lanes: 2 });
   });
-  it.each([undefined, 0])("finishes a 25-second in-flight pass with default grace, respecting explicit drain %s", async (rampDownMs) => {
+  it.each([undefined, 0])("immediate ramp-down finishes a 25-second in-flight pass with default grace, respecting explicit drain %s", async (rampDownMs) => {
     let now = 100000;
     let calls = 0;
     vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -24,13 +24,15 @@ describe("run defaults", () => {
     } as unknown as adapters.McpSession);
     const manifest = parseManifest({
       name: "drain-default", target: { transport: "streamable-http", url: "https://fixture.example/mcp" }, allowlist: ["fixture.example"],
-      load: { durationMs: 100, rampUpMs: 0, maxConcurrency: 1, dwellMs: 0, jitterMs: 0, ...(rampDownMs === undefined ? {} : { rampDownMs }) },
+      load: { durationMs: 100, rampUpMs: 0, maxConcurrency: 1, dwellMs: 0, jitterMs: 0, rampDown: { strategy: "immediate" }, ...(rampDownMs === undefined ? {} : { rampDownMs }) },
       scenarios: [{ name: "two steps", steps: [{ method: "tools/call", tool: "echo" }, { method: "tools/call", tool: "echo" }] }],
     });
     const report = await runManifest({ manifest });
     expect(calls).toBe(rampDownMs === 0 ? 3 : 4);
-    expect(report.failReasons.join(" ").includes("ramp-down deadline")).toBe(rampDownMs === 0);
-    expect(report.verdict).toBe(rampDownMs === 0 ? "fail" : "pass");
+    // A pass cut off by the drain deadline is incomplete, not a failure.
+    expect(report.failReasons).toEqual([]);
+    expect(report.verdict).toBe("pass");
+    expect(report.rampDown?.incompletePasses).toBe(rampDownMs === 0 ? 1 : 0);
     expect(report.sampleResults?.[0]).toMatchObject({ tool: "echo", success: { response: { content: [{ type: "text", text: "ok" }] } } });
     expect(report.timeSeries?.reduce((n, b) => n + (b.byTool.echo?.calls ?? 0), 0)).toBe(calls);
   });

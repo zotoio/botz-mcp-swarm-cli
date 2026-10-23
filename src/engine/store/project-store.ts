@@ -1,3 +1,4 @@
+import { SuiteLimitsSchema, type SuiteLimitsInput } from "../core/suite-limits.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -71,6 +72,8 @@ export interface SuiteVersionDocument {
   slo?: CallSlo;
   /** Objectives over every tool call on one project server, by server id. */
   serverSlo?: Record<string, CallSlo>;
+  /** Per-suite call-count and payload limits. Absent fields use the defaults. */
+  limits?: SuiteLimitsInput;
   catalogFingerprint: string;
   /** Version this snapshot was saved from. Absent on version 1. */
   basedOn?: number;
@@ -802,7 +805,7 @@ function withStoredSuite(doc: SuiteVersionDocument): SuiteVersionDocument {
 export async function saveSuiteVersion(
   projectId: string,
   suiteId: string,
-  input: { name?: string; nodes: SuiteNode[]; load: LoadProfile; basedOn?: number; slo?: CallSlo | null; serverSlo?: Record<string, CallSlo> | null },
+  input: { name?: string; nodes: SuiteNode[]; load: LoadProfile; basedOn?: number; slo?: CallSlo | null; serverSlo?: Record<string, CallSlo> | null; limits?: SuiteLimitsInput | null },
   options?: ProjectStoreOptions,
 ): Promise<SuiteVersionDocument | null> {
   const project = await loadRecord(projectId, options);
@@ -816,13 +819,15 @@ export async function saveSuiteVersion(
     ? requestedParent!
     : suite.currentVersion;
   suite.basedOn = { ...suite.basedOn, [String(version)]: basedOn };
-  const parent = input.slo === undefined || input.serverSlo === undefined
+  const parent = input.slo === undefined || input.serverSlo === undefined || input.limits === undefined
     ? await loadSuiteVersion(projectId, suiteId, basedOn, options)
     : null;
   const slo = input.slo === undefined ? parent?.slo : normalizeCallSlo(input.slo);
   const serverSlo = input.serverSlo === undefined ? parent?.serverSlo : Object.fromEntries(Object.entries(input.serverSlo ?? {})
     .map(([id, value]) => [id, normalizeCallSlo(value)] as const)
     .filter((entry): entry is readonly [string, CallSlo] => entry[1] !== undefined));
+  const limits = input.limits === undefined ? parent?.limits : input.limits === null ? undefined : SuiteLimitsSchema.parse(input.limits);
+  const hasLimits = limits && Object.keys(limits).length > 0;
   const doc: SuiteVersionDocument = {
     version,
     createdAt: new Date().toISOString(),
@@ -831,6 +836,7 @@ export async function saveSuiteVersion(
     load: input.load,
     ...(slo ? { slo } : {}),
     ...(serverSlo && Object.keys(serverSlo).length > 0 ? { serverSlo } : {}),
+    ...(hasLimits ? { limits } : {}),
     catalogFingerprint: catalogFingerprint(server.catalog),
     basedOn,
   };

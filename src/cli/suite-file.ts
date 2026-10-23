@@ -49,6 +49,7 @@ import { runManifest } from "../engine/core/runner.js";
 import { runServer } from "../engine/core/run-server.js";
 import { applyToolEvalVerdict, evaluateSuiteTools, generateToolTestData } from "../engine/core/tool-evals.js";
 import { inferenceSecretValues } from "../engine/core/inference-model.js";
+import { resolveSuiteLimits, type SuiteLimits, type SuiteLimitsInput } from "../engine/core/suite-limits.js";
 import { TargetSchema, type Manifest, type Target } from "../engine/types/manifest.js";
 import type { RunReport } from "../engine/types/run.js";
 import { normalizeCallSlo, type CallSlo } from "../engine/core/call-slo.js";
@@ -102,6 +103,8 @@ export interface SuiteFile {
   /** Servers other than the default, by alias. */
   servers?: Record<string, SuiteServer>;
   nodes: SuiteNode[];
+  /** Call-count and payload limits. --max-call-count / --max-payload-bytes win over these; these win over env vars. */
+  limits?: SuiteLimitsInput;
   load: LoadProfile;
   params: Record<string, SuiteParam>;
 }
@@ -526,6 +529,10 @@ export interface SuiteRunOptions {
     /** Replaces servers by alias: a complete target, or a URL string for an HTTP server. */
     targets?: Record<string, Target | string>;
     load?: Partial<LoadProfile>;
+    /** --max-call-count / --max-payload-bytes. These win over the suite file's `limits`. */
+    limits?: Partial<SuiteLimits>;
+    /** Environment for SWARM_MAX_CALL_COUNT / SWARM_MAX_PAYLOAD_BYTES. Defaults to process.env. */
+    env?: NodeJS.ProcessEnv;
 }
 
 /** Prefixes an error with the server it concerns, when the suite has more than one. */
@@ -594,6 +601,7 @@ export async function resolveSuiteExecution(dir: string, options: Partial<SuiteR
   const used = usedServers(suite.nodes, defaultAlias);
   const others = Object.fromEntries([...targets].filter(([alias]) => alias !== defaultAlias && used.has(alias)));
   const serverSlos = Object.fromEntries(Object.entries(all).flatMap(([alias, server]) => (server.slo ? [[alias, server.slo]] : [])));
+  const limits = resolveSuiteLimits({ suite: suite.limits, flags: options.limits, env: options.env ?? process.env });
   const manifest = compileSuite({
     name: suite.name,
     description: `Suite ${suite.name}`,
@@ -604,10 +612,11 @@ export async function resolveSuiteExecution(dir: string, options: Partial<SuiteR
     allowlist: [],
     nodes: suite.nodes,
     load,
+    limits,
   }) as unknown as Manifest;
   const baseDir = (overrides[defaultAlias] ? options.baseDir ?? process.cwd() : undefined) ?? (suite.cwdBase === "suite" && target.transport === "stdio" ? target.cwd : gitRoot)
     ?? (target.transport === "stdio" ? target.cwd : undefined) ?? options.baseDir ?? dir;
-  return { suite, saved: Object.keys(overrides).length === aliases.length ? {} : saved, home, target, targets, params, manifest, baseDir };
+  return { suite, saved: Object.keys(overrides).length === aliases.length ? {} : saved, home, target, targets, params, manifest, baseDir, limits };
 }
 
 /**

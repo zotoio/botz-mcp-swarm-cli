@@ -1,4 +1,5 @@
-import { DEFAULT_LOAD_PROFILE } from "./load-defaults.js";
+import { DEFAULT_SUITE_LIMITS, type SuiteLimits } from "./suite-limits.js";
+import { DEFAULT_LOAD_PROFILE, DEFAULT_RAMP_DOWN, type RampDownStrategy } from "./load-defaults.js";
 import type { CallSlo } from "./call-slo.js";
 import { normalizeCallSlo } from "./call-slo.js";
 import type { ContractExpect } from "./contract.js";
@@ -56,6 +57,16 @@ export interface LoadProfile {
   iterations: number;
   /** Ready steps that run together in one Promise.all. The graph draws this many lanes. */
   lanes: number;
+  /** Ramp-down strategy; omitted means graceful with no extra drain timeout. */
+  rampDown?: RampDownConfig;
+}
+
+export interface RampDownConfig {
+  strategy?: RampDownStrategy;
+  /** Extra grace after the ramp-down window before in-flight passes are cancelled. */
+  drainTimeoutMs?: number;
+  /** Pass duration to assume before any pass has finished. */
+  passEstimateMs?: number;
 }
 
 export interface ToolAnnotations {
@@ -289,6 +300,8 @@ export interface VarContext {
   strict?: boolean;
   /** Names an extractor set on this pass. Their values never reach reports. */
   extracted?: Set<string>;
+  /** Epoch ms of the final drain deadline; failures after it are cancelled by ramp-down, not errors. */
+  cancelAfter?: number;
 }
 
 export class UnresolvedParamError extends Error {
@@ -358,6 +371,15 @@ export function normalizeLoadProfile(load?: Partial<LoadProfile> | null): LoadPr
     dwellMs: nonnegative(load?.dwellMs, base.dwellMs),
     iterations: Math.max(1, Math.round(load?.iterations ?? base.iterations)),
     lanes: Math.min(16, Math.max(1, Math.round(load?.lanes ?? base.lanes))),
+    ...(load?.rampDown ? { rampDown: normalizeRampDown(load.rampDown) } : {}),
+  };
+}
+
+function normalizeRampDown(input: RampDownConfig): RampDownConfig {
+  return {
+    strategy: input.strategy === "immediate" ? "immediate" : "graceful",
+    ...(input.drainTimeoutMs !== undefined ? { drainTimeoutMs: nonnegative(input.drainTimeoutMs, 0) } : {}),
+    ...(input.passEstimateMs !== undefined ? { passEstimateMs: nonnegative(input.passEstimateMs, 0) } : {}),
   };
 }
 
@@ -390,11 +412,56 @@ export function mayStartIteration(
   return nowMs < originMs + load.rampUpMs + load.durationMs;
 }
 
+/** Final deadline: in-flight passes still running after this are cancelled (not failed). */
 export function drainDeadlineMs(
   originMs: number,
-  load: Pick<LoadProfile, "rampUpMs" | "durationMs" | "rampDownMs">,
+  load: Pick<LoadProfile, "rampUpMs" | "durationMs" | "rampDownMs"> & { rampDown?: RampDownConfig },
 ): number {
-  return originMs + load.rampUpMs + load.durationMs + load.rampDownMs;
+  return originMs + load.rampUpMs + load.durationMs + load.rampDownMs + (load.rampDown?.drainTimeoutMs ?? DEFAULT_RAMP_DOWN.drainTimeoutMs);
+}
+
+export function rampDownStrategy(load: { rampDown?: RampDownConfig }): RampDownStrategy {
+  return load.rampDown?.strategy ?? DEFAULT_RAMP_DOWN.strategy;
+}
+
+/**
+ * When VU `index` of `count` stops starting new passes. Graceful retires the last-started VU first,
+ * linearly across the ramp-down window (mirroring ramp-up); immediate retires everyone at hold end.
+ */
+export function vuRetireAtMs(
+  index: number,
+  count: number,
+  originMs: number,
+  load: Pick<LoadProfile, "rampUpMs" | "durationMs" | "rampDownMs"> & { rampDown?: RampDownConfig },
+): number {
+  const holdEnd = originMs + load.rampUpMs + load.durationMs;
+  // No hold (iteration-only or smoke runs) means there is no load to scale down: stop after required passes.
+  if (rampDownStrategy(load) === "immediate" || load.durationMs <= 0 || load.rampDownMs <= 0 || count <= 0) return holdEnd;
+  const clamped = Math.min(Math.max(index, 0), count - 1);
+  return holdEnd + Math.round((load.rampDownMs * (count - clamped)) / count);
+}
+
+/** p90 of completed pass durations, else the configured estimate, else undefined (no estimate yet). */
+export function passEstimateMs(durations: readonly number[], fallback?: number): number | undefined {
+  if (durations.length === 0) return fallback;
+  const sorted = [...durations].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.9) - 1)];
+}
+
+/**
+ * Graceful rule for an optional (beyond `iterations`) pass: the VU is not yet retired and the
+ * estimated pass fits before the final drain deadline. Immediate keeps the pre-0.11 hold-end rule.
+ */
+export function mayStartPass(
+  nowMs: number,
+  retireAtMs: number,
+  drainAtMs: number,
+  estimateMs: number | undefined,
+  strategy: RampDownStrategy,
+): boolean {
+  if (nowMs >= retireAtMs) return false;
+  if (strategy === "immediate") return true;
+  return estimateMs === undefined || nowMs + estimateMs <= drainAtMs;
 }
 
 function evalId(name: string, suffix: string): string {
@@ -730,6 +797,8 @@ export function compileSuite(input: {
   nodes: SuiteNode[];
   load: Partial<LoadProfile>;
   slo?: CallSlo;
+  /** Effective call-count and payload limits; defaults to DEFAULT_SUITE_LIMITS. */
+  limits?: Partial<SuiteLimits>;
 }): CompiledManifest {
   const steps: CompiledStep[] = [];
   const defaultServer = input.defaultServer ?? DEFAULT_SERVER;
@@ -765,8 +834,8 @@ export function compileSuite(input: {
     quotas: {
       maxConcurrency: concurrency,
       maxDurationMs: Math.max(windowMs, passBudget * passes + 30_000, 1_000),
-      maxCallCount: 100_000,
-      maxPayloadBytes: 1_048_576,
+      maxCallCount: input.limits?.maxCallCount ?? DEFAULT_SUITE_LIMITS.maxCallCount,
+      maxPayloadBytes: input.limits?.maxPayloadBytes ?? DEFAULT_SUITE_LIMITS.maxPayloadBytes,
     },
     scenarios: [{ name: input.name, iterations: passes, steps }],
     assertions: {

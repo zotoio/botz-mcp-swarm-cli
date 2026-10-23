@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SuiteLimitsSchema } from "../engine/core/suite-limits.js";
 import { SAMPLER_METHODS, type SuiteNode } from "../engine/core/suite-model.js";
 import { ElicitAutoReplySchema, ScenarioStepSchema, ServerSloSchema, TargetSchema } from "../engine/types/manifest.js";
 import { isServerAlias, MAX_SERVERS } from "../engine/core/servers.js";
@@ -28,7 +29,9 @@ const node: z.ZodType<SuiteNode, z.ZodTypeDef, unknown> = z.lazy(() => z.object(
 
 export const SuiteLoadSchema = z.object({ durationMs: nonnegative.optional(), rampUpMs: nonnegative.optional(),
     maxConcurrency: positive.optional(), jitterMs: nonnegative.optional(), rampDownMs: nonnegative.optional(),
-    dwellMs: nonnegative.optional(), iterations: positive.optional(), lanes: positive.optional() });
+    dwellMs: nonnegative.optional(), iterations: positive.optional(), lanes: positive.optional(),
+    rampDown: z.object({ strategy: z.enum(["graceful", "immediate"]).optional(), drainTimeoutMs: nonnegative.optional(),
+      passEstimateMs: nonnegative.optional() }).strict().optional() });
 
 const SurfaceSchema = z.object({ serverName: z.string().optional(), serverVersion: z.string().optional(),
   capabilities: z.array(z.string()),
@@ -48,6 +51,7 @@ export const SuiteInputSchema = z.object({
   capturedAt: z.string().optional(), name, target: TargetSchema,
   nodes: z.array(node), params: z.record(z.object({ example: z.string(), usedBy: z.array(z.string()) })),
   load: SuiteLoadSchema.optional(),
+  limits: SuiteLimitsSchema.optional(),
   surface: SurfaceSchema,
 }).superRefine((suite, context) => uniqueIds(suite.nodes, context));
 
@@ -69,6 +73,7 @@ export const SuiteV2Schema = z.object({
   servers: z.record(z.string(), SuiteServerSchema),
   nodes: z.array(node), params: z.record(z.object({ example: z.string(), usedBy: z.array(z.string()) })),
   load: SuiteLoadSchema.optional(),
+  limits: SuiteLimitsSchema.optional(),
 }).superRefine((suite, context) => {
   uniqueIds(suite.nodes, context);
   const aliases = Object.keys(suite.servers);

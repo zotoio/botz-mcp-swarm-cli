@@ -1,3 +1,4 @@
+import type { SuiteLimitsInput } from "../engine/core/suite-limits.js";
 import { compileProjectSuite, runCompiledSuite } from "../engine/core/project-run.js";
 import { assertOrgTargetAllowlisted } from "../engine/core/org-target-policy.js";
 import { normalizeLoadProfile, type LoadProfile, type SuiteNode } from "../engine/core/suite-model.js";
@@ -79,7 +80,7 @@ export type WorkerSuite = {
   destructive: boolean;
   principal: string;
   /** Steps' `server` fields hold aliases from `targets`. */
-  suite: { name: string; nodes: SuiteNode[]; load: LoadProfile; slo?: CallSlo; serverSlos?: Record<string, CallSlo> };
+  suite: { name: string; nodes: SuiteNode[]; load: LoadProfile; slo?: CallSlo; serverSlos?: Record<string, CallSlo>; limits?: SuiteLimitsInput };
   /** The default server. */
   target: Target;
   /** Other servers the steps call, by alias. */
@@ -139,7 +140,7 @@ export function runnerLimitViolation(suite: Pick<WorkerSuite, "suite" | "limits"
   if (!suite.limits.runnerConstrained) return null;
   const load = normalizeLoadProfile(suite.suite.load);
   const limit = suite.limits.runner;
-  const window = load.durationMs + load.rampUpMs + load.rampDownMs;
+  const window = load.durationMs + load.rampUpMs + load.rampDownMs + (load.rampDown?.drainTimeoutMs ?? 0);
   if (window > limit.maxDurationMs) return `duration ${window}ms exceeds ${limit.maxDurationMs}ms`;
   if (load.maxConcurrency > limit.maxConcurrency) return `concurrency ${load.maxConcurrency} exceeds ${limit.maxConcurrency}`;
   if (load.iterations > limit.maxIterations) return `iterations ${load.iterations} exceeds ${limit.maxIterations}`;
@@ -180,6 +181,7 @@ export const runWorkerSuite: SuiteRunner = async ({ suite, target, targets, base
     nodes: suite.suite.nodes,
     load: suite.suite.load,
     slo: suite.suite.slo,
+    limits: suite.suite.limits,
   });
   return runCompiledSuite({
     manifest,

@@ -85,6 +85,7 @@ Suites that call more than one server are described in [Multi-server suites](mul
   "surface": { "serverName": "", "capabilities": [], "tools": [], "resources": [], "prompts": [] },
   "nodes": [],
   "load": { "durationMs": 0, "maxConcurrency": 1, "iterations": 1 },
+  "limits": { "maxCallCount": 100000, "maxPayloadBytes": 1048576 },
   "params": {
     "city": { "example": "NYC", "usedBy": ["n1"] }
   }
@@ -234,4 +235,12 @@ Standalone manifest and soak execution no longer reads service policy or saves `
 
 ## Unified standalone workflow
 
-The CLI now groups saved-suite operations under `suite capture|show|list|validate|refresh|run`; existing top-level aliases remain supported. See the [CLI guide](../README.md#repeatable-standalone-workflows) for target overrides, duration/ramp controls, non-destructive refresh, JSON/JUnit output, and exit codes. Timed suite/soak runs share the load engine. Doctor, validation, and execution share configuration resolution.
+The CLI now groups saved-suite operations under `suite capture|show|list|validate|refresh|run`; existing top-level aliases remain supported. See the [CLI guide](../README.md#repeatable-standalone-workflows) for target overrides, duration/ramp controls, non-destructive refresh, JSON/JUnit output, and exit codes. Timed suite/soak runs share the load engine; ramp-down is graceful by default and work cut off at the drain deadline is reported in `rampDown` rather than failing the run (see [Ramp-down](../README.md#ramp-down)). Doctor, validation, and execution share configuration resolution.
+
+## Limits
+
+`limits.maxCallCount` and `limits.maxPayloadBytes` are optional. `--max-call-count` /
+`--max-payload-bytes` win, then the suite file, then `SWARM_MAX_CALL_COUNT` /
+`SWARM_MAX_PAYLOAD_BYTES`, then defaults of 100000 and 1048576. Each must be a positive
+integer up to 10000000 calls and 67108864 bytes. The report's `limits` field shows the
+values enforced.

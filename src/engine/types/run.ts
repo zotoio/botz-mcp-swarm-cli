@@ -45,6 +45,20 @@ export interface RpcSeries {
   latencyMs: LatencyPercentiles;
 }
 
+export interface RampDownSummary {
+  strategy: "graceful" | "immediate";
+  /** Calls that failed after the drain deadline (cut off, not counted as errors). */
+  cancelledByRampDown: number;
+  /** Passes stopped before their last step by the drain deadline. */
+  incompletePasses: number;
+  /** Optional passes not started because the estimate would not finish before the drain deadline. */
+  skippedPasses: number;
+  /** Rolling pass estimate (p90) at the end of the run, if any pass completed. */
+  passEstimateMs?: number;
+  /** Epoch-relative ms from run start to the final drain deadline. */
+  drainDeadlineMs: number;
+}
+
 export interface ScenarioOutcome {
   scenario: string;
   outcome: "pass" | "fail" | "error";
@@ -190,6 +204,8 @@ export interface RunReport {
     callCount: number;
     maxPayloadBytesSeen: number;
   };
+  /** Effective call-count and payload limits enforced on this run. */
+  limits?: { maxCallCount: number; maxPayloadBytes: number };
   principal?: string;
   scheduleId?: string;
   /** Values substituted for ${name} on this run. */
@@ -209,7 +225,10 @@ export interface RunReport {
     dwellMs?: number;
     iterations?: number;
     lanes?: number;
+    rampDown?: { strategy?: "graceful" | "immediate"; drainTimeoutMs?: number; passEstimateMs?: number };
   };
+  /** Work cut off by ramp-down or the drain deadline. Excluded from error rate, thresholds and pass/fail. */
+  rampDown?: RampDownSummary;
   /** Tools by server. Entries without `server` belong to the default server. */
   catalog?: Array<{ server?: string; name: string; schemaHash: string; writeLike?: boolean }>;
   nodeOutcomes?: Array<{
