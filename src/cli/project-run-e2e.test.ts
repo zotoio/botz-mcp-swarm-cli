@@ -55,7 +55,7 @@ describe("standalone project commands", () => {
   it("adds, runs, lists, and compares runs", () => {
     expect(cli(["project", "add", "--name", "fxp", "--target", '{"transport":"stdio","command":"node","args":["fixture.mjs"]}']))
       .toMatch(/Tools: 1\n/);
-    cli(["project", "load", "fxp", "--duration-ms", "200", "--ramp-up-ms", "0", "--jitter-ms", "0", "--dwell-ms", "0"]);
+    cli(["project", "load", "fxp", "--duration-ms", "200", "--ramp-down-ms", "300", "--ramp-up-ms", "0", "--jitter-ms", "0", "--dwell-ms", "0"]);
 
     const passed = cli(["project", "run", "fxp"]);
     expect(passed).toMatch(/Verdict: PASS/);

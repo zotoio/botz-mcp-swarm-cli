@@ -1,5 +1,12 @@
 # Release notes
 
+## 0.11.0
+
+- Ramp-down no longer fails a suite. Passes cut off by the drain deadline are recorded as `rampDown.incompletePasses`, and calls that fail after it as `rampDown.cancelledByRampDown`; both are excluded from error rate, SLO thresholds, scenario outcomes and pass/fail. Errors before the deadline still count. Previously every unfinished pass failed with `ramp-down deadline` (a 500-VU soak failed with 458 such passes).
+- Graceful ramp-down is the new default: VUs retire linearly across the `rampDownMs` window, each finishing its current pass, and an optional pass starts only if the rolling p90 pass duration (or `rampDown.passEstimateMs`) fits before the drain deadline. Skipped passes are counted in `rampDown.skippedPasses`. Timed runs can therefore last up to `rampDownMs` longer than with 0.10; runs with `durationMs: 0` are unchanged. The VU series in `loadTimeline` and `timeSeries` steps down across the window.
+- New `load.rampDown: { strategy: "graceful" | "immediate", drainTimeoutMs, passEstimateMs }` in suites and manifests, and `--ramp-down-strategy` / `--drain-timeout-ms` on `run --suite`. `immediate` keeps the old schedule. `--ramp-down-ms` is unchanged. The drain deadline is hold end + `rampDownMs` + `drainTimeoutMs` (default 0, so run length is unchanged).
+- Run reports include `rampDown` (optional; older reports still load) and the Markdown report has a Ramp-down section.
+
 ## 0.10.0
 
 - Suite `maxCallCount` and `maxPayloadBytes` are configurable. Set `limits` in a suite file or project suite version, pass `--max-call-count` / `--max-payload-bytes` to `run --suite`, or set `SWARM_MAX_CALL_COUNT` / `SWARM_MAX_PAYLOAD_BYTES`. Flags win, then the suite value, then env vars, then the unchanged defaults (100000 calls, 1048576 bytes).

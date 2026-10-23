@@ -218,8 +218,39 @@ dwell, and jitter are zero, with the same 60-second drain allowance ready for
 later timed runs. Saved values and CLI overrides, including explicit zero, take
 precedence. Existing suites are not rewritten. For an older suite with zero drain,
 set `load.rampDownMs` to `60000`, or use `--ramp-down-ms 60000` for one run.
-Longer multi-step or inference workloads may need a larger allowance; exceeding
-the configured drain deadline still fails the unfinished pass.
+Longer multi-step or inference workloads may need a larger allowance.
+
+### Ramp-down
+
+Ramp-down is graceful by default (since 0.11.0). After the hold, virtual users
+retire one by one, linearly across the `rampDownMs` window (the last VU started
+retires first, mirroring ramp-up). A retiring VU finishes its current pass and
+then stops. No VU starts an optional pass (beyond `iterations`) unless the rolling
+pass estimate, the p90 of completed passes (or `rampDown.passEstimateMs` before
+any pass completes), fits before the final drain deadline, which is hold end plus
+`rampDownMs` plus `rampDown.drainTimeoutMs` (default 0).
+
+Work still running at the drain deadline is cut off and classified separately,
+not failed: the run report records `rampDown.incompletePasses` (passes stopped
+before their last step), `rampDown.cancelledByRampDown` (calls that failed after
+the deadline) and `rampDown.skippedPasses`, and the Markdown report has a
+Ramp-down section. These are excluded from error rate, SLO thresholds, scenario
+outcomes and pass/fail. Errors before the deadline still fail the suite.
+
+```json
+"load": { "rampDownMs": 60000, "rampDown": { "strategy": "graceful", "drainTimeoutMs": 0 } }
+```
+
+`strategy: "immediate"` keeps the pre-0.11 schedule (every VU stops starting
+passes at hold end), with the same cut-off classification. For one run, use
+`--ramp-down-strategy graceful|immediate` and `--drain-timeout-ms <ms>` alongside
+`--ramp-down-ms`.
+
+Graceful ramp-down keeps retiring VUs running passes into the window, so a timed
+run can take up to `rampDownMs` longer than before; use `immediate` or a smaller
+`rampDownMs` to keep the old length. Runs with no hold (`durationMs: 0`, such as
+iteration-only and capture smoke runs) are unchanged: each VU stops after its
+required passes.
 
 ### Suite call-count and payload limits
 

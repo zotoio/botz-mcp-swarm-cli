@@ -233,7 +233,7 @@ Standalone manifest and soak execution no longer reads service policy or saves `
 
 ## Unified standalone workflow
 
-The CLI now groups saved-suite operations under `suite capture|show|list|validate|refresh|run`; existing top-level aliases remain supported. See the [CLI guide](../README.md#repeatable-standalone-workflows) for target overrides, duration/ramp controls, non-destructive refresh, JSON/JUnit output, and exit codes. Timed suite/soak runs share the load engine. Doctor, validation, and execution share configuration resolution.
+The CLI now groups saved-suite operations under `suite capture|show|list|validate|refresh|run`; existing top-level aliases remain supported. See the [CLI guide](../README.md#repeatable-standalone-workflows) for target overrides, duration/ramp controls, non-destructive refresh, JSON/JUnit output, and exit codes. Timed suite/soak runs share the load engine; ramp-down is graceful by default and work cut off at the drain deadline is reported in `rampDown` rather than failing the run (see [Ramp-down](../README.md#ramp-down)). Doctor, validation, and execution share configuration resolution.
 
 ## Limits
 

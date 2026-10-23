@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { rampDownFlags } from "./ramp-down-flags.js";
 import { resolve } from "node:path";
 import type { Command } from "commander";
 import { formatCompareMarkdown } from "../engine/core/compare.js";
@@ -378,6 +379,8 @@ export function registerProjectCommands(program: Command): void {
     .option("--concurrency <n>")
     .option("--jitter-ms <ms>")
     .option("--ramp-down-ms <ms>")
+    .option("--ramp-down-strategy <strategy>", "graceful (default) or immediate")
+    .option("--drain-timeout-ms <ms>", "Extra grace after ramp-down before in-flight passes are cancelled")
     .option("--dwell-ms <ms>", "Fixed pause between every pair of steps")
     .option("--iterations <n>", "Minimum full passes of the suite per virtual user. Defaults to 10")
     .action(async (ref: string, opts: {
@@ -389,6 +392,8 @@ export function registerProjectCommands(program: Command): void {
       rampDownMs?: string;
       dwellMs?: string;
       iterations?: string;
+      rampDownStrategy?: string;
+      drainTimeoutMs?: string;
     }) => {
       const saved = await saveLoadProfile(ref, {
         durationMs: opts.durationMs ? Number.parseInt(opts.durationMs, 10) : undefined,
@@ -398,6 +403,7 @@ export function registerProjectCommands(program: Command): void {
         rampDownMs: opts.rampDownMs ? Number.parseInt(opts.rampDownMs, 10) : undefined,
         dwellMs: opts.dwellMs ? Number.parseInt(opts.dwellMs, 10) : undefined,
         iterations: opts.iterations ? Number.parseInt(opts.iterations, 10) : undefined,
+        rampDown: rampDownFlags(opts),
       }, opts.suite);
       console.log(`Saved ${saved.name} v${saved.version}`);
       console.log(

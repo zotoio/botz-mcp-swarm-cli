@@ -9,3 +9,12 @@ export const DEFAULT_LOAD_PROFILE = Object.freeze({
   iterations: 1,
   lanes: 1,
 });
+
+export type RampDownStrategy = "graceful" | "immediate";
+
+/** Graceful ramp-down retires VUs across the window; immediate stops every VU at hold end (pre-0.11 behaviour). */
+export const DEFAULT_RAMP_DOWN = Object.freeze({
+  strategy: "graceful" as RampDownStrategy,
+  /** Extra grace after the ramp-down window before in-flight passes are cancelled. */
+  drainTimeoutMs: 0,
+});

@@ -179,6 +179,13 @@ export const ProcessAssertionsSchema = z.object({
   maxSutCpuRatio: z.number().positive().optional(),
 });
 
+export const RampDownSchema = z.object({
+  strategy: z.enum(["graceful", "immediate"]).optional(),
+  drainTimeoutMs: z.number().int().nonnegative().optional(),
+  /** Pass duration to assume before any pass has finished. */
+  passEstimateMs: z.number().int().nonnegative().optional(),
+}).strict();
+
 export const LoadProfileSchema = z.object({
   durationMs: z.number().int().nonnegative(),
   rampUpMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.rampUpMs),
@@ -188,6 +195,8 @@ export const LoadProfileSchema = z.object({
   dwellMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.dwellMs),
   iterations: z.number().int().positive().default(DEFAULT_LOAD_PROFILE.iterations),
   lanes: z.number().int().positive().max(16).default(DEFAULT_LOAD_PROFILE.lanes),
+  /** How VUs scale down after the hold. Defaults to graceful. */
+  rampDown: RampDownSchema.optional(),
   /** Rate-limit retry policy for this suite. Defaults on; set enabled=false to turn off. */
   retry: RetryPolicySchema.partial().optional(),
 });
