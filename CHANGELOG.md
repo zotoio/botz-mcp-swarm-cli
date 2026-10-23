@@ -2,6 +2,9 @@
 
 ## 0.9.0
 
+- New `suite analyse <suite>`: the configured model reads a failed run's errors, the suite steps and the server's tool schemas (secrets and headers redacted) and proposes fixes. Each proposal has an id, category (`suite_bug`, `server_bug`, `environment`), confidence, rationale and evidence; only suite bugs carry a JSON patch, validated against the suite before it is offered. Nothing changes unless you name ids: `--from <analysis.json> --apply <ids>` writes `suite.proposed.json` (or `suite.json` with `--in-place`, keeping a `.bak`), and `--reject <ids>` records a rejection. Enabling write-like tools needs `--allow-destructive`. `SWARM_ANALYSE=off` disables it.
+- Run reports record `loadTimeline`: active VUs and TPS over time, overall and per tool (1s buckets, widened for long runs to at most 600 points), with peak/avg VUs and TPS. Run output and the Markdown report show a peak/avg table with sparklines. Manifest runs without VU events use calls in flight for overall VUs.
+- `@modelcontextprotocol/sdk` ^1.32.1, matching botz-mcp-swarm.
 - Run reports record `sampleResults`: per tool, the first successful response and the first error, with redacted args and payloads truncated to 4KB (`truncated: true` when cut).
 - Run reports record `timeSeries`: per-second buckets for the whole run with `calls`, `errors`, `byTool`, `vus`, `latency` (p50/p95), and `byToolLatency`. Not limited by the run log's line cap, so report tooling can use it instead of parsing logs.
 - Both fields are optional; older reports still load.
