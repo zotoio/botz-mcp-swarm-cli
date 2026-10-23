@@ -1,4 +1,5 @@
 import type { RunReport } from "../engine/types/run.js";
+import { formatLoadTimeline } from "../engine/core/load-timeline.js";
 
 export type OutputFormat = "text" | "json" | "junit";
 const xml = (value: string) => value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
@@ -22,6 +23,9 @@ export function printRunResult(report: RunReport, paths: { jsonPath: string; mar
     console.log(`Verdict: ${report.verdict.toUpperCase()}`);
     for (const reason of report.failReasons) console.log(`  - ${reason}`);
     if (report.soak) console.log(`Soak iterations: ${report.soak.iterations}`);
+    if (report.loadTimeline && report.loadTimeline.summary.overall.calls > 0) {
+      for (const line of formatLoadTimeline(report.loadTimeline)) console.log(line);
+    }
     if (report.otelStatus && report.otelStatus !== "disabled") console.log(`OTLP export: ${report.otelStatus}`);
     console.log(`JSON: ${paths.jsonPath}\nMarkdown: ${paths.markdownPath}`);
   }

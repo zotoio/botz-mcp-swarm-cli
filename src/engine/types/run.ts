@@ -186,6 +186,8 @@ export interface RunReport {
   redactedArgs?: Array<{ nodeId: string; tool?: string; args: unknown }>;
   /** One result per eval prompt attached to a tool step. */
   toolEvals?: ToolEvalCaseResult[];
+  /** Active VUs and TPS over time, overall and per tool, with peak/avg summary. */
+  loadTimeline?: import("../core/load-timeline.js").LoadTimeline;
   /** Per tool: first successful and first failed call, args redacted, payloads truncated to 4KB. */
   sampleResults?: RunSample[];
   /** Per-second buckets covering the whole run (not limited by the log tail). */

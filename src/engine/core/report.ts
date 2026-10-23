@@ -1,3 +1,4 @@
+import { formatLoadTimeline } from "./load-timeline.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunReport } from "../types/run.js";
@@ -107,6 +108,10 @@ export function formatMarkdownReport(report: RunReport): string {
       );
     }
     lines.push(``);
+  }
+
+  if (report.loadTimeline && report.loadTimeline.summary.overall.calls > 0) {
+    lines.push(`## Load over time`, ``, "```", ...formatLoadTimeline(report.loadTimeline, { width: 60 }), "```", ``);
   }
 
   lines.push(`## Quotas`, ``);
