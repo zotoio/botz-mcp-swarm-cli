@@ -108,11 +108,28 @@ export function formatAnalysis(analysis: RunAnalysis): string {
   return lines.join("\n");
 }
 
+function parseIds(raw: string): string[] {
+  const ids = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!ids.length) throw new Error("Give at least one proposal id");
+  return ids;
+}
+
+/** Record a review decision. Unknown ids and already-decided proposals are errors, so nothing is silently skipped. */
+export function markProposals(analysis: RunAnalysis, ids: string[], status: "accepted" | "rejected"): void {
+  for (const id of ids) {
+    const p = analysis.proposals.find((x) => x.id === id);
+    if (!p) throw new Error(`Unknown proposal id ${id}`);
+    if (p.status !== "proposed") throw new Error(`${id} is already ${p.status}`);
+    p.status = status;
+  }
+}
+
 interface AnalyseOptions {
   report?: string;
   from?: string;
   out?: string;
   apply?: string;
+  reject?: string;
   inPlace?: boolean;
   allowDestructive?: boolean;
   format?: "text" | "json";
@@ -128,6 +145,7 @@ export function registerAnalyseCommand(parent: Command): void {
     .option("--from <path>", "Reuse a saved analysis instead of calling the model")
     .option("--out <path>", "Where to write the analysis. Defaults to <report>.analysis.json")
     .option("--apply <ids>", "Comma-separated proposal ids, or 'all' for every open suite fix")
+    .option("--reject <ids>", "With --from, mark these comma-separated proposal ids rejected in the saved analysis")
     .option("--in-place", "With --apply, replace suite.json (the old one is kept as suite.json.bak)")
     .option("--allow-destructive", "With --apply, allow fixes that enable write-like or destructive tools")
     .option("--format <format>", "text or json", "text")
@@ -155,11 +173,24 @@ export function registerAnalyseCommand(parent: Command): void {
       }
       if (opts.format === "json") console.log(JSON.stringify(analysis, null, 2));
       else console.log(formatAnalysis(analysis));
+      if (opts.reject) {
+        if (!opts.from) throw new Error("--reject needs --from <analysis.json> so the decision is recorded");
+        const ids = parseIds(opts.reject);
+        markProposals(analysis, ids, "rejected");
+        await writeFile(opts.from, JSON.stringify(analysis, null, 2), "utf8");
+        console.error(`Rejected: ${ids.join(", ")}`);
+      }
       if (!opts.apply) return;
-      const next = applyProposals(suite, analysis, opts.apply.split(",").map((s) => s.trim()).filter(Boolean), { allowDestructive: opts.allowDestructive });
+      const applyIds = parseIds(opts.apply);
+      const next = applyProposals(suite, analysis, applyIds, { allowDestructive: opts.allowDestructive });
       const target = opts.inPlace ? join(dir, "suite.json") : join(dir, "suite.proposed.json");
       if (opts.inPlace) await copyFile(join(dir, "suite.json"), join(dir, "suite.json.bak"));
       await writeFile(target, JSON.stringify(next, null, 2), "utf8");
+      if (opts.from) {
+        const ids = applyIds.includes("all") ? analysis.proposals.filter((p) => p.category === "suite_bug" && p.status === "proposed").map((p) => p.id) : applyIds;
+        markProposals(analysis, ids, "accepted");
+        await writeFile(opts.from, JSON.stringify(analysis, null, 2), "utf8");
+      }
       console.error(`${opts.inPlace ? "Updated" : "Proposed suite written"}: ${displayPath(target, botz, target)}`);
     });
 }

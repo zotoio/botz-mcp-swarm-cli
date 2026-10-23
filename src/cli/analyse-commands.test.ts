@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { analyseSuiteReport, applyProposals, formatAnalysis, latestReportFor } from "./analyse-commands.js";
+import { analyseSuiteReport, applyProposals, formatAnalysis, latestReportFor, markProposals } from "./analyse-commands.js";
 import { captureLoadProfile, type SuiteFile } from "./suite-file.js";
 import type { RunReport } from "../engine/types/run.js";
 
@@ -45,6 +45,19 @@ describe("suite analyse", () => {
     expect(next.nodes[0]!.args).toMatchObject({ limit: 10 });
     expect(suite.nodes[0]!.args).toMatchObject({ limit: "10" });
     expect(() => applyProposals(suite, analysis, [analysis.proposals[1]!.id])).toThrow("report only");
+  });
+
+  it("records accept/reject decisions only for explicit, open proposal ids", async () => {
+    const analysis = await analyseSuiteReport({ suite, report, env: {}, infer: reply([
+      { title: "Integer limit", category: "suite_bug", confidence: 0.9, nodeIds: ["n_search"], patch: [{ op: "replace", path: "/nodes/@n_search/args/limit", value: 10 }] },
+      { title: "Rate limited", category: "environment", confidence: 0.5, report: "429s" },
+    ]) });
+    const [fix, env] = analysis.proposals;
+    expect(() => markProposals(analysis, ["nope"], "rejected")).toThrow("Unknown proposal id nope");
+    markProposals(analysis, [env!.id], "rejected");
+    expect(env!.status).toBe("rejected");
+    expect(fix!.status).toBe("proposed");
+    expect(() => markProposals(analysis, [env!.id], "accepted")).toThrow("already rejected");
   });
 
   it("refuses enabling a destructive tool unless allowed", async () => {
