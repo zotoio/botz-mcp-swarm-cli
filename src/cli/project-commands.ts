@@ -34,6 +34,7 @@ import {
   saveLoadProfile,
   saveSuiteFile,
   setSuiteNode,
+  setSuiteServerSlo,
 } from "./project-ops.js";
 
 function printJson(value: unknown): void {
@@ -262,8 +263,12 @@ export function registerProjectCommands(program: Command): void {
     .option("--variable <name>")
     .option("--path <jsonPath>")
     .option("--args <json>")
+    .option("--server <id|name>", "Project server the step calls. Defaults to the frame's server, then the suite's")
+    .option("--required", "Extractor: fail when the path finds nothing, and skip steps that use the variable")
     .action(async (ref: string, opts: {
       type: string;
+      server?: string;
+      required?: boolean;
       suite?: string;
       parent?: string;
       method?: string;
@@ -287,6 +292,8 @@ export function registerProjectCommands(program: Command): void {
         variable: opts.variable,
         path: opts.path,
         args: opts.args ? (JSON.parse(opts.args) as Record<string, unknown>) : undefined,
+        server: opts.server,
+        required: opts.required,
       });
       console.log(`Saved v${saved.version}`);
     });
@@ -329,8 +336,14 @@ export function registerProjectCommands(program: Command): void {
     .option("--variable <name>")
     .option("--path <jsonPath>")
     .option("--args <json>")
+    .option("--server <id|name>", "Project server the step calls; an empty value clears it")
+    .option("--required", "Extractor: fail when the path finds nothing")
+    .option("--optional", "Extractor: store an empty value when the path finds nothing")
     .action(async (ref: string, opts: {
       node: string;
+      server?: string;
+      required?: boolean;
+      optional?: boolean;
       suite?: string;
       enable?: boolean;
       disable?: boolean;
@@ -353,6 +366,27 @@ export function registerProjectCommands(program: Command): void {
         variable: opts.variable,
         path: opts.path,
         args: opts.args ? (JSON.parse(opts.args) as Record<string, unknown>) : undefined,
+        server: opts.server,
+        required: opts.required ? true : opts.optional ? false : undefined,
+      }, opts.suite);
+      console.log(`Saved v${saved.version}`);
+    });
+
+  suite
+    .command("server-slo")
+    .description("Set a project server's objectives for this suite, judged over every tool call on it, and save a version")
+    .argument("<project>")
+    .requiredOption("--server <id|name>", "Project server")
+    .option("--suite <id>")
+    .option("--max-p95-ms <ms>", "p95 tool-call duration limit")
+    .option("--max-p99-ms <ms>", "p99 tool-call duration limit")
+    .option("--max-error-rate <rate>", "Share of tool calls that may fail, from 0 to 1")
+    .action(async (ref: string, opts: { server: string; suite?: string; maxP95Ms?: string; maxP99Ms?: string; maxErrorRate?: string }) => {
+      const value = (raw: string | undefined) => (raw === undefined ? undefined : Number(raw));
+      const saved = await setSuiteServerSlo(ref, opts.server, {
+        maxP95Ms: value(opts.maxP95Ms),
+        maxP99Ms: value(opts.maxP99Ms),
+        maxErrorRate: value(opts.maxErrorRate),
       }, opts.suite);
       console.log(`Saved v${saved.version}`);
     });

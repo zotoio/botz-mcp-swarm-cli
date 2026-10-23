@@ -53,7 +53,10 @@ describe("moveUrlCredentials", () => {
   const base = "http://127.0.0.1:9/mcp";
 
   it("turns an API key query parameter into a bearer header and strips it from the URL", () => {
-    for (const param of ["api_key", "APIKEY", "api-key", "x-api-key", "Subscription-Key", "key", "token", "access_token"]) {
+    for (const param of [
+      "api_key", "APIKEY", "api-key", "x-api-key", "Subscription-Key", "Ocp-Apim-Subscription-Key",
+      "key", "token", "access_token",
+    ]) {
       const moved = moveUrlCredentials({ transport: "streamable-http", url: `${base}?${param}=${PLAIN}&mode=x` });
       expect(moved.movedParam).toBe(param);
       expect(moved.target).toEqual({
@@ -114,7 +117,10 @@ describe("assertNoUrlCredentials", () => {
   const base = "http://127.0.0.1:9/mcp";
 
   it("refuses credential query parameters that are not moved, without printing the value", () => {
-    for (const param of ["private_key", "client_key", "auth", "pwd", "client_secret", "password"]) {
+    for (const param of [
+      "private_key", "client_key", "auth", "pwd", "client_secret", "password",
+      "session", "sid", "jwt", "bearer", "pass", "hmac", "code",
+    ]) {
       let message = "";
       try {
         assertNoUrlCredentials({ transport: "streamable-http", url: `${base}?mode=x&${param}=${PLAIN}` });
@@ -140,10 +146,18 @@ describe("assertNoUrlCredentials", () => {
     }
     expect(message).toMatch(/fragment holds a credential \(access_token\)/);
     expect(message).not.toContain(PLAIN);
+    expect(() => assertNoUrlCredentials({
+      transport: "streamable-http",
+      url: `${base}?mode=x#code=${PLAIN}&state=s1`,
+    })).toThrow(/fragment holds a credential \(code\)/);
   });
 
   it("allows ordinary parameters, fragments, and stdio targets", () => {
     expect(() => assertNoUrlCredentials({ transport: "streamable-http", url: `${base}?mode=x&auth_mode=none#section-2` })).not.toThrow();
+    expect(() => assertNoUrlCredentials({
+      transport: "streamable-http",
+      url: `${base}?max_tokens=128&page_token=abc&nextPageToken=def&tokenizer=bpe&secretary=none`,
+    })).not.toThrow();
     expect(() => assertNoUrlCredentials({ transport: "stdio", command: "node" })).not.toThrow();
   });
 });

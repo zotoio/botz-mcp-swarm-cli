@@ -25,6 +25,8 @@ export interface LatencyPercentiles {
 }
 
 export interface ToolSeries {
+  /** Alias of the server, on multi-server runs only. */
+  server?: string;
   toolName: string;
   count: number;
   errorRate: number;
@@ -35,6 +37,8 @@ export interface ToolSeries {
 }
 
 export interface RpcSeries {
+  /** Alias of the server, on multi-server runs only. */
+  server?: string;
   method: string;
   count: number;
   errorRate: number;
@@ -88,7 +92,10 @@ export interface ProcessRoleSummary {
 
 export interface ProcessSummary {
   worker: ProcessRoleSummary;
+  /** The default server's process, or all server processes on a single-server run. */
   sut: ProcessRoleSummary | null;
+  /** Stdio server processes by alias, on multi-server runs. */
+  suts?: Record<string, ProcessRoleSummary>;
   otelSpikeFlag: boolean;
 }
 
@@ -120,6 +127,37 @@ export interface GatewayMetrics {
   hopFailures: HopFailure[];
 }
 
+/** One server of a run, with its calls and sessions. */
+export interface RunServerSummary extends RunServer {
+  alias: string;
+  calls: number;
+  errorRate: number;
+  latencyMs: LatencyPercentiles;
+  sessionMetrics: SessionMetrics;
+}
+
+/** Whole passes: one virtual user from a scenario's first step to its last. */
+export interface FlowMetrics {
+  passes: number;
+  /** Passes whose scenario outcome was fail or error. */
+  passesFailed: number;
+  /** Passes where a missing required variable stopped later steps. */
+  passesSkipped: number;
+  latencyMs: LatencyPercentiles;
+}
+
+/** How often an extractor found a value. Values are never recorded. */
+export interface VariableSummary {
+  name: string;
+  /** Node id of the extractor. */
+  setBy: string;
+  /** Alias of the server whose result it read, on multi-server runs. */
+  server?: string;
+  resolved: number;
+  missing: number;
+  resolvedRate: number;
+}
+
 /** The MCP server a run exercised. */
 export interface RunServer {
   /** From the run's live `initialize` result; a saved-suite run falls back to the suite's recorded surface. */
@@ -142,7 +180,14 @@ export interface RunReport {
   silentGreen: boolean;
   mode: RunMode;
   transport: TransportType;
+  /** The default server. */
   server?: RunServer;
+  /** Every server the run used, default first. */
+  servers?: RunServerSummary[];
+  /** Whole-pass timing and outcomes. */
+  flow?: FlowMetrics;
+  /** Extractor results, without values. */
+  variables?: VariableSummary[];
   soak?: {
     iterations: number;
     durationMs: number;
@@ -184,12 +229,17 @@ export interface RunReport {
   };
   /** Work cut off by ramp-down or the drain deadline. Excluded from error rate, thresholds and pass/fail. */
   rampDown?: RampDownSummary;
-  catalog?: Array<{ name: string; schemaHash: string; writeLike?: boolean }>;
+  /** Tools by server. Entries without `server` belong to the default server. */
+  catalog?: Array<{ server?: string; name: string; schemaHash: string; writeLike?: boolean }>;
   nodeOutcomes?: Array<{
     nodeId: string;
     label: string;
+    /** Alias of the server, on multi-server runs only. */
+    server?: string;
     count: number;
     errorCount: number;
+    /** Passes where this step did not run because a required variable upstream was missing. */
+    skipped?: number;
     errorMessage?: string;
     /** Rate-limited attempts that were retried (not counted in errorCount). */
     retries?: number;
@@ -292,6 +342,8 @@ export interface RunProgressEvent {
 }
 
 export interface CompareDelta {
+  /** Alias of the server, when either report is multi-server. */
+  server?: string;
   toolName: string;
   catalogStatus: CatalogCompareStatus;
   /** Latency and error rate are scored only when the tool exists on both sides with the same schema. */
@@ -311,6 +363,8 @@ export interface CompareReport {
   generatedAt: string;
   baseServer?: RunServer;
   headServer?: RunServer;
+  /** Flow p95 in each report, when both have one. */
+  flow?: { baseP95: number; headP95: number; p95Delta: number; p95DeltaPct: number };
   /** Base and head ran against different servers or endpoints, so deltas may not measure one server. */
   warnings: string[];
   deltas: CompareDelta[];

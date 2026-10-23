@@ -57,7 +57,7 @@ export function effectiveCallSlo(suite: CallSlo | undefined, step: CallSlo | und
   };
 }
 
-function judge(kind: "Step" | "Tool", name: string, samples: CallSloSample[], limits: CallSlo): string[] {
+function judge(kind: "Step" | "Tool" | "Server", name: string, samples: CallSloSample[], limits: CallSlo): string[] {
   if (samples.length === 0) return [];
   const reasons: string[] = [];
   const errors = samples.filter((sample) => sample.failed).length;
@@ -126,4 +126,11 @@ export function callSloFailures(input: {
     reasons.push(...judge("Tool", tool, samples, effectiveCallSlo(input.suite, undefined)));
   }
   return reasons;
+}
+
+/** One server's objective, judged over every tool call on that server. */
+export function serverSloFailures(alias: string, samples: CallSloSample[], slo: CallSlo): string[] {
+  const limits = normalizeCallSlo(slo);
+  if (!limits) return [];
+  return judge("Server", alias, samples, { ...limits, maxErrorRate: limits.maxErrorRate ?? 1 });
 }

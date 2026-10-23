@@ -9,7 +9,17 @@ function formatBytes(n: number): string {
   return `${n} B`;
 }
 
+function pct(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+/** True when the run called more than one server. */
+export function isMultiServerReport(report: Pick<RunReport, "servers">): boolean {
+  return (report.servers?.length ?? 0) > 1;
+}
+
 export function formatMarkdownReport(report: RunReport): string {
+  const multi = isMultiServerReport(report);
   const lines: string[] = [
     `# botz-mcp-swarm Run Report`,
     ``,
@@ -20,7 +30,10 @@ export function formatMarkdownReport(report: RunReport): string {
     `| Mode | ${report.mode} |`,
     `| Verdict | **${report.verdict.toUpperCase()}** |`,
     `| Transport | ${report.transport} |`,
-    ...(report.server
+    ...(multi
+      ? report.servers!.map((server) =>
+          `| Server ${server.alias} | ${[server.name ?? "unknown", server.version].filter(Boolean).join(" ")} · \`${server.endpoint}\` |`)
+      : report.server
       ? [
           `| Server | ${[report.server.name ?? "unknown", report.server.version].filter(Boolean).join(" ")} |`,
           `| Endpoint | \`${report.server.endpoint}\` |`,
@@ -30,6 +43,35 @@ export function formatMarkdownReport(report: RunReport): string {
     `| Silent Green | ${report.silentGreen ? "YES (FAIL)" : "no"} |`,
     ``,
   ];
+
+  if (report.flow && report.flow.passes > 0) {
+    const { flow } = report;
+    lines.push(
+      `## Flow`,
+      ``,
+      `- Passes: ${flow.passes} (failed ${flow.passesFailed}, stopped by a missing variable ${flow.passesSkipped})`,
+      `- Pass duration: p50 ${flow.latencyMs.p50.toFixed(1)}ms, p95 ${flow.latencyMs.p95.toFixed(1)}ms, p99 ${flow.latencyMs.p99.toFixed(1)}ms`,
+      ``,
+    );
+  }
+
+  if (multi) {
+    // The first server in run order with failed calls is where the flow broke.
+    const firstFailing = report.servers!.find((server) => server.errorRate > 0)?.alias;
+    lines.push(
+      `## Servers`,
+      ``,
+      `| Server | Calls | Error Rate | p50 | p95 | p99 | Sessions |`,
+      `|--------|-------|------------|-----|-----|-----|----------|`,
+    );
+    for (const server of report.servers!) {
+      const mark = server.alias === firstFailing ? " (first failure)" : "";
+      lines.push(
+        `| ${server.alias}${mark} | ${server.calls} | ${pct(server.errorRate)} | ${server.latencyMs.p50.toFixed(1)} | ${server.latencyMs.p95.toFixed(1)} | ${server.latencyMs.p99.toFixed(1)} | ${server.sessionMetrics.started} |`,
+      );
+    }
+    lines.push(``);
+  }
 
   if (report.soak) {
     lines.push(
@@ -51,7 +93,14 @@ export function formatMarkdownReport(report: RunReport): string {
       `|------|-----|-----------|---------|---------|------------|`,
       `| worker | ${worker.pid} | ${formatBytes(worker.rssBytes.max)} | ${worker.cpuRatio.max.toFixed(3)} | ${worker.cpuRatio.avg.toFixed(3)} | ${otelSpikeFlag ? "YES" : "no"} |`,
     );
-    if (sut) {
+    const suts = report.processSummary.suts;
+    if (suts) {
+      for (const [alias, item] of Object.entries(suts)) {
+        lines.push(
+          `| sut ${alias} | ${item.pid} | ${formatBytes(item.rssBytes.max)} | ${item.cpuRatio.max.toFixed(3)} | ${item.cpuRatio.avg.toFixed(3)} | |`,
+        );
+      }
+    } else if (sut) {
       lines.push(
         `| sut | ${sut.pid} | ${formatBytes(sut.rssBytes.max)} | ${sut.cpuRatio.max.toFixed(3)} | ${sut.cpuRatio.avg.toFixed(3)} | |`,
       );
@@ -77,14 +126,41 @@ export function formatMarkdownReport(report: RunReport): string {
     lines.push(
       `## Per-Tool Metrics`,
       ``,
-      `| Tool | Calls | Error Rate | Mean (ms) | Std | p90 | p95 | p99 |`,
-      `|------|-------|------------|-----------|-----|-----|-----|-----|`,
+      multi ? `| Server | Tool | Calls | Error Rate | Mean (ms) | Std | p90 | p95 | p99 |` : `| Tool | Calls | Error Rate | Mean (ms) | Std | p90 | p95 | p99 |`,
+      multi ? `|--------|------|-------|------------|-----------|-----|-----|-----|-----|` : `|------|-------|------------|-----------|-----|-----|-----|-----|`,
     );
     for (const tool of report.toolSeries) {
       const latency = tool.latencyMs;
       lines.push(
-        `| ${tool.toolName} | ${tool.count} | ${(tool.errorRate * 100).toFixed(1)}% | ${(latency.mean ?? latency.p50).toFixed(1)} | ${(latency.std ?? 0).toFixed(1)} | ${(latency.p90 ?? latency.p50).toFixed(1)} | ${latency.p95.toFixed(1)} | ${latency.p99.toFixed(1)} |`,
+        `| ${multi ? `${tool.server ?? ""} | ` : ""}${tool.toolName} | ${tool.count} | ${(tool.errorRate * 100).toFixed(1)}% | ${(latency.mean ?? latency.p50).toFixed(1)} | ${(latency.std ?? 0).toFixed(1)} | ${(latency.p90 ?? latency.p50).toFixed(1)} | ${latency.p95.toFixed(1)} | ${latency.p99.toFixed(1)} |`,
       );
+    }
+    lines.push(``);
+  }
+
+  if (multi && (report.nodeOutcomes?.length ?? 0) > 0) {
+    lines.push(
+      `## Steps`,
+      ``,
+      `| Step | Server | Runs | Errors | Skipped |`,
+      `|------|--------|------|--------|---------|`,
+    );
+    for (const node of report.nodeOutcomes!) {
+      lines.push(`| ${node.label} | ${node.server ?? ""} | ${node.count} | ${node.errorCount} | ${node.skipped ?? 0} |`);
+    }
+    lines.push(``);
+  }
+
+  if ((report.variables?.length ?? 0) > 0) {
+    lines.push(
+      `## Variables`,
+      ``,
+      `| Variable | Set by | Server | Resolved |`,
+      `|----------|--------|--------|----------|`,
+    );
+    for (const variable of report.variables!) {
+      const flag = variable.resolvedRate < 1 ? " ⚠" : "";
+      lines.push(`| ${variable.name} | ${variable.setBy} | ${variable.server ?? ""} | ${pct(variable.resolvedRate)}${flag} |`);
     }
     lines.push(``);
   }

@@ -114,6 +114,19 @@ Refresh contacts the MCP server, without model calls or tool execution. It repor
 
 `--format text|json|junit` works with suites and manifests. JSON and Markdown report files are still written. JUnit includes aggregate verdict failures such as SLO failures. Run exit codes are 0 for pass, 1 for a failed verdict, 2 for configuration/execution errors, 130 for SIGINT, and 143 for SIGTERM. Validation errors include field paths; missing credentials identify the environment-variable name without its value.
 
+## Multi-server suites
+
+A suite can call tools on several MCP servers in one flow, passing values extracted from one server's result into another server's call:
+
+```bash
+botz mcp-swarm suite capture --url https://gh-mcp.example/mcp --name triage --alias github --bearer-env GH_TOKEN
+botz mcp-swarm suite server add --suite triage --alias jira --url https://jira-mcp.example/mcp --bearer-env JIRA_TOKEN
+botz mcp-swarm suite validate --suite triage    # lists the values that move between servers
+botz mcp-swarm suite run --suite triage --target jira=https://jira-staging.example/mcp --bearer-env jira=JIRA_STAGING_TOKEN
+```
+
+Steps name their server with `"server": "<alias>"`; steps without one call the default server. Each virtual user holds one session per server for its pass. Reports add per-server results, whole-pass `flow` latency, and extractor `variables` (never their values). See the [multi-server guide](docs/multi-server-suites.md).
+
 ## Offline diagnostics
 
 ```bash

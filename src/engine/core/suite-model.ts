@@ -4,6 +4,7 @@ import type { CallSlo } from "./call-slo.js";
 import { normalizeCallSlo } from "./call-slo.js";
 import type { ContractExpect } from "./contract.js";
 import { assignWaitFor, dagPredecessors } from "./execution-dag.js";
+import { DEFAULT_SERVER } from "./servers.js";
 import { LLM_STEP_TIMEOUT_MS } from "./inference-model.js";
 import type { ElicitAutoReply } from "../adapters/base.js";
 import { sampleArgsForTool, type JsonSchema, type ToolDescriptor } from "./tool-args.js";
@@ -173,6 +174,13 @@ export interface SuiteNode {
   /** Dot or JSONPath-like path into the previous JSON-RPC result. */
   path?: string;
   variable?: string;
+  /** Extractor only: a missing or empty value fails the step, and steps that use it are skipped for that pass. */
+  required?: boolean;
+  /**
+   * Alias of the server this step calls. On a group or loop, children without their own server inherit it.
+   * Absent means the suite's default server. Never set on extractors or think steps.
+   */
+  server?: string;
   iterations?: number;
   children?: SuiteNode[];
   /** Prompts that check whether a model calls this tool, and with what inputs. */
@@ -225,7 +233,9 @@ export interface CompiledStep {
   args?: Record<string, unknown>;
   expect?: ContractExpect;
   thinkMs?: number;
-  extract?: { variable: string; path: string };
+  extract?: { variable: string; path: string; required?: boolean };
+  /** Alias of the server this step calls. Absent means the default server. */
+  server?: string;
   nodeId?: string;
   label?: string;
   loopIndex?: number;
@@ -253,6 +263,10 @@ export interface CompiledManifest {
     url?: string;
     headers?: Record<string, string>;
   };
+  /** Servers other than the default, by alias. */
+  targets?: Record<string, CompiledManifest["target"]>;
+  /** Alias that `target` stands for. */
+  defaultTarget?: string;
   allowlist: string[];
   sessionPool: { size: number; reuse: "warm" | "cold" };
   quotas: {
@@ -271,6 +285,8 @@ export interface CompiledManifest {
     maxP95LatencyMs?: number;
     maxP99LatencyMs?: number;
     requireScenarioOutcomes: boolean;
+    /** Objectives judged over all tool calls on one server, by alias. */
+    servers?: Record<string, CallSlo>;
   };
   load: LoadProfile;
 }
@@ -282,6 +298,8 @@ export interface VarContext {
   vars: Record<string, string>;
   /** When set, a ${name} that is not a built-in and not in vars fails substitution. */
   strict?: boolean;
+  /** Names an extractor set on this pass. Their values never reach reports. */
+  extracted?: Set<string>;
   /** Epoch ms of the final drain deadline; failures after it are cancelled by ramp-down, not errors. */
   cancelAfter?: number;
 }
@@ -702,18 +720,19 @@ function completionNode(surface: ServerSurface): SuiteNode | null {
 
 const LOOP_EXPAND_CAP = 50;
 
-function compileInto(nodes: SuiteNode[], into: CompiledStep[]): void {
+function compileInto(nodes: SuiteNode[], into: CompiledStep[], server?: string): void {
   for (const node of nodes) {
     if (!node.enabled) continue;
+    const own = node.type === "sampler" || node.type === "group" || node.type === "loop" ? node.server ?? server : server;
     if (node.type === "group") {
-      compileInto(node.children ?? [], into);
+      compileInto(node.children ?? [], into, own);
       continue;
     }
     if (node.type === "loop") {
       const times = Math.min(Math.max(node.iterations ?? 1, 1), LOOP_EXPAND_CAP);
       for (let i = 0; i < times; i++) {
         const before = into.length;
-        compileInto(node.children ?? [], into);
+        compileInto(node.children ?? [], into, own);
         const key = `${node.id}#${i}`;
         for (let j = before; j < into.length; j++) {
           const step = into[j];
@@ -736,7 +755,7 @@ function compileInto(nodes: SuiteNode[], into: CompiledStep[]): void {
     if (node.type === "extractor") {
       into.push({
         method: "extract",
-        extract: { variable: node.variable ?? "extracted", path: node.path ?? "" },
+        extract: { variable: node.variable ?? "extracted", path: node.path ?? "", ...(node.required ? { required: true } : {}) },
         nodeId: node.id,
         label: node.label ?? node.variable ?? "Extract",
       });
@@ -751,6 +770,7 @@ function compileInto(nodes: SuiteNode[], into: CompiledStep[]): void {
         prompt: node.prompt,
         args: node.args,
         expect: node.expect,
+        ...(own ? { server: own } : {}),
         nodeId: node.id,
         label: node.label ?? node.tool ?? node.prompt ?? node.resourceUri ?? node.method,
         ...(node.method === "tools/call" && (node.evals?.length ?? 0) > 0
@@ -767,6 +787,12 @@ export function compileSuite(input: {
   name: string;
   description?: string;
   target: CompiledManifest["target"];
+  /** Servers other than the default, by alias. */
+  targets?: Record<string, CompiledManifest["target"]>;
+  /** Alias of `target`. Defaults to `default`. */
+  defaultServer?: string;
+  /** Objectives over all tool calls on one server, by alias. */
+  serverSlos?: Record<string, CallSlo>;
   allowlist: string[];
   nodes: SuiteNode[];
   load: Partial<LoadProfile>;
@@ -775,7 +801,17 @@ export function compileSuite(input: {
   limits?: Partial<SuiteLimits>;
 }): CompiledManifest {
   const steps: CompiledStep[] = [];
+  const defaultServer = input.defaultServer ?? DEFAULT_SERVER;
+  const targets = Object.fromEntries(Object.entries(input.targets ?? {}).filter(([alias]) => alias !== defaultServer));
+  const multi = Object.keys(targets).length > 0;
   compileInto(input.nodes, steps);
+  for (const step of steps) {
+    if (step.server === defaultServer) delete step.server;
+    if (step.server && !targets[step.server]) throw new Error(`step ${step.nodeId ?? step.label ?? step.method} uses unknown server ${step.server}`);
+  }
+  const serverSlos = Object.fromEntries(Object.entries(input.serverSlos ?? {})
+    .map(([alias, value]) => [alias, normalizeCallSlo(value)] as const)
+    .filter((entry): entry is readonly [string, CallSlo] => entry[1] !== undefined));
   assignWaitFor(steps, dagPredecessors(input.nodes));
   if (steps.length === 0) {
     throw new Error("suite_has_no_enabled_steps");
@@ -792,6 +828,7 @@ export function compileSuite(input: {
     name: input.name,
     description: input.description ?? "Project suite",
     target: input.target,
+    ...(multi ? { targets, defaultTarget: defaultServer } : defaultServer !== DEFAULT_SERVER ? { defaultTarget: defaultServer } : {}),
     allowlist: input.allowlist,
     sessionPool: { size: concurrency, reuse: "warm" },
     quotas: {
@@ -806,6 +843,7 @@ export function compileSuite(input: {
       ...(slo?.maxP95Ms !== undefined ? { maxP95LatencyMs: slo.maxP95Ms } : {}),
       ...(slo?.maxP99Ms !== undefined ? { maxP99LatencyMs: slo.maxP99Ms } : {}),
       requireScenarioOutcomes: true,
+      ...(Object.keys(serverSlos).length > 0 ? { servers: serverSlos } : {}),
     },
     load,
   };

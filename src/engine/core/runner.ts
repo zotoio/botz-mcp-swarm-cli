@@ -1,7 +1,7 @@
 import { LoadTimelineCollector } from "./load-timeline.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Manifest, Scenario, ScenarioStep, Target } from "../types/manifest.js";
-import type { RunMode, RunProgressEvent, RunReport } from "../types/run.js";
+import type { RunMode, RunProgressEvent, RunReport, RunServerSummary } from "../types/run.js";
 import { contractFailure, validateAgainstSchema } from "./contract.js";
 import { redactValue } from "./redaction.js";
 import { RunRecorder } from "./run-recorder.js";
@@ -18,7 +18,7 @@ import {
   type VarContext,
 } from "./suite-model.js";
 import { assertTargetAllowlisted } from "./allowlist.js";
-import { callSloFailures } from "./call-slo.js";
+import { callSloFailures, serverSloFailures } from "./call-slo.js";
 import { exclusiveActiveNode } from "./node-log.js";
 import { assertOrgTargetAllowlisted } from "./org-target-policy.js";
 import type { AllowlistEntry } from "../service/mcp-allowlist.js";
@@ -26,14 +26,16 @@ import {
   detectSilentGreen,
   computeVerdict,
   MetricsCollector,
+  summarizeLatencies,
 } from "./metrics.js";
 import {
   ProcessGaugeCollector,
   checkProcessAssertions,
 } from "./process-gauges.js";
 import { QuotaTracker } from "./quotas.js";
+import { SessionPoolSet } from "./session-pool.js";
+import { DEFAULT_SERVER } from "./servers.js";
 import { resolveRetryPolicy, retryingSession, type RetryEvent, type RetryPolicy } from "./rate-limit-retry.js";
-import { SessionPool } from "./session-pool.js";
 import { runServer } from "./run-server.js";
 import { resolveStdioTarget } from "./target-resolve.js";
 import {
@@ -153,11 +155,15 @@ interface StepTrace {
   nodeOutcomes: Map<string, NonNullable<RunReport["nodeOutcomes"]>[number]>;
   redactedArgs: Array<{ nodeId: string; tool?: string; args: unknown }>;
   seenArgs: Set<string>;
+  /** Set on multi-server runs: node outcomes then carry the alias of the server each step calls. */
+  defaultServer?: string;
   retryPolicy?: RetryPolicy;
   /** Epoch ms after which no retry may start (run max duration). */
   retryDeadline?: number;
   retries?: NonNullable<RunReport["retries"]>;
   recorder?: RunRecorder;
+  /** The manifest has extract steps: sample responses are not recorded, so extracted values never reach the report. */
+  hasExtractors?: boolean;
   /** Work cut off by ramp-down; never counted as errors. */
   rampDown?: { cancelled: number; incomplete: number; skipped: number };
   rampDownSummary?: { strategy: "graceful" | "immediate"; drainDeadlineMs: number; passEstimateMs?: number };
@@ -217,14 +223,28 @@ function applyContract<T extends { success: boolean; errorClass: import("../type
   return { ...result, success: false, errorClass: "protocol", errorMessage: message };
 }
 
-function noteNode(trace: StepTrace, step: ScenarioStep, ok: boolean, message?: string): void {
-  if (!step.nodeId) return;
-  const current: NonNullable<RunReport["nodeOutcomes"]>[number] = trace.nodeOutcomes.get(step.nodeId) ?? {
+function nodeOutcome(trace: StepTrace, step: ScenarioStep & { nodeId: string }): NonNullable<RunReport["nodeOutcomes"]>[number] {
+  const callsServer = step.method !== "think" && step.method !== "extract";
+  return trace.nodeOutcomes.get(step.nodeId) ?? {
     nodeId: step.nodeId,
     label: step.label ?? step.tool ?? step.method,
+    ...(trace.defaultServer && callsServer ? { server: step.server ?? trace.defaultServer } : {}),
     count: 0,
     errorCount: 0,
   };
+}
+
+/** A step that did not run because a required variable upstream was missing. */
+function noteSkip(trace: StepTrace, step: ScenarioStep): void {
+  if (!step.nodeId) return;
+  const current = nodeOutcome(trace, { ...step, nodeId: step.nodeId });
+  current.skipped = (current.skipped ?? 0) + 1;
+  trace.nodeOutcomes.set(step.nodeId, current);
+}
+
+function noteNode(trace: StepTrace, step: ScenarioStep, ok: boolean, message?: string): void {
+  if (!step.nodeId) return;
+  const current = nodeOutcome(trace, { ...step, nodeId: step.nodeId });
   current.count += 1;
   if (!ok) {
     current.errorCount += 1;
@@ -234,7 +254,7 @@ function noteNode(trace: StepTrace, step: ScenarioStep, ok: boolean, message?: s
 }
 
 async function executeStep(
-  session: McpSession,
+  session: McpSession | undefined,
   step: ScenarioStep,
   metrics: MetricsCollector,
   quota: QuotaTracker,
@@ -246,7 +266,9 @@ async function executeStep(
   ctx: VarContext,
   trace: StepTrace,
   emit: (name: RunProgressEvent["name"], attributes: Record<string, string | number | boolean>) => void,
-  prior?: { value: unknown },
+  prior?: { value: unknown; server?: string },
+  /** Alias of the step's server, on multi-server runs only. */
+  server?: string,
 ): Promise<{ ok: boolean; message?: string; result?: unknown; cancelled?: boolean }> {
   if (step.method === "think") {
     await sleep(step.thinkMs ?? 0);
@@ -264,7 +286,20 @@ async function executeStep(
       }
     }
     const value = readPath(last, step.extract?.path ?? "");
-    ctx.vars[variable] = value == null ? "" : typeof value === "string" ? value : JSON.stringify(value);
+    const text = value == null ? "" : typeof value === "string" ? value : JSON.stringify(value);
+    ctx.vars[variable] = text;
+    (ctx.extracted ??= new Set()).add(variable);
+    metrics.recordVariable({
+      name: variable,
+      setBy: step.nodeId ?? variable,
+      ...(trace.defaultServer && prior?.server ? { server: prior.server } : {}),
+      resolved: text !== "",
+    });
+    if (step.extract?.required && text === "") {
+      const message = `extract_missing: ${variable} (${step.extract.path || "$"})`;
+      noteNode(trace, step, false, message);
+      return { ok: false, message };
+    }
     noteNode(trace, step, true);
     return { ok: true };
   }
@@ -272,6 +307,11 @@ async function executeStep(
     noteNode(trace, step, true);
     return { ok: true };
   }
+  if (!session) {
+    noteNode(trace, step, false, "session_missing");
+    return { ok: false, message: "session_missing" };
+  }
+  const serverAttr: Record<string, string> = server ? { server } : {};
 
   let args: Record<string, unknown>;
   try {
@@ -291,12 +331,20 @@ async function executeStep(
       return { ok: false, message: `arguments do not match inputSchema: ${inputError}` };
     }
   }
+  // Extracted values come from another call's result and may be private, so they are shown as ${name}.
+  const shown = ctx.extracted?.size
+    ? (substituteValue(step.args ?? {}, {
+      ...ctx,
+      strict: false,
+      vars: { ...ctx.vars, ...Object.fromEntries([...ctx.extracted].map((name) => [name, `\${${name}}`])) },
+    }, randomUUID) ?? {}) as Record<string, unknown>
+    : args;
   if (step.nodeId && !trace.seenArgs.has(step.nodeId)) {
     trace.seenArgs.add(step.nodeId);
     trace.redactedArgs.push({
       nodeId: step.nodeId,
       tool: step.tool,
-      args: redactValue(args),
+      args: redactValue(shown),
     });
   }
 
@@ -319,6 +367,7 @@ async function executeStep(
       return { ok: false, cancelled: true, message: "cancelled by ramp-down" };
     }
     const obs = {
+      ...serverAttr,
       method,
       toolName,
       nodeId: step.nodeId,
@@ -336,22 +385,25 @@ async function executeStep(
       latencyMs: result.latencyMs,
       result: result.errorClass === "none" ? "ok" : result.errorClass,
       tool: toolName ?? "",
+      ...serverAttr,
     });
     if (method === "tools/call" && toolName) {
       emit("mcp.tool.call.duration", {
         tool: toolName,
         latencyMs: result.latencyMs,
         result: result.errorClass === "none" ? "ok" : result.errorClass,
+        ...serverAttr,
       });
       if (result.errorClass !== "none") {
-        emit("mcp.tool.call.errors", { tool: toolName, error_class: result.errorClass });
+        emit("mcp.tool.call.errors", { tool: toolName, error_class: result.errorClass, ...serverAttr });
       }
       trace.recorder?.recordToolCall({
         tool: toolName,
         ok: result.errorClass === "none" && expected.ok,
         latencyMs: result.latencyMs,
-        args,
-        result: contracted.result,
+        args: shown,
+        // Results that feed extractors would put the extracted values in the report; keep only their size.
+        result: trace.hasExtractors ? undefined : contracted.result,
         errorClass: result.errorClass === "none" && !expected.ok ? "protocol" : result.errorClass,
         errorMessage: expected.message ?? contracted.errorMessage,
         nodeId: step.nodeId,
@@ -375,6 +427,7 @@ async function executeStep(
   const capFail = assertRequiredCapabilities(session, step);
   if (capFail) {
     metrics.recordCall({
+      ...serverAttr,
       method: step.method,
       toolName: step.tool,
       nodeId: step.nodeId,
@@ -506,6 +559,12 @@ async function executeStep(
 
 interface ScenarioRunContext {
   transport: string;
+  /** Alias of the default server. */
+  defaultServer: string;
+  /** True when steps call more than one server; reports and events then carry aliases. */
+  multiServer: boolean;
+  /** Transport of each server, by alias. */
+  transports: Map<string, string>;
   hopObservations: HopObservation[];
   gatewayMode: boolean;
   trace: StepTrace;
@@ -525,20 +584,25 @@ interface ScenarioRunContext {
 
 async function runScenario(
   scenario: Scenario,
-  pool: SessionPool,
+  pools: SessionPoolSet,
   metrics: MetricsCollector,
   quota: QuotaTracker,
   telemetry: TelemetryHandle,
   run: ScenarioRunContext,
 ): Promise<void> {
   await Promise.all(
-    Array.from({ length: scenario.iterations }, (_, i) => runScenarioPass(scenario, pool, metrics, quota, telemetry, run, i)),
+    Array.from({ length: scenario.iterations }, (_, i) => runScenarioPass(scenario, pools, metrics, quota, telemetry, run, i)),
   );
+}
+
+interface HeldSession {
+  session: McpSession;
+  reused: boolean;
 }
 
 async function runScenarioPass(
   scenario: Scenario,
-  pool: SessionPool,
+  pools: SessionPoolSet,
   metrics: MetricsCollector,
   quota: QuotaTracker,
   telemetry: TelemetryHandle,
@@ -546,12 +610,16 @@ async function runScenarioPass(
   i: number,
 ): Promise<PassResult> {
   await quota.acquireConcurrency({ wait: true });
-    const passStarted = Date.now();
-    let session: McpSession | undefined;
-    let reused = false;
-    let scenarioOk = true;
+    const passBegan = Date.now();
     let cancelled = false;
+    // Sessions this pass holds, one per server, checked out when a step first needs that server.
+    const held = new Map<string, Promise<HeldSession>>();
+    const opened = new Map<string, HeldSession>();
+    const unreachable = new Map<string, string>();
+    let scenarioOk = true;
     let lastMessage: string | undefined;
+    let skippedAny = false;
+    let passStarted: number | undefined;
     const ctx: VarContext = {
       thread: run.thread,
       iter: run.iter + i,
@@ -560,29 +628,69 @@ async function runScenarioPass(
       strict: run.strictParams === true,
       ...(run.drainAt !== undefined ? { cancelAfter: run.drainAt } : {}),
     };
+    const pastDrain = () => run.drainAt !== undefined && Date.now() >= run.drainAt;
+    const aliasOf = (step: ScenarioStep) => step.server ?? run.defaultServer;
+    const serverAttr = (alias: string): Record<string, string> => (run.multiServer ? { server: alias } : {});
+    const checkout = (alias: string): Promise<HeldSession> => {
+      let pending = held.get(alias);
+      if (!pending) {
+        pending = pools.acquire(alias).then((acquired) => {
+          opened.set(alias, acquired);
+          const transport = run.transports.get(alias) ?? run.transport;
+          metrics.recordSessionStart(alias);
+          telemetry.recordSessionStart(transport, "started");
+          run.emit("mcp.session.start", { transport, result: "started", thread: run.thread, ...serverAttr(alias) });
+          return acquired;
+        });
+        held.set(alias, pending);
+      }
+      return pending;
+    };
+    const releaseAll = async (keepWarm: boolean, ok: boolean) => {
+      for (const [alias, item] of opened) {
+        metrics.recordSessionEnd(ok, alias);
+        telemetry.recordSessionStart(run.transports.get(alias) ?? run.transport, ok ? "ok" : "fail");
+        await pools.release(alias, item.session, keepWarm);
+      }
+      opened.clear();
+    };
 
     try {
-      const acquired = await pool.acquire();
-      session = acquired.session;
-      if (!session) throw new Error("session_missing");
-      const boundSession = session;
-      reused = acquired.reused;
-      metrics.recordSessionStart();
-      telemetry.recordSessionStart(run.transport, "started");
-      run.emit("mcp.session.start", { transport: run.transport, result: "started", thread: run.thread });
+      // A single-server pass opens its session first, as it always has; a failure makes the whole pass an error.
+      if (!run.multiServer) {
+        const first = await checkout(run.defaultServer);
+        if (!first.session) throw new Error("session_missing");
+      }
 
-      const results = new Map<number, unknown>();
+      const results = new Map<number, { value: unknown; server?: string }>();
+      // Steps that did not run, or a required extractor that found nothing. Steps waiting on them are skipped.
+      const blocked = new Set<number>();
       const runOne = async (index: number): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> => {
         const step = scenario.steps[index]!;
         ctx.loop = step.loopIndex ?? 0;
         const stepStarted = Date.now();
+        passStarted ??= stepStarted;
         const nodeId = step.nodeId ?? "";
-        if (nodeId) run.activeNodes.add(nodeId);
+        const alias = aliasOf(step);
+        const callsServer = step.method !== "think" && step.method !== "extract";
+        const label = step.label ?? step.tool ?? step.method;
         const producer = step.waitFor?.at(-1);
+        if ((step.waitFor ?? []).some((pred) => blocked.has(pred))) {
+          blocked.add(index);
+          skippedAny = true;
+          noteSkip(run.trace, step);
+          run.emit("mcp.step", {
+            node: nodeId, label, method: step.method, phase: "done", result: "skip", latencyMs: 0,
+            iter: ctx.iter, thread: run.thread, loop: ctx.loop, ...(callsServer ? serverAttr(alias) : {}),
+          });
+          return { ok: true };
+        }
+        if (nodeId) run.activeNodes.add(nodeId);
+        let bound: McpSession | undefined;
         try {
           run.emit("mcp.step", {
             node: nodeId,
-            label: step.label ?? step.tool ?? step.method,
+            label,
             method: step.method,
             phase: "start",
             result: "run",
@@ -590,38 +698,67 @@ async function runScenarioPass(
             iter: ctx.iter,
             thread: run.thread,
             loop: ctx.loop,
+            ...(callsServer ? serverAttr(alias) : {}),
           });
-          const stepSession = run.trace.retryPolicy
-            ? retryingSession(boundSession, run.trace.retryPolicy, {
-                deadline: () => minDeadline(run.drainAt, run.trace.retryDeadline),
-                onRetry: (method, event) =>
-                  noteRetry(run.trace, run.emit, method === "callTool" ? "tools/call" : step.method, event, {
-                    nodeId: step.nodeId,
-                    label: step.label,
-                    tool: step.tool,
-                    thread: run.thread,
-                  }),
-              })
-            : boundSession;
-          const result = await executeStep(
-            stepSession,
-            step,
-            metrics,
-            quota,
-            reused,
-            telemetry,
-            run.transport,
-            run.hopObservations,
-            run.gatewayMode,
-            ctx,
-            run.trace,
-            run.emit,
-            producer === undefined ? undefined : { value: results.get(producer) },
-          );
-          results.set(index, result.result);
+          let reused = false;
+          let result: { ok: boolean; message?: string; result?: unknown; cancelled?: boolean } | undefined;
+          const down = callsServer ? unreachable.get(alias) : undefined;
+          if (down) {
+            result = recordUnreachable(step, alias, down, metrics, run);
+          } else {
+            if (callsServer) {
+              try {
+                const acquired = await checkout(alias);
+                bound = acquired.session;
+                reused = acquired.reused;
+              } catch (error) {
+                // Past the drain deadline a server that will not open is ramp-down, not an outage.
+                if (pastDrain()) {
+                  noteRampDown(run.trace, "cancelled");
+                  return { ok: false, cancelled: true, message: "cancelled by ramp-down" };
+                }
+                const message = unreachable.get(alias) ?? `session failed on ${alias}: ${describeSessionFailure(error, pools.target(alias))}`;
+                // Steps in one wave share the failed checkout; count the failed session once.
+                if (!unreachable.has(alias)) metrics.recordSessionEnd(false, alias);
+                unreachable.set(alias, message);
+                result = recordUnreachable(step, alias, message, metrics, run);
+                bound = undefined;
+              }
+            }
+            const stepSession = bound && run.trace.retryPolicy
+              ? retryingSession(bound, run.trace.retryPolicy, {
+                  deadline: () => minDeadline(run.drainAt, run.trace.retryDeadline),
+                  onRetry: (method, event) =>
+                    noteRetry(run.trace, run.emit, method === "callTool" ? "tools/call" : step.method, event, {
+                      nodeId: step.nodeId,
+                      label: step.label,
+                      tool: step.tool,
+                      thread: run.thread,
+                    }),
+                })
+              : bound;
+            result ??= await executeStep(
+              stepSession,
+              step,
+              metrics,
+              quota,
+              reused,
+              telemetry,
+              run.transports.get(alias) ?? run.transport,
+              run.hopObservations,
+              run.gatewayMode,
+              ctx,
+              run.trace,
+              run.emit,
+              producer === undefined ? undefined : results.get(producer) ?? { value: undefined },
+              run.multiServer ? alias : undefined,
+            );
+          }
+          results.set(index, { value: result.result, ...(callsServer ? { server: alias } : {}) });
+          if (!result.ok && step.method === "extract" && step.extract?.required) blocked.add(index);
           run.emit("mcp.step", {
             node: nodeId,
-            label: step.label ?? step.tool ?? step.method,
+            label,
             method: step.method,
             phase: "done",
             result: result.ok ? "ok" : "fail",
@@ -629,11 +766,12 @@ async function runScenarioPass(
             iter: ctx.iter,
             thread: run.thread,
             loop: ctx.loop,
+            ...(callsServer ? serverAttr(alias) : {}),
           });
           return result;
         } finally {
-          if (step.elicit) {
-            boundSession.setElicitAutoReply({ action: "accept", content: {} });
+          if (step.elicit && bound) {
+            bound.setElicitAutoReply({ action: "accept", content: {} });
           }
           if (nodeId) run.activeNodes.delete(nodeId);
         }
@@ -651,12 +789,26 @@ async function runScenarioPass(
         cancelled = true;
         return true;
       };
+      const skipChained = (index: number): { ok: boolean } => {
+        const step = scenario.steps[index]!;
+        blocked.add(index);
+        skippedAny = true;
+        noteSkip(run.trace, step);
+        run.emit("mcp.step", {
+          node: step.nodeId ?? "", label: step.label ?? step.tool ?? step.method, method: step.method, phase: "done",
+          result: "skip", latencyMs: 0, iter: ctx.iter, thread: run.thread, loop: step.loopIndex ?? 0,
+          ...(step.method !== "think" && step.method !== "extract" ? serverAttr(aliasOf(step)) : {}),
+        });
+        return { ok: true };
+      };
       const dag = scenario.steps.some((step) => step.waitFor !== undefined);
       if (!dag) {
         for (let index = 0; index < scenario.steps.length; index++) {
           if (drained()) break;
-          note(await runOne(index));
-          if (index < scenario.steps.length - 1 && run.dwellMs > 0) await sleep(run.dwellMs);
+          // Without a graph every step follows the one before it, so a missing required value stops the rest.
+          const result = blocked.size > 0 ? skipChained(index) : await runOne(index);
+          note(result);
+          if (index < scenario.steps.length - 1 && run.dwellMs > 0 && blocked.size === 0) await sleep(run.dwellMs);
         }
       } else {
         const pending = new Set(scenario.steps.map((_step, index) => index));
@@ -676,7 +828,8 @@ async function runScenarioPass(
             .map((index) => (scenario.steps[index]?.waitFor ?? []).join("."))
             .sort()
             .join("|");
-          if (waveKey && !dwelled.has(waveKey) && done.size > 0 && run.dwellMs > 0) {
+          const allSkipped = ready.every((index) => (scenario.steps[index]?.waitFor ?? []).some((pred) => blocked.has(pred)));
+          if (!allSkipped && waveKey && !dwelled.has(waveKey) && done.size > 0 && run.dwellMs > 0) {
             await sleep(run.dwellMs);
           }
           dwelled.add(waveKey);
@@ -691,12 +844,11 @@ async function runScenarioPass(
       }
 
       if (cancelled && scenarioOk) {
-        // Stopped by the drain deadline with no real failure: incomplete, not failed.
+        // Stopped by the drain deadline with no real failure: incomplete, not failed. Not counted as a flow pass.
         noteRampDown(run.trace, "incomplete");
         run.emit("mcp.scenario.result", { scenario: scenario.name, outcome: "cancelled", thread: run.thread });
-        metrics.recordSessionEnd(true);
-        await pool.release(session, true);
-        return { durationMs: Date.now() - passStarted, completed: false };
+        await releaseAll(true, true);
+        return { durationMs: Date.now() - passBegan, completed: false };
       }
       const outcome = scenarioOk ? "pass" : "fail";
       metrics.recordScenarioOutcome({
@@ -704,31 +856,32 @@ async function runScenarioPass(
         outcome,
         message: lastMessage,
       });
+      metrics.recordPass({ durationMs: passStarted === undefined ? 0 : Date.now() - passStarted, outcome, skipped: skippedAny });
       telemetry.recordScenario(scenario.name, outcome);
       run.emit("mcp.scenario.result", { scenario: scenario.name, outcome, thread: run.thread });
-      metrics.recordSessionEnd(scenarioOk);
-      telemetry.recordSessionStart(run.transport, scenarioOk ? "ok" : "fail");
-      await pool.release(session, true);
-      return { durationMs: Date.now() - passStarted, completed: !cancelled };
+      await releaseAll(true, scenarioOk);
+      return { durationMs: Date.now() - passBegan, completed: !cancelled };
     } catch (error) {
-      if (run.drainAt !== undefined && Date.now() >= run.drainAt) {
+      if (pastDrain()) {
         noteRampDown(run.trace, "incomplete");
-        if (session) await pool.release(session, false);
-        return { durationMs: Date.now() - passStarted, completed: false };
+        for (const [alias, item] of opened) await pools.release(alias, item.session, false);
+        opened.clear();
+        return { durationMs: Date.now() - passBegan, completed: false };
       }
-      metrics.recordSessionEnd(false);
       metrics.recordScenarioOutcome({
         scenario: scenario.name,
         outcome: "error",
         message: error instanceof Error ? error.message : String(error),
       });
+      metrics.recordPass({ durationMs: passStarted === undefined ? 0 : Date.now() - passStarted, outcome: "error", skipped: skippedAny });
       run.emit("mcp.scenario.result", {
         scenario: scenario.name,
         outcome: "error",
         thread: run.thread,
       });
-      if (session) await pool.release(session, false);
-      return { durationMs: Date.now() - passStarted, completed: false };
+      if (opened.size === 0) metrics.recordSessionEnd(false, run.defaultServer);
+      await releaseAll(false, false);
+      return { durationMs: Date.now() - passBegan, completed: false };
     } finally {
       quota.releaseConcurrency();
     }
@@ -740,6 +893,29 @@ interface PassResult {
   completed: boolean;
 }
 
+/** A step whose server could not be reached: a transport failure counted against that server. */
+function recordUnreachable(
+  step: ScenarioStep,
+  alias: string,
+  message: string,
+  metrics: MetricsCollector,
+  run: ScenarioRunContext,
+): { ok: false; message: string } {
+  metrics.recordCall({
+    ...(run.multiServer ? { server: alias } : {}),
+    method: step.method,
+    toolName: step.tool,
+    nodeId: step.nodeId,
+    latencyMs: 0,
+    errorClass: "transport",
+    bytesIn: 0,
+    bytesOut: 0,
+    sessionReuse: false,
+  });
+  noteNode(run.trace, step, false, message);
+  return { ok: false, message };
+}
+
 function scenarioContext(
   manifest: Manifest,
   hopObservations: HopObservation[],
@@ -747,8 +923,13 @@ function scenarioContext(
   emit: ScenarioRunContext["emit"],
   extra?: Partial<ScenarioRunContext>,
 ): ScenarioRunContext {
+  const defaultServer = manifest.defaultTarget ?? DEFAULT_SERVER;
+  const others = Object.entries(manifest.targets ?? {});
   return {
     transport: manifest.target.transport,
+    defaultServer,
+    multiServer: others.length > 0,
+    transports: new Map([[defaultServer, manifest.target.transport], ...others.map(([alias, item]) => [alias, item.transport] as [string, string])]),
     hopObservations,
     gatewayMode: isGatewayMode(manifest),
     trace,
@@ -765,7 +946,7 @@ function scenarioContext(
 
 async function runAllScenarios(
   manifest: Manifest,
-  pool: SessionPool,
+  pool: SessionPoolSet,
   metrics: MetricsCollector,
   quota: QuotaTracker,
   telemetry: TelemetryHandle,
@@ -791,7 +972,7 @@ async function runAllScenarios(
 
 async function runLoadProfile(
   manifest: Manifest,
-  pool: SessionPool,
+  pool: SessionPoolSet,
   metrics: MetricsCollector,
   quota: QuotaTracker,
   telemetry: TelemetryHandle,
@@ -859,11 +1040,32 @@ async function runLoadProfile(
   };
 }
 
-function resolveTarget(manifest: Manifest, baseDir?: string) {
-  if (manifest.target.transport === "stdio") {
-    return resolveStdioTarget(manifest.target, baseDir);
+function resolveTarget(target: Target, baseDir?: string): Target {
+  if (target.transport === "stdio") {
+    return resolveStdioTarget(target, baseDir);
   }
-  return manifest.target;
+  return target;
+}
+
+/** Every server of a manifest by alias, default first, with stdio paths resolved. */
+function resolveTargets(manifest: Manifest, baseDir?: string): Map<string, Target> {
+  const defaultServer = manifest.defaultTarget ?? DEFAULT_SERVER;
+  return new Map([
+    [defaultServer, resolveTarget(manifest.target, baseDir)],
+    ...Object.entries(manifest.targets ?? {}).map(([alias, item]) => [alias, resolveTarget(item, baseDir)] as [string, Target]),
+  ]);
+}
+
+/** Aliases that an enabled step calls, so warm-up opens no session a run never uses. */
+function calledServers(manifest: Manifest, defaultServer: string): string[] {
+  const used = new Set<string>();
+  for (const scenario of manifest.scenarios) {
+    for (const step of scenario.steps) {
+      if (step.method === "think" || step.method === "extract") continue;
+      used.add(step.server ?? defaultServer);
+    }
+  }
+  return used.size > 0 ? [...used] : [defaultServer];
 }
 
 function buildFailReasons(
@@ -919,6 +1121,37 @@ function buildFailReasons(
   return failReasons;
 }
 
+/** Calls, error rate, latency, and sessions for one server. A single-server run counts every call. */
+function serverSummary(
+  alias: string,
+  target: Target,
+  info: { name?: string; version?: string } | undefined,
+  metrics: MetricsCollector,
+  multiServer: boolean,
+): RunServerSummary {
+  const calls = metrics.getObservations().filter((obs) => !multiServer || obs.server === alias);
+  const errors = calls.filter((obs) => obs.errorClass !== "none").length;
+  return {
+    alias,
+    ...runServer(target, info),
+    calls: calls.length,
+    errorRate: calls.length > 0 ? errors / calls.length : 0,
+    latencyMs: summarizeLatencies(calls.map((obs) => obs.latencyMs)),
+    sessionMetrics: { transport: target.transport, ...metrics.getServerSessions(alias) },
+  };
+}
+
+/** Per-server objectives, judged over every tool call on that server. */
+function serverSloReasons(manifest: Manifest, samples: ReturnType<MetricsCollector["getObservations"]>, defaultServer: string): string[] {
+  const reasons: string[] = [];
+  for (const [alias, slo] of Object.entries(manifest.assertions.servers ?? {})) {
+    reasons.push(...serverSloFailures(alias, samples
+      .filter((sample) => sample.method === "tools/call" && (sample.server ?? defaultServer) === alias)
+      .map((sample) => ({ toolName: sample.toolName, latencyMs: sample.latencyMs, failed: sample.errorClass !== "none" })), slo));
+  }
+  return reasons;
+}
+
 /** Names the URL or command inside a session-open failure, plus the OS error when fetch only says "fetch failed". */
 export function describeSessionFailure(error: unknown, target: Target): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -953,32 +1186,48 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     .digest("hex")
     .slice(0, 16);
 
-  const target = resolveTarget(manifest, manifestDir);
+  const defaultServer = manifest.defaultTarget ?? DEFAULT_SERVER;
+  const targets = resolveTargets(manifest, manifestDir);
+  const multiServer = targets.size > 1;
+  const target = targets.get(defaultServer)!;
+  // Every server must pass the same checks; the refusal names the server when there is more than one.
+  const forServer = <T>(alias: string, check: () => T): T => {
+    try {
+      return check();
+    } catch (error) {
+      if (!multiServer || !(error instanceof Error)) throw error;
+      throw Object.assign(new Error(`server ${alias}: ${error.message}`, { cause: error }), { name: error.name });
+    }
+  };
   if (options.standaloneTarget) {
     if (options.orgTargetAllowlist || options.orgGatewayAllowlist) {
       throw new Error("a standalone run takes no org allowlist");
     }
   } else {
-    assertTargetAllowlisted(target, manifest.allowlist, manifest.gateway?.gatewayId);
+    for (const [alias, item] of targets) {
+      forServer(alias, () => assertTargetAllowlisted(item, manifest.allowlist, manifest.gateway?.gatewayId));
+    }
   }
   if (options.orgTargetAllowlist) {
-    const orgCheck = assertOrgTargetAllowlisted(
-      target,
-      options.orgTargetAllowlist,
-      manifestDir,
-      manifest.gateway?.gatewayId,
-      options.orgGatewayAllowlist,
-    );
-    if (orgCheck.usedLegacyStdioWildcard) {
-      await appendAudit({
-        kind: "legacy_stdio_allowlist_run",
-        principal: options.principal,
-        detail: `manifest=${manifest.name}`,
-      });
+    for (const [alias, item] of targets) {
+      const orgCheck = forServer(alias, () => assertOrgTargetAllowlisted(
+        item,
+        options.orgTargetAllowlist!,
+        manifestDir,
+        manifest.gateway?.gatewayId,
+        options.orgGatewayAllowlist,
+      ));
+      if (orgCheck.usedLegacyStdioWildcard) {
+        await appendAudit({
+          kind: "legacy_stdio_allowlist_run",
+          principal: options.principal,
+          detail: `manifest=${manifest.name}${multiServer ? ` server=${alias}` : ""}`,
+        });
+      }
     }
   }
 
-  const metrics = new MetricsCollector();
+  const metrics = new MetricsCollector(multiServer);
   const quota = new QuotaTracker(manifest.quotas);
   const failReasons: string[] = [];
   const hopObservations: HopObservation[] = [];
@@ -987,9 +1236,11 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     nodeOutcomes: new Map(),
     redactedArgs: [],
     seenArgs: new Set(),
+    ...(multiServer ? { defaultServer } : {}),
     retryPolicy,
     retryDeadline: Date.now() + manifest.quotas.maxDurationMs,
     recorder: new RunRecorder(Date.now()),
+    hasExtractors: manifest.scenarios.some((scenario) => scenario.steps.some((step) => step.method === "extract")),
   };
   const timeline = new LoadTimelineCollector();
   const emit = (
@@ -1011,23 +1262,22 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
   processCollector.start(sampleIntervalMs);
 
   const activeNodes = new Set<string>();
-  const pool = new SessionPool({
+  const pool = new SessionPoolSet(defaultServer, targets, {
     size:
       mode === "load"
         ? Math.max(manifest.sessionPool.size, manifest.load?.maxConcurrency ?? 1)
         : manifest.sessionPool.size,
     reuse: manifest.sessionPool.reuse,
-    target,
     baseDir: manifestDir,
     retry: {
       policy: retryPolicy,
       deadline: () => trace.retryDeadline,
       onRetry: (event) => noteRetry(trace, emit, "initialize", event),
     },
-    onSutPid: (pid) => processCollector.trackSutPid(pid),
-    onStderr: (line) => {
+    onSutPid: (pid, alias) => processCollector.trackSutPid(pid, alias),
+    onStderr: (line, alias) => {
       const node = exclusiveActiveNode(activeNodes);
-      emit("sut.stderr", node ? { line, node } : { line });
+      emit("sut.stderr", { line, ...(node ? { node } : {}), ...(multiServer ? { server: alias } : {}) });
     },
   });
 
@@ -1039,10 +1289,13 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
   let sessionReady = true;
   if (manifest.sessionPool.reuse === "warm") {
     try {
-      await pool.warmUp();
+      await pool.warmUp(calledServers(manifest, defaultServer));
     } catch (error) {
       sessionReady = false;
-      failReasons.push(`Session warm-up failed: ${describeSessionFailure(error, target)}`);
+      const alias = (error as { serverAlias?: string }).serverAlias ?? defaultServer;
+      const cause = error instanceof Error && error.cause !== undefined ? error.cause : error;
+      failReasons.push(`Session warm-up failed${multiServer ? ` on ${alias}` : ""}: ${describeSessionFailure(cause, pool.target(alias))}`);
+      await pool.drain();
     }
   }
 
@@ -1106,12 +1359,13 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       cpuRatio: sample.cpuRatio,
     });
   }
-  const processSummaryRaw = processCollector.summarize();
+  const processSummaryRaw = processCollector.summarize(multiServer ? defaultServer : undefined);
+  const serverProcesses = [processSummaryRaw.sut, ...Object.values(processSummaryRaw.suts ?? {})];
   const otelSpikeFlag =
     processSummaryRaw.worker.cpuRatio.max > 0.8 ||
-    (processSummaryRaw.sut?.cpuRatio.max ?? 0) > 0.8 ||
+    serverProcesses.some((sut) => (sut?.cpuRatio.max ?? 0) > 0.8) ||
     processSummaryRaw.worker.rssBytes.max > 512 * 1024 * 1024 ||
-    (processSummaryRaw.sut?.rssBytes.max ?? 0) > 512 * 1024 * 1024;
+    serverProcesses.some((sut) => (sut?.rssBytes.max ?? 0) > 512 * 1024 * 1024);
 
   const processSummary = {
     ...processSummaryRaw,
@@ -1157,6 +1411,8 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     );
   }
 
+  failReasons.push(...serverSloReasons(manifest, metrics.getObservations(), defaultServer));
+
   const verdict = computeVerdict(failReasons, silentGreen);
   const gatewayMetrics = buildGatewayMetrics(manifest, hopObservations);
 
@@ -1178,6 +1434,9 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     mode,
     transport: manifest.target.transport,
     server: runServer(target, pool.serverInfo()),
+    servers: [...targets].map(([alias, item]) => serverSummary(alias, item, pool.serverInfo(alias), metrics, multiServer)),
+    flow: metrics.buildFlow(),
+    ...(metrics.buildVariables().length > 0 ? { variables: metrics.buildVariables() } : {}),
     soak: mode === "soak"
       ? {
           iterations: soakIterations,

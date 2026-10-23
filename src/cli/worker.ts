@@ -5,6 +5,7 @@ import { normalizeLoadProfile, type LoadProfile, type SuiteNode } from "../engin
 import type { CallSlo } from "../engine/core/call-slo.js";
 import type { AllowlistEntry } from "../engine/service/mcp-allowlist.js";
 import type { Target } from "../engine/types/manifest.js";
+import { DEFAULT_SERVER } from "../engine/core/servers.js";
 import type { RunProgressEvent, RunReport } from "../engine/types/run.js";
 import {
   defaultScrubContext,
@@ -78,18 +79,30 @@ export type WorkerSuite = {
   version: number;
   destructive: boolean;
   principal: string;
-  suite: { name: string; nodes: SuiteNode[]; load: LoadProfile; slo?: CallSlo; limits?: SuiteLimitsInput };
+  /** Steps' `server` fields hold aliases from `targets`. */
+  suite: { name: string; nodes: SuiteNode[]; load: LoadProfile; slo?: CallSlo; serverSlos?: Record<string, CallSlo>; limits?: SuiteLimitsInput };
+  /** The default server. */
   target: Target;
+  /** Other servers the steps call, by alias. */
+  targets?: Record<string, Target>;
+  /** Alias of `target`. Absent means `default`. */
+  defaultServer?: string;
   allowlist: string[];
-  catalog: Array<{ name: string; schemaHash: string; writeLike: boolean }>;
+  catalog: Array<{ server?: string; name: string; schemaHash: string; writeLike: boolean }>;
   policy: { targetAllowlist: AllowlistEntry[]; gatewayAllowlist: AllowlistEntry[] };
   limits: {
     runnerConstrained: boolean;
     runner: { maxDurationMs: number; maxConcurrency: number; maxIterations: number; maxDwellMs: number };
     executionDeadlineMs: number;
   };
-  requiredEnv: Array<{ name: string; source: "header" | "env"; key: string; mapped: boolean }>;
+  /** `server` names the alias a variable is for, on multi-server assignments. */
+  requiredEnv: Array<{ name: string; source: "header" | "env"; key: string; mapped: boolean; server?: string }>;
 };
+
+/** Every target of an assignment by alias, default first. */
+export function workerTargets(suite: Pick<WorkerSuite, "target" | "targets" | "defaultServer">): Array<[string, Target]> {
+  return [[suite.defaultServer ?? DEFAULT_SERVER, suite.target], ...Object.entries(suite.targets ?? {})];
+}
 
 export function parseWorkerSuite(value: unknown): WorkerSuite | null {
   if (!value || typeof value !== "object") return null;
@@ -98,6 +111,8 @@ export function parseWorkerSuite(value: unknown): WorkerSuite | null {
   const target = payload.target as { transport?: unknown } | undefined;
   if (typeof payload.executionId !== "string" || !suite || !Array.isArray(suite.nodes) || typeof suite.name !== "string") return null;
   if (!target || typeof target.transport !== "string") return null;
+  if (payload.targets !== undefined && (typeof payload.targets !== "object" || payload.targets === null
+    || Object.values(payload.targets).some((item) => typeof (item as { transport?: unknown })?.transport !== "string"))) return null;
   if (!payload.limits || typeof payload.limits.executionDeadlineMs !== "number") return null;
   return {
     ...(payload as WorkerSuite),
@@ -144,6 +159,8 @@ export function makeScrubber(secrets: string[], context: Omit<ScrubContext, "sec
 export type SuiteRunner = (input: {
   suite: WorkerSuite;
   target: Target;
+  /** Other servers, resolved, by alias. */
+  targets?: Record<string, Target>;
   baseDir: string;
   onProgress: (event: RunProgressEvent) => void;
   /** Aborted when the run is withdrawn, times out, or the worker disconnects or stops. */
@@ -151,12 +168,15 @@ export type SuiteRunner = (input: {
 }) => Promise<RunReport>;
 
 /** Builds the manifest the way an in-process project run does, then runs it through the shared core runner. */
-export const runWorkerSuite: SuiteRunner = async ({ suite, target, baseDir, onProgress, signal }) => {
+export const runWorkerSuite: SuiteRunner = async ({ suite, target, targets, baseDir, onProgress, signal }) => {
   const manifest = compileProjectSuite({
     projectName: suite.projectName,
     suiteName: suite.suite.name,
     version: suite.version,
     target,
+    targets,
+    defaultServer: suite.defaultServer,
+    serverSlos: suite.suite.serverSlos,
     allowlist: suite.allowlist,
     nodes: suite.suite.nodes,
     load: suite.suite.load,
@@ -362,30 +382,37 @@ async function handleAssign(
     if (!fetched.ok) return reject(`suite_unavailable: ${fetched.status} ${fetched.error}`);
     const suite = parseWorkerSuite(fetched.payload);
     if (!suite || suite.executionId !== executionId) return reject("suite_invalid");
-    if (suite.target.transport === "stdio" && !options.allowStdio) return reject(STDIO_NOT_ALLOWED);
+    const assigned = workerTargets(suite);
+    const multi = assigned.length > 1;
+    const stdio = assigned.find(([, item]) => item.transport === "stdio");
+    if (stdio && !options.allowStdio) return reject(multi ? `${STDIO_NOT_ALLOWED} (server ${stdio[0]})` : STDIO_NOT_ALLOWED);
     const missing = missingRequiredEnv(suite, env);
     if (missing.length > 0) return reject(`missing credential: ${missing.join(", ")}`);
     const overLimit = runnerLimitViolation(suite);
     if (overLimit) return reject(`runner_limit: ${overLimit}`);
 
     const baseDir = options.baseDir ?? process.cwd();
-    let target: Target;
-    try {
-      assertOrgTargetAllowlisted(suite.target, suite.policy.targetAllowlist, baseDir, undefined, suite.policy.gatewayAllowlist);
-      target = resolveTargetSecrets(suite.target, env);
-    } catch (error) {
-      return reject(messageOf(error));
+    const resolved: Array<[string, Target]> = [];
+    for (const [alias, item] of assigned) {
+      try {
+        assertOrgTargetAllowlisted(item, suite.policy.targetAllowlist, baseDir, undefined, suite.policy.gatewayAllowlist);
+        resolved.push([alias, resolveTargetSecrets(item, env)]);
+      } catch (error) {
+        return reject(multi ? `server ${alias}: ${messageOf(error)}` : messageOf(error));
+      }
     }
+    const target = resolved[0]![1];
+    const targets = multi ? Object.fromEntries(resolved.slice(1)) : undefined;
     if (abort.signal.aborted) return;
-    const runScrub = makeScrubber([options.token, ...targetSecretValues(target)], {
+    const runScrub = makeScrubber([options.token, ...resolved.flatMap(([, item]) => targetSecretValues(item))], {
       ...defaultScrubContext(baseDir),
-      commands: stdioCommandPaths(target, baseDir),
+      commands: resolved.flatMap(([, item]) => stdioCommandPaths(item, baseDir)),
     });
     log(`Running ${runScrub(suite.projectName)} / ${runScrub(suite.suite.name)} v${suite.version}`);
 
     const progress = progressSender(transport, executionId, runScrub, abort.signal);
     const deadlineMs = Math.max(1_000, suite.limits.executionDeadlineMs - DEADLINE_MARGIN_MS);
-    const run = (options.runSuite ?? runWorkerSuite)({ suite, target, baseDir, onProgress: progress.push, signal: abort.signal });
+    const run = (options.runSuite ?? runWorkerSuite)({ suite, target, ...(targets ? { targets } : {}), baseDir, onProgress: progress.push, signal: abort.signal });
     const outcome = await raceRun(run, abort.signal, deadlineMs);
     if (outcome.kind === "aborted" || outcome.kind === "deadline") {
       abort.abort();

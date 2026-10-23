@@ -57,6 +57,8 @@ This is one of the CLI's two modes. The other, `worker`, is opt-in and authentic
 4. **Policy and identity leak in.** `project suite run` calls `loadPolicy()` and stamps `SWARM_PRINCIPAL` (default `cli`). `run` installs the local OTLP exporter from policy. None of that belongs on a file-only invocation.
 5. **Sample args are not parameters.** `sampleArgsForTool` fills required fields with fixtures. Those fixtures need to be `${name}` tokens, with the sample value saved as the parameter's example.
 
+Suites that call more than one server are described in [Multi-server suites](multi-server-suites.md).
+
 ## Suite directory
 
 `capture` writes one directory. The suite file is the artifact; reports never live inside it.
@@ -179,8 +181,8 @@ The studio path keeps its policy, principal, and allowlist gates. `capture` does
 - Every literal `--header` or `--env` value is saved to `config.json` under `suites.<id>.credentials (legacy unversioned suites use their name)`. `suite.json` keeps `${env:SWARM_TARGET_HEADER_<KEY>}` or `${env:SWARM_TARGET_ENV_<KEY>}` in its place. Only a value that is exactly `${env:NAME}` or `<scheme> ${env:NAME}` stays as typed. A literal `Authorization: Bearer <token>` keeps the scheme in `suite.json` and saves only the token.
 - `<KEY>` is the header or env name upper-cased, with each run of characters outside `A-Z0-9` replaced by `_` and leading or trailing `_` trimmed. `X-Custom` becomes `SWARM_TARGET_HEADER_X_CUSTOM`; `DB_PASS` becomes `SWARM_TARGET_ENV_DB_PASS`. The service uses the same rule for worker assignments.
 - Harmless headers such as `Accept` are moved too. Anyone who clones a suite must set a `SWARM_TARGET_HEADER_*` or `SWARM_TARGET_ENV_*` variable for every moved value, including `Accept`, or copy the matching `config.json` entry.
-- API keys in the URL are refused by default. With explicit `--url-key-as-bearer` consent only, one query parameter named `api_key`, `apikey`, `api-key`, `x-api-key`, `subscription-key`, `key`, `token`, or `access_token` (any case) is removed from the URL and sent as `Authorization: Bearer`, saved as `SWARM_TARGET_HEADER_AUTHORIZATION`. The CLI prints the parameter name, never the value. Capture fails, without printing the value, when the URL also has an Authorization header or `--bearer-env`, more than one key parameter, or an empty key.
-- Capture refuses any other credential-looking query parameter (for example `client_secret`, `password`, `private_key`, signatures), any credential in the URL fragment (`#access_token=...`), and `user:password@` in the URL. Pass those with `--header` or `--bearer-env`. `run --suite` repeats this check before connecting, including for hand-edited suites.
+- API keys in the URL are refused by default. With explicit `--url-key-as-bearer` consent only, one query parameter named `api_key`, `apikey`, `api-key`, `x-api-key`, `subscription-key`, `ocp-apim-subscription-key` (or any name containing `subscription-key`), `key`, `token`, or `access_token` (any case) is removed from the URL and sent as `Authorization: Bearer`, saved as `SWARM_TARGET_HEADER_AUTHORIZATION`. The CLI prints the parameter name, never the value. Capture fails, without printing the value, when the URL also has an Authorization header or `--bearer-env`, more than one key parameter, or an empty key.
+- Capture refuses any other credential-looking query parameter (for example `client_secret`, `password`, `private_key`, `session`, `sid`, `jwt`, `bearer`, `pass`, `hmac`, `code`, signatures), any credential in the URL fragment (`#access_token=...`, `#code=...`), and `user:password@` in the URL. Pagination and limit names such as `max_tokens`, `page_token`, and `nextPageToken` are kept. Pass credentials with `--header` or `--bearer-env`. `run --suite` repeats this check before connecting, including for hand-edited suites.
 
 ## stdio paths
 

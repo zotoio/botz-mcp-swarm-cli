@@ -75,8 +75,13 @@ export class ProcessGaugeCollector {
     private readonly sutPids: Set<number> = new Set(),
   ) {}
 
-  trackSutPid(pid: number | null | undefined): void {
-    if (pid && pid > 0) this.sutPids.add(pid);
+  private readonly sutAliases = new Map<number, string>();
+
+  trackSutPid(pid: number | null | undefined, alias?: string): void {
+    if (pid && pid > 0) {
+      this.sutPids.add(pid);
+      if (alias) this.sutAliases.set(pid, alias);
+    }
   }
 
   async sampleOnce(): Promise<void> {
@@ -135,14 +140,29 @@ export class ProcessGaugeCollector {
     return [...this.samples];
   }
 
-  summarize(): { worker: ProcessSummary; sut: ProcessSummary | null } {
+  /**
+   * `sut` covers the default server's processes when `defaultAlias` is given, else every server process.
+   * `suts` splits server processes by alias when they were tracked with one.
+   */
+  summarize(defaultAlias?: string): { worker: ProcessSummary; sut: ProcessSummary | null; suts?: Record<string, ProcessSummary> } {
     const workerSamples = this.samples.filter((s) => s.role === "worker");
-    const sutSamples = this.samples.filter((s) => s.role === "sut");
+    const allSut = this.samples.filter((s) => s.role === "sut");
+    const byAlias = new Map<string, ProcessSample[]>();
+    for (const sample of allSut) {
+      const alias = this.sutAliases.get(sample.pid);
+      if (!alias) continue;
+      const list = byAlias.get(alias) ?? [];
+      list.push(sample);
+      byAlias.set(alias, list);
+    }
+    const sutSamples = defaultAlias && byAlias.size > 0 ? byAlias.get(defaultAlias) ?? [] : allSut;
+    const multi = defaultAlias !== undefined && [...byAlias.keys()].some((alias) => alias !== defaultAlias);
     return {
       worker: summarizeRole(workerSamples, "node", "worker"),
       sut: sutSamples.length > 0
         ? summarizeRole(sutSamples, "node", "sut")
         : null,
+      ...(multi ? { suts: Object.fromEntries([...byAlias].map(([alias, list]) => [alias, summarizeRole(list, "node", "sut")])) } : {}),
     };
   }
 }
