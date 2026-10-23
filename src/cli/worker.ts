@@ -1,3 +1,4 @@
+import type { SuiteLimitsInput } from "../engine/core/suite-limits.js";
 import { compileProjectSuite, runCompiledSuite } from "../engine/core/project-run.js";
 import { assertOrgTargetAllowlisted } from "../engine/core/org-target-policy.js";
 import { normalizeLoadProfile, type LoadProfile, type SuiteNode } from "../engine/core/suite-model.js";
@@ -77,7 +78,7 @@ export type WorkerSuite = {
   version: number;
   destructive: boolean;
   principal: string;
-  suite: { name: string; nodes: SuiteNode[]; load: LoadProfile; slo?: CallSlo };
+  suite: { name: string; nodes: SuiteNode[]; load: LoadProfile; slo?: CallSlo; limits?: SuiteLimitsInput };
   target: Target;
   allowlist: string[];
   catalog: Array<{ name: string; schemaHash: string; writeLike: boolean }>;
@@ -160,6 +161,7 @@ export const runWorkerSuite: SuiteRunner = async ({ suite, target, baseDir, onPr
     nodes: suite.suite.nodes,
     load: suite.suite.load,
     slo: suite.suite.slo,
+    limits: suite.suite.limits,
   });
   return runCompiledSuite({
     manifest,

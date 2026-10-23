@@ -1,5 +1,6 @@
 import { DEFAULT_LOAD_PROFILE } from "../core/load-defaults.js";
 import { z } from "zod";
+import { SUITE_LIMIT_CEILINGS } from "../core/suite-limits.js";
 import { RetryPolicySchema } from "../core/rate-limit-retry.js";
 
 export const TransportTypeSchema = z.enum(["stdio", "sse", "streamable-http"]);
@@ -33,8 +34,8 @@ export const SessionPoolSchema = z.object({
 export const QuotasSchema = z.object({
   maxConcurrency: z.number().int().positive().default(10),
   maxDurationMs: z.number().int().positive().default(60_000),
-  maxCallCount: z.number().int().positive().default(1000),
-  maxPayloadBytes: z.number().int().positive().default(1_048_576),
+  maxCallCount: z.number().int().positive().max(SUITE_LIMIT_CEILINGS.maxCallCount).default(1000),
+  maxPayloadBytes: z.number().int().positive().max(SUITE_LIMIT_CEILINGS.maxPayloadBytes).default(1_048_576),
 });
 
 export const AuthScenarioSchema = z.enum([

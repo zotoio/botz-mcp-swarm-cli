@@ -220,3 +220,23 @@ precedence. Existing suites are not rewritten. For an older suite with zero drai
 set `load.rampDownMs` to `60000`, or use `--ramp-down-ms 60000` for one run.
 Longer multi-step or inference workloads may need a larger allowance; exceeding
 the configured drain deadline still fails the unfinished pass.
+
+### Suite call-count and payload limits
+
+Each suite run stops with a `quota` failure once it makes more than `maxCallCount`
+MCP calls, or when a single payload exceeds `maxPayloadBytes`. Set them per suite
+in `suite.json`:
+
+```json
+"limits": { "maxCallCount": 50000, "maxPayloadBytes": 4194304 }
+```
+
+Precedence, per field: the suite's `limits`, then `--max-call-count` /
+`--max-payload-bytes` on `run --suite`, then `SWARM_MAX_CALL_COUNT` /
+`SWARM_MAX_PAYLOAD_BYTES`, then the defaults (100000 calls, 1048576 bytes; unchanged
+from earlier releases). Values must be positive integers no larger than the safety
+ceilings of 10000000 calls and 67108864 bytes (64 MiB). Project suite versions accept
+the same `limits` object, and remote workers apply the limits the service sends.
+Manifests keep `quotas.maxCallCount` (default 1000) and `quotas.maxPayloadBytes`,
+now validated against the same ceilings. Run reports record the enforced values in
+`limits`.

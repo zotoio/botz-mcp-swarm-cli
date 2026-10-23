@@ -4,6 +4,7 @@ import { Option, type Command } from "commander";
 import { parseManifest } from "../engine/types/manifest.js";
 import { runManifest } from "../engine/core/runner.js";
 import { writeReports } from "../engine/core/report.js";
+import { parseSuiteLimit, SUITE_LIMIT_CEILINGS, type SuiteLimits } from "../engine/core/suite-limits.js";
 import type { LoadProfile } from "../engine/core/suite-model.js";
 import { addAuthOptions, authFlags, collect } from "./suite-commands.js";
 import type { AuthFlags } from "./suite-auth.js";
@@ -20,6 +21,7 @@ interface RunOptions extends AuthFlags, TargetOptions {
   iterations?: string; concurrency?: string; durationMs?: string; rampUpMs?: string;
   rampDownMs?: string; dwellMs?: string; jitterMs?: string; output?: string;
   soak?: boolean; soakDurationMs?: string; maxIterations?: string; format: OutputFormat;
+  maxCallCount?: string; maxPayloadBytes?: string;
 }
 export function integer(value: string | undefined, label: string, minimum = 0): number | undefined {
   if (value === undefined) return undefined;
@@ -36,6 +38,10 @@ function suiteLoad(opts: RunOptions, soak: boolean): Partial<LoadProfile> {
     rampUpMs: integer(opts.rampUpMs, "ramp-up-ms"), rampDownMs: integer(opts.rampDownMs, "ramp-down-ms"),
     dwellMs: integer(opts.dwellMs, "dwell-ms"), jitterMs: integer(opts.jitterMs, "jitter-ms"),
   };
+  return Object.fromEntries(Object.entries(pairs).filter(([, value]) => value !== undefined));
+}
+export function suiteLimitFlags(opts: { maxCallCount?: string; maxPayloadBytes?: string }): Partial<SuiteLimits> {
+  const pairs = { maxCallCount: parseSuiteLimit("maxCallCount", opts.maxCallCount), maxPayloadBytes: parseSuiteLimit("maxPayloadBytes", opts.maxPayloadBytes) };
   return Object.fromEntries(Object.entries(pairs).filter(([, value]) => value !== undefined));
 }
 /** `--output`, else the configured runs directory; the default location gets its `.gitignore` first. */
@@ -64,6 +70,8 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
     .option("--ramp-down-ms <ms>", "Suite drain duration")
     .option("--dwell-ms <ms>", "Delay between suite steps")
     .option("--jitter-ms <ms>", "Maximum random delay between suite passes")
+    .option("--max-call-count <n>", `Suite call-count limit (suite limits win; env SWARM_MAX_CALL_COUNT; default 100000; max ${SUITE_LIMIT_CEILINGS.maxCallCount})`)
+    .option("--max-payload-bytes <n>", `Suite per-payload byte limit (suite limits win; env SWARM_MAX_PAYLOAD_BYTES; default 1048576; max ${SUITE_LIMIT_CEILINGS.maxPayloadBytes})`)
     .option("--soak", "Sustained run; suites use the load engine (default 5000ms)")
     .option("--soak-duration-ms <ms>", "Alias for --duration-ms with soak mode")
     .option("--output <dir>", "Report directory; defaults to runsDir in .botz/mcp-swarm/settings.json, else .botz/mcp-swarm/runs")
@@ -83,13 +91,13 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         const target = await targetOptions(opts);
         const outputDir = await reportDir(opts.output, botz);
         const result = await withRunSignal((signal) => runSavedSuite(resolveSuiteArg(opts.suite!, botz), {
-          signal, params, ...target, load: suiteLoad(opts, soak), inference: opts.inference === true,
+          signal, params, ...target, load: suiteLoad(opts, soak), limits: suiteLimitFlags(opts), inference: opts.inference === true,
           outputDir, reportBaseName: opts.output ? undefined : runReportBaseName(), baseDir: process.cwd(), auth: authFlags(opts), botz,
         }));
         printRunResult(result.report, shownReports(result, botz, opts.output), opts.format);
         return;
       }
-      if (opts.url || opts.targetFile || opts.params || opts.set?.length || opts.iterations || opts.concurrency || opts.rampUpMs || opts.rampDownMs || opts.dwellMs || opts.jitterMs
+      if (opts.url || opts.targetFile || opts.params || opts.set?.length || opts.iterations || opts.concurrency || opts.rampUpMs || opts.rampDownMs || opts.dwellMs || opts.jitterMs || opts.maxCallCount || opts.maxPayloadBytes
         || command.getOptionValueSource("inference") === "cli" || opts.header?.length || opts.headerEnv?.length || opts.bearerEnv || opts.env?.length || opts.envFrom?.length || opts.urlKeyAsBearer) {
         throw new Error("target overrides, load flags, parameters, inference, and credentials apply to --suite; edit the manifest for these settings");
       }
