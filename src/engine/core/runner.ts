@@ -1,3 +1,4 @@
+import { LoadTimelineCollector } from "./load-timeline.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Manifest, Scenario, ScenarioStep, Target } from "../types/manifest.js";
 import type { RunMode, RunProgressEvent, RunReport } from "../types/run.js";
@@ -919,10 +920,15 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     retryPolicy,
     retryDeadline: Date.now() + manifest.quotas.maxDurationMs,
   };
+  const timeline = new LoadTimelineCollector();
   const emit = (
     name: RunProgressEvent["name"],
     attributes: Record<string, string | number | boolean>,
   ) => {
+    if (name === "mcp.load.vus") timeline.setVus(Number(attributes.active) || 0);
+    else if (name === "mcp.tool.call.duration") {
+      timeline.recordToolCall(String(attributes.tool), Number(attributes.latencyMs) || 0, attributes.result === "ok");
+    }
     options.onProgress?.({ ts: new Date().toISOString(), runId, name, attributes });
   };
   const telemetry = await initTelemetry(runId);
@@ -1109,6 +1115,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       : undefined,
     sessionMetrics: metrics.getSessionMetrics(manifest.target.transport),
     processSeries,
+    loadTimeline: timeline.finish(),
     processSummary,
     toolSeries,
     rpcSeries,
