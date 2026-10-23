@@ -117,6 +117,7 @@ export function formatMarkdownReport(report: RunReport): string {
   lines.push(`## Quotas`, ``);
   lines.push(`- Calls: ${report.quotas.callCount}`);
   lines.push(`- Max payload seen: ${report.quotas.maxPayloadBytesSeen} bytes`);
+  if (report.limits) lines.push(`- Limits: max ${report.limits.maxCallCount} calls, max ${report.limits.maxPayloadBytes} bytes per payload`);
   lines.push(``);
 
   return lines.join("\n");

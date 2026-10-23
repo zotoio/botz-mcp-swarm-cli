@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SuiteLimitsSchema } from "../engine/core/suite-limits.js";
 import { SAMPLER_METHODS, type SuiteNode } from "../engine/core/suite-model.js";
 import { ElicitAutoReplySchema, ScenarioStepSchema, TargetSchema } from "../engine/types/manifest.js";
 
@@ -34,6 +35,7 @@ export const SuiteInputSchema = z.object({
   capturedAt: z.string().optional(), name, target: TargetSchema,
   nodes: z.array(node), params: z.record(z.object({ example: z.string(), usedBy: z.array(z.string()) })),
   load: SuiteLoadSchema.optional(),
+  limits: SuiteLimitsSchema.optional(),
   surface: z.object({ serverName: z.string().optional(), serverVersion: z.string().optional(),
     capabilities: z.array(z.string()),
     tools: z.array(z.object({ name, description: z.string().optional(), schemaHash: z.string(), writeLike: z.boolean(),

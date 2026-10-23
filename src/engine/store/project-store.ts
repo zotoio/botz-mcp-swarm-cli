@@ -1,3 +1,4 @@
+import { SuiteLimitsSchema, type SuiteLimitsInput } from "../core/suite-limits.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -67,6 +68,8 @@ export interface SuiteVersionDocument {
   load: LoadProfile;
   /** Suite objectives. A tool call can replace any field it sets. */
   slo?: CallSlo;
+  /** Per-suite call-count and payload limits. Absent fields use the defaults. */
+  limits?: SuiteLimitsInput;
   catalogFingerprint: string;
   /** Version this snapshot was saved from. Absent on version 1. */
   basedOn?: number;
@@ -713,7 +716,7 @@ function withStoredSuite(doc: SuiteVersionDocument): SuiteVersionDocument {
 export async function saveSuiteVersion(
   projectId: string,
   suiteId: string,
-  input: { name?: string; nodes: SuiteNode[]; load: LoadProfile; basedOn?: number; slo?: CallSlo | null },
+  input: { name?: string; nodes: SuiteNode[]; load: LoadProfile; basedOn?: number; slo?: CallSlo | null; limits?: SuiteLimitsInput | null },
   options?: ProjectStoreOptions,
 ): Promise<SuiteVersionDocument | null> {
   const project = await loadRecord(projectId, options);
@@ -727,10 +730,12 @@ export async function saveSuiteVersion(
     ? requestedParent!
     : suite.currentVersion;
   suite.basedOn = { ...suite.basedOn, [String(version)]: basedOn };
-  const parent = input.slo === undefined
+  const parent = input.slo === undefined || input.limits === undefined
     ? await loadSuiteVersion(projectId, suiteId, basedOn, options)
     : null;
   const slo = input.slo === undefined ? parent?.slo : normalizeCallSlo(input.slo);
+  const limits = input.limits === undefined ? parent?.limits : input.limits === null ? undefined : SuiteLimitsSchema.parse(input.limits);
+  const hasLimits = limits && Object.keys(limits).length > 0;
   const doc: SuiteVersionDocument = {
     version,
     createdAt: new Date().toISOString(),
@@ -738,6 +743,7 @@ export async function saveSuiteVersion(
     nodes: input.nodes,
     load: input.load,
     ...(slo ? { slo } : {}),
+    ...(hasLimits ? { limits } : {}),
     catalogFingerprint: catalogFingerprint(server.catalog),
     basedOn,
   };

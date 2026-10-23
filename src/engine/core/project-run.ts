@@ -1,3 +1,4 @@
+import { resolveSuiteLimits, type SuiteLimitsInput } from "./suite-limits.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { AllowlistEntry } from "../service/mcp-allowlist.js";
 import type { Manifest, Target } from "../types/manifest.js";
@@ -74,6 +75,7 @@ export async function startSuiteRun(input: {
       nodes: version.nodes,
       load: version.load,
       slo: version.slo,
+      limits: version.limits,
     });
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "suite_compile_failed" };
@@ -232,6 +234,7 @@ export function compileProjectSuite(input: {
   nodes: SuiteNode[];
   load: Partial<LoadProfile>;
   slo?: CallSlo;
+  limits?: SuiteLimitsInput;
 }): Manifest {
   return compileSuite({
     name: input.suiteName,
@@ -241,6 +244,7 @@ export function compileProjectSuite(input: {
     nodes: input.nodes,
     load: input.load,
     slo: input.slo,
+    limits: resolveSuiteLimits({ suite: input.limits }),
   }) as unknown as Manifest;
 }
 

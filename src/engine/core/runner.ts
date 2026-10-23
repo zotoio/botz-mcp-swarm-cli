@@ -1139,6 +1139,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       callCount: quota.calls,
       maxPayloadBytesSeen: quota.largestPayload,
     },
+    limits: { maxCallCount: manifest.quotas.maxCallCount, maxPayloadBytes: manifest.quotas.maxPayloadBytes },
     principal: options.principal,
     scheduleId: options.scheduleId,
     ...(options.vars ? { params: options.vars } : {}),

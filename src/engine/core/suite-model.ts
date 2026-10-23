@@ -1,3 +1,4 @@
+import { DEFAULT_SUITE_LIMITS, type SuiteLimits } from "./suite-limits.js";
 import { DEFAULT_LOAD_PROFILE } from "./load-defaults.js";
 import type { CallSlo } from "./call-slo.js";
 import { normalizeCallSlo } from "./call-slo.js";
@@ -704,6 +705,8 @@ export function compileSuite(input: {
   nodes: SuiteNode[];
   load: Partial<LoadProfile>;
   slo?: CallSlo;
+  /** Effective call-count and payload limits; defaults to DEFAULT_SUITE_LIMITS. */
+  limits?: Partial<SuiteLimits>;
 }): CompiledManifest {
   const steps: CompiledStep[] = [];
   compileInto(input.nodes, steps);
@@ -728,8 +731,8 @@ export function compileSuite(input: {
     quotas: {
       maxConcurrency: concurrency,
       maxDurationMs: Math.max(windowMs, passBudget * passes + 30_000, 1_000),
-      maxCallCount: 100_000,
-      maxPayloadBytes: 1_048_576,
+      maxCallCount: input.limits?.maxCallCount ?? DEFAULT_SUITE_LIMITS.maxCallCount,
+      maxPayloadBytes: input.limits?.maxPayloadBytes ?? DEFAULT_SUITE_LIMITS.maxPayloadBytes,
     },
     scenarios: [{ name: input.name, iterations: passes, steps }],
     assertions: {

@@ -48,6 +48,7 @@ import { runManifest } from "../engine/core/runner.js";
 import { runServer } from "../engine/core/run-server.js";
 import { applyToolEvalVerdict, evaluateSuiteTools, generateToolTestData } from "../engine/core/tool-evals.js";
 import { inferenceSecretValues } from "../engine/core/inference-model.js";
+import { resolveSuiteLimits, type SuiteLimits, type SuiteLimitsInput } from "../engine/core/suite-limits.js";
 import { TargetSchema, type Manifest, type Target } from "../engine/types/manifest.js";
 import type { RunReport } from "../engine/types/run.js";
 
@@ -73,6 +74,8 @@ export interface SuiteFile {
   target: Target;
   surface: ServerSurface;
   nodes: SuiteNode[];
+  /** Call-count and payload limits. --max-call-count / --max-payload-bytes win over these; these win over env vars. */
+  limits?: SuiteLimitsInput;
   load: LoadProfile;
   params: Record<string, SuiteParam>;
 }
@@ -362,6 +365,10 @@ export interface SuiteRunOptions {
     target?: Target;
     url?: string;
     load?: Partial<LoadProfile>;
+    /** --max-call-count / --max-payload-bytes. These win over the suite file's `limits`. */
+    limits?: Partial<SuiteLimits>;
+    /** Environment for SWARM_MAX_CALL_COUNT / SWARM_MAX_PAYLOAD_BYTES. Defaults to process.env. */
+    env?: NodeJS.ProcessEnv;
 }
 
 /** Resolve the same paths, parameters, credentials, and load profile for run, doctor, and validation. */
@@ -390,6 +397,7 @@ export async function resolveSuiteExecution(dir: string, options: Partial<SuiteR
     ...(options.iterations !== undefined ? { iterations: options.iterations } : {}),
     ...(options.concurrency !== undefined ? { maxConcurrency: options.concurrency } : {}),
   }));
+  const limits = resolveSuiteLimits({ suite: suite.limits, flags: options.limits, env: options.env ?? process.env });
   const manifest = compileSuite({
     name: suite.name,
     description: `Suite ${suite.name}`,
@@ -397,10 +405,11 @@ export async function resolveSuiteExecution(dir: string, options: Partial<SuiteR
     allowlist: [],
     nodes: suite.nodes,
     load,
+    limits,
   }) as unknown as Manifest;
   const baseDir = (options.target ? options.baseDir ?? process.cwd() : undefined) ?? (suite.cwdBase === "suite" && target.transport === "stdio" ? target.cwd : gitRoot)
     ?? (target.transport === "stdio" ? target.cwd : undefined) ?? options.baseDir ?? dir;
-  return { suite, saved, home, target, params, manifest, baseDir };
+  return { suite, saved, home, target, params, manifest, baseDir, limits };
 }
 
 /**

@@ -145,6 +145,8 @@ export interface RunReport {
     callCount: number;
     maxPayloadBytesSeen: number;
   };
+  /** Effective call-count and payload limits enforced on this run. */
+  limits?: { maxCallCount: number; maxPayloadBytes: number };
   principal?: string;
   scheduleId?: string;
   /** Values substituted for ${name} on this run. */
