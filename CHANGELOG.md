@@ -2,6 +2,10 @@
 
 ## 0.11.2
 
+- Bump `@cursor/sdk` to `^1.0.40` (fixes `grok-4.7` default variant on local runtime).
+
+## 0.11.2
+
 - Bump `@cursor/sdk` dependency to `^1.0.40` (fixes `grok-4.7` default variant on local runtime).
 
 ## 0.11.1
