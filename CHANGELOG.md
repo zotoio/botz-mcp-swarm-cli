@@ -1,5 +1,9 @@
 # Release notes
 
+## 0.11.2
+
+- Bump `@cursor/sdk` dependency to `^1.0.40` (fixes `grok-4.7` default variant on local runtime).
+
 ## 0.11.1
 
 First npm release since 0.9.0; it also contains 0.10.0 and 0.11.0, which were not published separately.
