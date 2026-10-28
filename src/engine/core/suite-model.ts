@@ -70,8 +70,11 @@ export interface RampDownConfig {
 }
 
 export interface ToolAnnotations {
+  title?: string;
   readOnlyHint?: boolean;
   destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
 }
 
 export interface ToolCatalogEntry {

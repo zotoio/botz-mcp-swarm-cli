@@ -129,6 +129,98 @@ export async function startSuiteRun(input: {
   return { ok: true, runId, dispatch };
 }
 
+
+export interface CalleeRunCompletedPayload {
+  run_id: string;
+  project_id: string;
+  suite_id: string;
+  suite_version: number;
+  status: "completed" | "failed" | "stopped";
+  verdict: "pass" | "fail";
+  duration_ms: number;
+  total_calls: number;
+  error_count: number;
+  cleanup_test_assets: boolean;
+}
+
+export async function signalCalleeRunCompleted(
+  manifest: Manifest,
+  payload: CalleeRunCompletedPayload,
+): Promise<{ sent: boolean; acknowledged: boolean; cleanedAssetsCount: number; protocol: string }> {
+  const target = manifest.target;
+  if (target.transport === "stdio" || !target.url) {
+    return { sent: false, acknowledged: false, cleanedAssetsCount: 0, protocol: "none" };
+  }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+    "X-Swarm-Run-Id": payload.run_id,
+    "X-Swarm-Client": "true",
+    "X-Swarm-Event": "run.completed",
+    ...(target.headers ?? {}),
+  };
+  let acknowledged = false;
+  let cleanedAssetsCount = 0;
+
+  try {
+    const rpcBatch = [
+      {
+        jsonrpc: "2.0",
+        method: "notifications/swarm/run_completed",
+        params: payload,
+      },
+      {
+        jsonrpc: "2.0",
+        id: `run-completed-${payload.run_id.slice(0, 8)}`,
+        method: "tools/call",
+        params: {
+          name: "swarm_run_completed",
+          arguments: payload,
+        },
+      },
+    ];
+    const mcpRes = await fetch(target.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(rpcBatch),
+      signal: AbortSignal.timeout(4000),
+    });
+    if (mcpRes.ok) {
+      acknowledged = true;
+    }
+  } catch {
+    // Fallback to HTTP lifecycle endpoint below
+  }
+
+  try {
+    const u = new URL(target.url);
+    const httpRes = await fetch(`${u.origin}/api/swarm/run-completed`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(4000),
+    });
+    if (httpRes.ok) {
+      acknowledged = true;
+      const data = (await httpRes.json()) as {
+        acknowledged?: boolean;
+        cleanup?: { cleaned_count?: number };
+        cleaned_count?: number;
+      };
+      cleanedAssetsCount = Number(data.cleanup?.cleaned_count ?? data.cleaned_count ?? 0);
+    }
+  } catch {
+    // ignore network errors on teardown
+  }
+
+  return {
+    sent: true,
+    acknowledged,
+    cleanedAssetsCount,
+    protocol: "mcp+http",
+  };
+}
+
 async function executeSuiteRun(input: {
   runId: string;
   manifest: Manifest;
@@ -161,11 +253,31 @@ async function executeSuiteRun(input: {
     withEvals.projectId = input.projectId;
     withEvals.suiteId = input.suiteId;
     withEvals.suiteVersion = input.suiteVersion;
+    const totalCalls = (withEvals.toolSeries ?? []).reduce((a, s) => a + s.count, 0);
+    const errorCount = (withEvals.nodeOutcomes ?? []).reduce((a, n) => a + n.errorCount, 0);
+    const calleeSig = await signalCalleeRunCompleted(input.manifest, {
+      run_id: input.runId,
+      project_id: input.projectId,
+      suite_id: input.suiteId,
+      suite_version: input.suiteVersion,
+      status: "completed",
+      verdict: withEvals.verdict,
+      duration_ms: withEvals.durationMs,
+      total_calls: totalCalls,
+      error_count: errorCount,
+      cleanup_test_assets: true,
+    });
     const finished = {
       ts: new Date().toISOString(),
       runId: input.runId,
       name: "run.finished" as const,
-      attributes: { verdict: withEvals.verdict, ok: true },
+      attributes: {
+        verdict: withEvals.verdict,
+        ok: true,
+        calleeRunCompletedSent: calleeSig.sent,
+        calleeAcknowledged: calleeSig.acknowledged,
+        cleanedAssetsCount: calleeSig.cleanedAssetsCount,
+      },
     };
     withEvals.log = tailRunLog([...bufferedRunEvents(input.runId), finished]);
     await saveProjectRun(input.projectId, withEvals, store);

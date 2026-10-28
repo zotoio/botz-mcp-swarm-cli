@@ -114,6 +114,28 @@ Refresh contacts the MCP server, without model calls or tool execution. It repor
 
 `--format text|json|junit` works with suites and manifests. JSON and Markdown report files are still written. JUnit includes aggregate verdict failures such as SLO failures. Run exit codes are 0 for pass, 1 for a failed verdict, 2 for configuration/execution errors, 130 for SIGINT, and 143 for SIGTERM. Validation errors include field paths; missing credentials identify the environment-variable name without its value.
 
+## Load Profile Presets & MCP Spec Coverage (0.13.0)
+
+`run`, `suite run`, and `project load` accept `--preset <smoke|baseline|peak|spike|soak>` plus `--skip-image-gen` and `--skip-expensive-llm`:
+
+| Preset | Profile | Description |
+| --- | --- | --- |
+| `smoke` | `1 VU · 1 pass · 0s hold · 100ms dwell` | Fast functional & contract verification |
+| `baseline` | `3 VUs · 3 passes · 15s hold · 75ms dwell` | Steady multi-user baseline |
+| `peak` | `8 VUs · 5 passes · 30s hold · 50ms dwell` | Sustained high concurrency |
+| `spike` | `12 VUs · 6 passes · 20s hold · 1s ramp` | Sudden burst stress test |
+| `soak` | `10 VUs · 1h (3600s) hold · ~4 TPS/user (220ms dwell)` | 1-hour endurance soak with automatic `X-Swarm-Skip-Image-Gen: 1` & `X-Swarm-Skip-Expensive-Llm: 1` |
+
+```bash
+# Run a 1-hour 10-VU soak against a captured suite
+botz mcp-swarm suite run --suite demo --preset soak
+
+# Save the peak load preset onto a Studio project suite
+botz mcp-swarm project load my-project --preset peak
+```
+
+The CLI's MCP session engine (`src/engine/adapters/mcp-session.ts`) implements all 7 MCP specification stages, including `outputSchema` validation on `structuredContent`, 5-field `ToolAnnotations`, `notifications/progress` (`ttfpMs`), `completion/complete`, deterministic mock handlers for `sampling/createMessage` and `roots/list`, and end-of-run `signalCalleeRunCompleted` lifecycle signaling. See [docs/architecture.md](docs/architecture.md) for the full architecture and sequence diagrams.
+
 ## Multi-server suites
 
 A suite can call tools on several MCP servers in one flow, passing values extracted from one server's result into another server's call:

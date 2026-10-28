@@ -1,5 +1,18 @@
 # Release notes
 
+## 0.13.0
+
+- Full Model Context Protocol (MCP `2025-03-26`, `2025-06-18`, `2025-11-25`) 7-stage client & contract coverage:
+  - Stage 1 (`outputSchema` & `structuredContent`): `contract.ts` validates `CallToolResult.structuredContent` against `Tool.outputSchema` when declared by the server.
+  - Stage 2 (5-field `ToolAnnotations`): `suite-introspect.ts` and `suite-model.ts` capture `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` for deterministic read/write safety classification.
+  - Stage 3 & 5 (`prompts/*` & `completion/complete`): Full introspection and execution support for `prompts/list`, `prompts/get`, and `completion/complete` (`ref/prompt` and `ref/resource`).
+  - Stage 4 (`notifications/progress` & `ttfpMs`): `callTool` in `mcp-session.ts` tracks `progressEventsCount`, `lastProgressMessage`, and `ttfpMs` (time-to-first-progress in ms) with `resetTimeoutOnProgress: true`.
+  - Stage 6 (`sampling/createMessage` & `roots/list`): `mcp-session.ts` advertises `capabilities.sampling` and `capabilities.roots` (`listChanged: true`) and registers deterministic zero-cost mock handlers (`CreateMessageRequestSchema` and `ListRootsRequestSchema`) so servers using client sampling or workspace roots can be load-tested without external LLM spend.
+  - Stage 7 (Streamable HTTP Session Resiliency): Automatic session-lost detection (`isSessionLostError`) and seamless mid-run transport reconnection (`recreateTransport`).
+- First-class load profile presets (`--preset smoke|baseline|peak|spike|soak` on `run`, `suite run`, and `project load`): includes the `soak` preset (`10 VUs · 1h (3600s) hold · ~4 TPS/user · 4 lanes`) and conversational load parser (`parseConversationalSuitePrompt`).
+- Deterministic load-testing fast-path header flags (`--skip-image-gen` and `--skip-expensive-llm`, automatically enabled on `--preset soak`) sending `X-Swarm-Skip-Image-Gen: 1` and `X-Swarm-Skip-Expensive-Llm: 1`.
+- Automatic end-of-run callee completion signal (`signalCalleeRunCompleted`): sends `notifications/swarm/run_completed`, `tools/call` `swarm_run_completed`, and `POST /api/swarm/run-completed` to flush remote server telemetry and trigger ephemeral test-asset cleanup.
+
 ## 0.12.0
 
 - Suite version history and changelogs: `project suite versions <project>` lists every stored version (`1..N`), its creation timestamp, parent version (`basedOn`), status (`latest`, `read-only`, or `disabled`), step/eval counts, and generated changelog.

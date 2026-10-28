@@ -6,6 +6,7 @@ import { runManifest } from "../engine/core/runner.js";
 import { writeReports } from "../engine/core/report.js";
 import { parseSuiteLimit, SUITE_LIMIT_CEILINGS, type SuiteLimits } from "../engine/core/suite-limits.js";
 import type { LoadProfile } from "../engine/core/suite-model.js";
+import { LOAD_PRESETS, type LoadPresetId } from "../engine/core/load-presets.js";
 import { addAuthOptions, authFlags, collect } from "./suite-commands.js";
 import { anyAuthFlags, type AuthFlags } from "./suite-auth.js";
 import { runReportBaseName, mergeParamValues, readParamFile, runSavedSuite } from "./suite-file.js";
@@ -23,6 +24,7 @@ interface RunOptions extends AuthFlags, TargetOptions {
   rampDownMs?: string; dwellMs?: string; jitterMs?: string; output?: string;
   soak?: boolean; soakDurationMs?: string; maxIterations?: string; format: OutputFormat;
   maxCallCount?: string; maxPayloadBytes?: string; rampDownStrategy?: string; drainTimeoutMs?: string;
+  preset?: LoadPresetId; skipImageGen?: boolean; skipExpensiveLlm?: boolean;
 }
 export function integer(value: string | undefined, label: string, minimum = 0): number | undefined {
   if (value === undefined) return undefined;
@@ -32,6 +34,7 @@ export function integer(value: string | undefined, label: string, minimum = 0): 
   return Number(value);
 }
 function suiteLoad(opts: RunOptions, soak: boolean): Partial<LoadProfile> {
+  const presetBase = opts.preset && LOAD_PRESETS[opts.preset] ? { ...LOAD_PRESETS[opts.preset].load } : {};
   const pairs = {
     iterations: integer(opts.iterations ?? opts.maxIterations, "iterations", 1),
     maxConcurrency: integer(opts.concurrency, "concurrency", 1),
@@ -39,7 +42,7 @@ function suiteLoad(opts: RunOptions, soak: boolean): Partial<LoadProfile> {
     rampUpMs: integer(opts.rampUpMs, "ramp-up-ms"), rampDownMs: integer(opts.rampDownMs, "ramp-down-ms"),
     dwellMs: integer(opts.dwellMs, "dwell-ms"), jitterMs: integer(opts.jitterMs, "jitter-ms"),
   };
-  const load: Partial<LoadProfile> = Object.fromEntries(Object.entries(pairs).filter(([, value]) => value !== undefined));
+  const load: Partial<LoadProfile> = { ...presetBase, ...Object.fromEntries(Object.entries(pairs).filter(([, value]) => value !== undefined)) };
   const rampDown = rampDownFlags(opts);
   if (rampDown) load.rampDown = rampDown;
   return load;
@@ -67,6 +70,9 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
     .option("--no-inference", "Skip model evals (the default)")
     .option("--params <file>", "JSON string map overriding suite parameters")
     .option("--set <key=value>", "Override a suite parameter (repeatable)", collect, [])
+    .addOption(new Option("--preset <preset>", "Named load profile preset (smoke, baseline, peak, spike, soak)").choices(["smoke", "baseline", "peak", "spike", "soak"]))
+    .option("--skip-image-gen", "Send X-Swarm-Skip-Image-Gen: 1 header during load/soak runs")
+    .option("--skip-expensive-llm", "Send X-Swarm-Skip-Expensive-Llm: 1 header during load/soak runs")
     .option("--iterations <n>", "Minimum suite passes per virtual user")
     .option("--concurrency <n>", "Suite virtual users")
     .option("--duration-ms <ms>", "Suite load hold duration, or manifest soak duration")
@@ -94,6 +100,12 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         if (opts.maxIterations) throw new Error("--max-iterations applies to manifests; use --iterations for the suite pass minimum");
         const params = mergeParamValues(opts.params ? await readParamFile(resolve(opts.params)) : undefined, opts.set ?? []);
         const botz = resolveBotzHome();
+        if (opts.skipImageGen || opts.preset === "soak") {
+          opts.header = [...(opts.header ?? []), "X-Swarm-Skip-Image-Gen: 1"];
+        }
+        if (opts.skipExpensiveLlm || opts.preset === "soak") {
+          opts.header = [...(opts.header ?? []), "X-Swarm-Skip-Expensive-Llm: 1"];
+        }
         const target = await targetOptions(opts);
         const outputDir = await reportDir(opts.output, botz);
         const result = await withRunSignal((signal) => runSavedSuite(resolveSuiteArg(opts.suite!, botz), {

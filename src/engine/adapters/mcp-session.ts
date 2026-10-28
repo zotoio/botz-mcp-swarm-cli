@@ -2,8 +2,10 @@ import { isRateLimitMessage } from "../core/rate-limit-retry.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
+  CreateMessageRequestSchema,
   ElicitRequestSchema,
   LATEST_PROTOCOL_VERSION,
+  ListRootsRequestSchema,
   type ElicitResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
@@ -19,7 +21,7 @@ import { scriptElicitResult } from "./elicit-reply.js";
 
 const CLIENT_INFO = {
   name: "botz-mcp-swarm",
-  version: "0.5.3",
+  version: "0.6.0",
   icons: [
     {
       src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E",
@@ -35,10 +37,23 @@ export interface McpSessionOptions {
   elicitAutoReply?: ElicitAutoReply;
   /** Collect stderr lines (stdio only — caller attaches stream). */
   stderrLines?: string[];
+  /** Optional factory to recreate the transport if a Streamable HTTP session is dropped mid-run. */
+  recreateTransport?: () => Transport;
+}
+
+export function isSessionLostError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error ?? "");
+  if (/session\s+not\s+found|session\s+expired|unknown\s+session|invalid\s+session\s+id|missing\s+session/i.test(msg)) {
+    return true;
+  }
+  if (/\b404\b/.test(msg) && /session/i.test(msg)) {
+    return true;
+  }
+  return false;
 }
 
 export async function createMcpSession(
-  transport: Transport,
+  initialTransport: Transport,
   options?: McpSessionOptions,
 ): Promise<McpSession> {
   const id = randomUUID();
@@ -48,33 +63,108 @@ export async function createMcpSession(
     content: {},
   };
 
-  const client = new Client(CLIENT_INFO, {
-    capabilities: {
-      elicitation: {
-        form: { applyDefaults: true },
-        url: {},
-      },
-      tasks: {
-        list: {},
-        cancel: {},
-      },
-    },
-  });
-
-  // Auto-respond to elicitation/create so load scenarios stay non-interactive.
-  client.setRequestHandler(ElicitRequestSchema, async (request) => {
-    const reply = elicitReply ?? { action: "decline" as const };
-    return scriptElicitResult(request.params, reply) as ElicitResult;
-  });
-
+  let currentTransport: Transport = initialTransport;
+  let negotiatedProtocolVersion: string | undefined;
   let connected = false;
+  let reconnectPromise: Promise<void> | null = null;
+
+  function buildClient(): Client {
+    const c = new Client(CLIENT_INFO, {
+      capabilities: {
+        elicitation: {
+          form: { applyDefaults: true },
+          url: {},
+        },
+        tasks: {
+          list: {},
+          cancel: {},
+        },
+        sampling: {},
+        roots: {
+          listChanged: true,
+        },
+      },
+    });
+    // Auto-respond to elicitation/create so load scenarios stay non-interactive.
+    c.setRequestHandler(ElicitRequestSchema, async (request) => {
+      const reply = elicitReply ?? { action: "decline" as const };
+      return scriptElicitResult(request.params, reply) as ElicitResult;
+    });
+    // Stage 6: Deterministic mock handler for sampling/createMessage (zero external LLM cost).
+    c.setRequestHandler(CreateMessageRequestSchema, async (request) => {
+      const firstMsg = request.params?.messages?.[0];
+      const promptPreview =
+        firstMsg && typeof firstMsg.content === "object" && firstMsg.content && "text" in firstMsg.content
+          ? String((firstMsg.content as { text?: unknown }).text ?? "").slice(0, 120)
+          : "sampling request";
+      return {
+        model: "swarm-deterministic-sampler-v1",
+        role: "assistant" as const,
+        stopReason: "endTurn",
+        content: {
+          type: "text" as const,
+          text: `[Swarm Deterministic Sampling] Synthesized response for: ${promptPreview}`,
+        },
+      };
+    });
+    // Stage 6: Deterministic workspace roots handler for roots/list.
+    c.setRequestHandler(ListRootsRequestSchema, async () => {
+      return {
+        roots: [
+          {
+            uri: "file:///workspace/swarm-sandbox",
+            name: "swarm-sandbox",
+          },
+        ],
+      };
+    });
+    return c;
+  }
+
+  function hookProtocolVersion(t: Transport): void {
+    const origSet = t.setProtocolVersion?.bind(t);
+    t.setProtocolVersion = (version: string) => {
+      negotiatedProtocolVersion = version;
+      origSet?.(version);
+    };
+  }
+
+  let client = buildClient();
+  hookProtocolVersion(currentTransport);
 
   try {
-    await client.connect(transport);
+    await client.connect(currentTransport);
     connected = true;
   } catch (error) {
-    await transport.close().catch(() => undefined);
+    await currentTransport.close().catch(() => undefined);
     throw error;
+  }
+
+  async function reconnectSession(): Promise<void> {
+    if (!options?.recreateTransport) {
+      throw new Error("recreateTransport not configured");
+    }
+    if (reconnectPromise) {
+      return reconnectPromise;
+    }
+    reconnectPromise = (async () => {
+      const oldClient = client;
+      const oldTransport = currentTransport;
+      connected = false;
+      await oldClient.close().catch(() => undefined);
+      await oldTransport.close().catch(() => undefined);
+
+      const nextTransport = options.recreateTransport!();
+      hookProtocolVersion(nextTransport);
+      const nextClient = buildClient();
+      await nextClient.connect(nextTransport);
+      currentTransport = nextTransport;
+      client = nextClient;
+      connected = true;
+    })().finally(() => {
+      reconnectPromise = null;
+    });
+    return reconnectPromise;
   }
 
   async function wrapCall<T>(
@@ -85,7 +175,17 @@ export async function createMcpSession(
   ): Promise<McpCallResult> {
     const start = performance.now();
     try {
-      const result = await fn();
+      let result: T;
+      try {
+        result = await fn();
+      } catch (firstErr) {
+        if (options?.recreateTransport && isSessionLostError(firstErr)) {
+          await reconnectSession();
+          result = await fn();
+        } else {
+          throw firstErr;
+        }
+      }
       const latencyMs = performance.now() - start;
       const bytesOut = estimateBytes(result);
       const appError = isError?.(result) ?? false;
@@ -122,14 +222,21 @@ export async function createMcpSession(
 
   return {
     id,
-    transport,
+    get transport() {
+      return currentTransport;
+    },
     stderrLines,
     async close() {
       if (connected) {
+        // Streamable HTTP: end the server-side session (HTTP DELETE with Mcp-Session-Id) before closing.
+        const http = currentTransport as Transport & { terminateSession?: () => Promise<void>; sessionId?: string };
+        if (typeof http.terminateSession === "function" && http.sessionId) {
+          await http.terminateSession().catch(() => undefined);
+        }
         await client.close().catch(() => undefined);
         connected = false;
       }
-      await transport.close().catch(() => undefined);
+      await currentTransport.close().catch(() => undefined);
     },
     getServerMeta(): ServerMeta {
       const caps = client.getServerCapabilities() as
@@ -137,8 +244,7 @@ export async function createMcpSession(
         | undefined;
       const version = client.getServerVersion();
       return {
-        // SDK Client negotiates LATEST (2025-11-25 on sdk@1.30); expose via serverInfo when present.
-        protocolVersion: LATEST_PROTOCOL_VERSION,
+        protocolVersion: negotiatedProtocolVersion ?? LATEST_PROTOCOL_VERSION,
         capabilities: caps,
         serverInfo: version
           ? {
@@ -167,17 +273,39 @@ export async function createMcpSession(
     },
     async callTool(name: string, args: Record<string, unknown>, timeoutMs?: number) {
       const bytesIn = estimateBytes({ method: "tools/call", name, arguments: args });
-      return wrapCall(
+      const callStart = performance.now();
+      let progressCount = 0;
+      let lastProgressMessage: string | undefined;
+      let ttfpMs: number | undefined;
+      const callRes = await wrapCall(
         "tools/call",
         bytesIn,
         () =>
           client.callTool(
             { name, arguments: args },
             undefined,
-            timeoutMs ? { timeout: timeoutMs } : undefined,
+            {
+              ...(timeoutMs ? { timeout: timeoutMs } : {}),
+              resetTimeoutOnProgress: true,
+              onprogress: (progress) => {
+                progressCount += 1;
+                if (ttfpMs === undefined) {
+                  ttfpMs = Math.round(performance.now() - callStart);
+                }
+                if (typeof progress.message === "string" && progress.message.length > 0) {
+                  lastProgressMessage = progress.message;
+                }
+              },
+            },
           ),
         (result) => Boolean((result as { isError?: boolean }).isError),
       );
+      if (progressCount > 0) {
+        callRes.progressEventsCount = progressCount;
+        callRes.lastProgressMessage = lastProgressMessage;
+        callRes.ttfpMs = ttfpMs;
+      }
+      return callRes;
     },
     async ping() {
       const bytesIn = estimateBytes({ method: "ping" });

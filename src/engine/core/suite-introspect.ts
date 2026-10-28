@@ -104,8 +104,11 @@ function toTool(value: unknown): ToolCatalogEntry | null {
   const outputSchema = isRecord(value.outputSchema) ? (value.outputSchema as JsonSchema) : undefined;
   const annotations = isRecord(value.annotations)
     ? {
+        ...(typeof value.annotations.title === "string" ? { title: value.annotations.title } : {}),
         readOnlyHint: value.annotations.readOnlyHint === true ? true : undefined,
         destructiveHint: value.annotations.destructiveHint === true ? true : undefined,
+        ...(typeof value.annotations.idempotentHint === "boolean" ? { idempotentHint: value.annotations.idempotentHint } : {}),
+        ...(typeof value.annotations.openWorldHint === "boolean" ? { openWorldHint: value.annotations.openWorldHint } : {}),
       }
     : undefined;
   return {

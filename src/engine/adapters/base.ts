@@ -13,6 +13,12 @@ export interface McpCallResult {
   result?: unknown;
   /** Lowercased response headers from the last HTTP transport round-trip, when available. */
   responseHeaders?: Record<string, string>;
+  /** Number of MCP notifications/progress events received during tools/call (Stage 4). */
+  progressEventsCount?: number;
+  /** Last progress message received during tools/call (Stage 4). */
+  lastProgressMessage?: string;
+  /** Time-to-first-progress in milliseconds (Stage 4). */
+  ttfpMs?: number;
 }
 
 export interface ServerMeta {

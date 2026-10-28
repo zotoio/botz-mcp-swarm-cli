@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { Command } from "commander";
 import { formatCompareMarkdown } from "../engine/core/compare.js";
 import type { LoadProfile, SuiteNode } from "../engine/core/suite-model.js";
+import { LOAD_PRESETS, type LoadPresetId } from "../engine/core/load-presets.js";
 import {
   addProjectServer,
   addStructuredProject,
@@ -452,6 +453,7 @@ export function registerProjectCommands(program: Command): void {
     .description("Save a new suite version with an updated load profile")
     .argument("<project>")
     .option("--suite <id>")
+    .option("--preset <preset>", "Apply a named load profile preset (smoke, baseline, peak, spike, soak)")
     .option("--duration-ms <ms>")
     .option("--ramp-up-ms <ms>")
     .option("--concurrency <n>")
@@ -470,10 +472,13 @@ export function registerProjectCommands(program: Command): void {
       rampDownMs?: string;
       dwellMs?: string;
       iterations?: string;
+      preset?: LoadPresetId;
       rampDownStrategy?: string;
       drainTimeoutMs?: string;
     }) => {
+      const presetLoad = opts.preset && LOAD_PRESETS[opts.preset] ? LOAD_PRESETS[opts.preset].load : undefined;
       const saved = await saveLoadProfile(ref, {
+        ...presetLoad,
         durationMs: opts.durationMs ? Number.parseInt(opts.durationMs, 10) : undefined,
         rampUpMs: opts.rampUpMs ? Number.parseInt(opts.rampUpMs, 10) : undefined,
         maxConcurrency: opts.concurrency ? Number.parseInt(opts.concurrency, 10) : undefined,

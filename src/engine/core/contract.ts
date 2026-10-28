@@ -72,7 +72,9 @@ function checkInitialize(result: unknown): string | null {
   if (typeof info.name !== "string" || info.name.length === 0) {
     return "initialize result is missing server name";
   }
-  if (typeof info.version !== "string" || info.version.length === 0) {
+  // MCP's Implementation schema requires a version string but not a non-empty one;
+  // some production servers (e.g. Parallel Search) send "".
+  if (typeof info.version !== "string") {
     return "initialize result is missing server version";
   }
   if (!isObject(result.capabilities)) return "initialize result is missing capabilities";
