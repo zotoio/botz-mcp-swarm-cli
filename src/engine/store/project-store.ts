@@ -58,6 +58,8 @@ export interface SuitePointer {
   basedOn?: Record<string, number>;
   /** Missing means local. `worker` hands runs to a connected worker instead of this process. */
   dispatch?: SuiteDispatch;
+  /** Version numbers explicitly disabled from being executed again. */
+  disabledVersions?: number[];
 }
 
 export type SuiteDispatch = "local" | "worker";
@@ -77,6 +79,24 @@ export interface SuiteVersionDocument {
   catalogFingerprint: string;
   /** Version this snapshot was saved from. Absent on version 1. */
   basedOn?: number;
+  disabled?: boolean;
+  changelog?: string;
+  changelogStatus?: "pending" | "ready" | "fallback";
+  changelogUpdatedAt?: string;
+}
+
+export interface SuiteVersionSummary {
+  version: number;
+  name: string;
+  createdAt: string;
+  basedOn?: number;
+  disabled: boolean;
+  changelog: string;
+  changelogStatus: "pending" | "ready" | "fallback";
+  stepCount: number;
+  enabledStepCount: number;
+  toolEvalCount: number;
+  load: LoadProfile;
 }
 
 export interface ProjectServer {
@@ -437,6 +457,65 @@ async function fillCatalog(
   }
 }
 
+
+function flattenSuiteNodes(nodes: SuiteNode[]): SuiteNode[] {
+  const out: SuiteNode[] = [];
+  const walk = (list: SuiteNode[]) => {
+    for (const n of list) {
+      out.push(n);
+      if (n.children?.length) walk(n.children);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+function summarizeNodesCounts(nodes: SuiteNode[]): { stepCount: number; enabledStepCount: number; toolCallCount: number; toolEvalCount: number } {
+  const flat = flattenSuiteNodes(nodes);
+  const samplers = flat.filter((n) => n.type !== "group" && n.type !== "loop");
+  const enabledSamplers = samplers.filter((n) => n.enabled);
+  const toolCalls = samplers.filter((n) => n.method === "tools/call");
+  const toolEvalCount = flat.reduce((acc, n) => acc + (n.evals?.length ?? 0), 0);
+  return {
+    stepCount: samplers.length,
+    enabledStepCount: enabledSamplers.length,
+    toolCallCount: toolCalls.length,
+    toolEvalCount,
+  };
+}
+
+export function computeDeterministicSuiteChangelog(
+  doc: SuiteVersionDocument,
+  parent: SuiteVersionDocument | null | undefined,
+): string {
+  const counts = summarizeNodesCounts(doc.nodes);
+  if (!parent || doc.version <= 1) {
+    return `Initial suite v${doc.version} with ${counts.stepCount} steps (${counts.enabledStepCount} enabled, ${counts.toolCallCount} tool calls, ${counts.toolEvalCount} eval cases).`;
+  }
+  const parts: string[] = [];
+  const prevFlat = flattenSuiteNodes(parent.nodes).filter((n) => n.type !== "group" && n.type !== "loop");
+  const nextFlat = flattenSuiteNodes(doc.nodes).filter((n) => n.type !== "group" && n.type !== "loop");
+  const prevById = new Map(prevFlat.map((n) => [n.id, n]));
+  const nextById = new Map(nextFlat.map((n) => [n.id, n]));
+  const added = nextFlat.filter((n) => !prevById.has(n.id)).map((n) => n.label || n.tool || n.method || n.id);
+  const removed = prevFlat.filter((n) => !nextById.has(n.id)).map((n) => n.label || n.tool || n.method || n.id);
+  if (added.length > 0) parts.push(`added ${added.length} step${added.length === 1 ? "" : "s"} (${added.slice(0, 4).join(", ")})`);
+  if (removed.length > 0) parts.push(`removed ${removed.length} step${removed.length === 1 ? "" : "s"} (${removed.slice(0, 4).join(", ")})`);
+  for (const nextNode of nextFlat) {
+    const prevNode = prevById.get(nextNode.id);
+    if (!prevNode) continue;
+    const label = nextNode.label || nextNode.tool || nextNode.method || nextNode.id;
+    if (prevNode.enabled !== nextNode.enabled) parts.push(`${nextNode.enabled ? "enabled" : "disabled"} ${label}`);
+    if (JSON.stringify(prevNode.args ?? {}) !== JSON.stringify(nextNode.args ?? {})) parts.push(`updated args on ${label}`);
+    if (JSON.stringify(prevNode.evals ?? []) !== JSON.stringify(nextNode.evals ?? [])) parts.push(`updated evals on ${label}`);
+  }
+  if (parts.length === 0) {
+    return `Saved v${doc.version} from v${doc.basedOn ?? doc.version - 1} (${counts.enabledStepCount}/${counts.stepCount} steps enabled, ${counts.toolEvalCount} evals).`;
+  }
+  const s = parts.slice(0, 5).join("; ");
+  return s.charAt(0).toUpperCase() + s.slice(1) + ".";
+}
+
 async function freshSuite(
   catalog: ToolCatalogEntry[],
   surface: ProjectSurface | undefined,
@@ -453,14 +532,18 @@ async function freshSuite(
     createdAt: now,
   };
   const built = nodes ?? buildDefaultSuiteNodes(suiteSurface(catalog, surface));
+  const finalNodes = nodes ? await fillGeneratedToolEvals(built, catalog) : tidyPositions(await fillGeneratedToolEvals(built, catalog));
   const version: SuiteVersionDocument = {
     version: 1,
     createdAt: now,
     name,
-    nodes: nodes ? built : tidyPositions(await fillGeneratedToolEvals(built, catalog)),
+    nodes: finalNodes,
     load: generatedLoadProfile(built, surface?.latency),
     catalogFingerprint: catalogFingerprint(catalog),
   };
+  version.changelog = computeDeterministicSuiteChangelog(version, null);
+  version.changelogStatus = "ready";
+  version.changelogUpdatedAt = now;
   return { pointer, version };
 }
 
@@ -795,6 +878,13 @@ export async function loadSuiteVersion(
   if (!suite || version < 1 || version > suite.currentVersion) return null;
   const doc = await readJson<SuiteVersionDocument>(versionPath(projectId, suiteId, version, options));
   if (!doc) return null;
+  if (suite.disabledVersions?.includes(version)) doc.disabled = true;
+  if (!doc.changelog) {
+    const parentVer = doc.basedOn ?? (version > 1 ? version - 1 : undefined);
+    const parentDoc = parentVer ? await readJson<SuiteVersionDocument>(versionPath(projectId, suiteId, parentVer, options)) : null;
+    doc.changelog = computeDeterministicSuiteChangelog(doc, parentDoc);
+    doc.changelogStatus = "fallback";
+  }
   return withStoredSuite(doc);
 }
 
@@ -819,9 +909,7 @@ export async function saveSuiteVersion(
     ? requestedParent!
     : suite.currentVersion;
   suite.basedOn = { ...suite.basedOn, [String(version)]: basedOn };
-  const parent = input.slo === undefined || input.serverSlo === undefined || input.limits === undefined
-    ? await loadSuiteVersion(projectId, suiteId, basedOn, options)
-    : null;
+  const parent = await loadSuiteVersion(projectId, suiteId, basedOn, options);
   const slo = input.slo === undefined ? parent?.slo : normalizeCallSlo(input.slo);
   const serverSlo = input.serverSlo === undefined ? parent?.serverSlo : Object.fromEntries(Object.entries(input.serverSlo ?? {})
     .map(([id, value]) => [id, normalizeCallSlo(value)] as const)
@@ -840,11 +928,91 @@ export async function saveSuiteVersion(
     catalogFingerprint: catalogFingerprint(server.catalog),
     basedOn,
   };
+  doc.changelog = computeDeterministicSuiteChangelog(doc, parent);
+  doc.changelogStatus = "fallback";
+  doc.changelogUpdatedAt = doc.createdAt;
   await writeSuiteVersion(project, suite, doc, options);
   project.updatedAt = doc.createdAt;
   await writeJson(projectPath(project.id, options), project);
   await upsertIndex(project, options);
   return doc;
+}
+
+
+export async function listSuiteVersions(
+  projectId: string,
+  suiteId: string,
+  options?: ProjectStoreOptions,
+): Promise<SuiteVersionSummary[]> {
+  const project = await loadRecord(projectId, options);
+  if (!project || project.archived) return [];
+  const suite = project.suites.find((item) => item.id === suiteId);
+  if (!suite) return [];
+  const disabledSet = new Set(suite.disabledVersions ?? []);
+  const rawDocs = await Promise.all(
+    Array.from({ length: suite.currentVersion }, (_, idx) =>
+      readJson<SuiteVersionDocument>(versionPath(projectId, suiteId, idx + 1, options)),
+    ),
+  );
+  const byVersion = new Map<number, SuiteVersionDocument>();
+  for (const d of rawDocs) {
+    if (d) byVersion.set(d.version, d);
+  }
+  const summaries: SuiteVersionSummary[] = [];
+  for (let v = suite.currentVersion; v >= 1; v--) {
+    const doc = byVersion.get(v);
+    if (!doc) continue;
+    const parentVer = doc.basedOn ?? suite.basedOn?.[String(v)] ?? (v > 1 ? v - 1 : undefined);
+    const parentDoc = parentVer ? byVersion.get(parentVer) ?? null : null;
+    const changelog = doc.changelog || computeDeterministicSuiteChangelog(doc, parentDoc);
+    const counts = summarizeNodesCounts(doc.nodes ?? []);
+    summaries.push({
+      version: doc.version,
+      name: doc.name || suite.name,
+      createdAt: doc.createdAt,
+      ...(parentVer ? { basedOn: parentVer } : {}),
+      disabled: Boolean(doc.disabled || disabledSet.has(doc.version)),
+      changelog,
+      changelogStatus: doc.changelogStatus ?? "fallback",
+      stepCount: counts.stepCount,
+      enabledStepCount: counts.enabledStepCount,
+      toolEvalCount: counts.toolEvalCount,
+      load: normalizeLoadProfile(doc.load),
+    });
+  }
+  return summaries;
+}
+
+export async function setSuiteVersionDisabled(
+  projectId: string,
+  suiteId: string,
+  version: number,
+  disabled: boolean,
+  options?: ProjectStoreOptions,
+): Promise<SuiteVersionDocument | null> {
+  const project = await loadRecord(projectId, options);
+  if (!project || project.archived) return null;
+  const suite = project.suites.find((item) => item.id === suiteId);
+  if (!suite || version < 1 || version > suite.currentVersion) return null;
+  const vPath = versionPath(projectId, suiteId, version, options);
+  const doc = await readJson<SuiteVersionDocument>(vPath);
+  if (!doc) return null;
+  if (disabled) {
+    doc.disabled = true;
+    const set = new Set(suite.disabledVersions ?? []);
+    set.add(version);
+    suite.disabledVersions = [...set].sort((a, b) => a - b);
+  } else {
+    delete doc.disabled;
+    const next = (suite.disabledVersions ?? []).filter((v) => v !== version);
+    if (next.length > 0) suite.disabledVersions = next;
+    else delete suite.disabledVersions;
+  }
+  project.updatedAt = new Date().toISOString();
+  await writeJson(vPath, doc);
+  await writeJson(projectPath(project.id, options), project);
+  await upsertIndex(project, options);
+  return withStoredSuite(doc);
 }
 
 export function suiteIsEnabled(suite: { enabled?: boolean }): boolean {

@@ -2,6 +2,7 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import type { IncomingMessage } from "node:http";
 import { join } from "node:path";
 import { defaultLocalOtelEndpoint } from "../service/policy.js";
+import { stripSecretAttributes } from "./sanitize.js";
 
 const MAX_SAMPLES = 500;
 const MAX_EXPORTS = 200;
@@ -214,24 +215,54 @@ export async function readLimitedBody(req: IncomingMessage, limit = MAX_BODY_BYT
   return Buffer.concat(chunks).toString("utf8");
 }
 
-export function ingestOtlpMetrics(body: string): number {
-  return ingestMetrics(body, { persist: true });
+const SENSITIVE_ATTR_PATTERN = /authorization|token|secret|password|api[_-]?key|bearer|credential/i;
+const BEARER_STR = /^bearer\s+/i;
+
+function scrubOtlpAttributesList(attrs: DataPoint["attributes"]): DataPoint["attributes"] {
+  if (!Array.isArray(attrs)) return attrs;
+  return attrs.filter((attr) => {
+    const key = attr?.key ?? "";
+    if (SENSITIVE_ATTR_PATTERN.test(key)) return false;
+    const val = attrValue(attr?.value);
+    if (BEARER_STR.test(val)) return false;
+    return true;
+  });
 }
 
-export function ingestOtlpTraces(body: string): number {
-  return ingestTraces(body, { persist: true });
+function resolveEffectiveRunId(
+  pointOrSpanAttrs: Record<string, string>,
+  resourceRunId: string,
+  defaultRunId?: string,
+): string {
+  const fromAttr = pointOrSpanAttrs["run.id"] || pointOrSpanAttrs["swarm.run_id"] || "";
+  if (fromAttr && RUN_ID_PATTERN.test(fromAttr)) return fromAttr;
+  if (resourceRunId && RUN_ID_PATTERN.test(resourceRunId)) return resourceRunId;
+  const trimmedDefault = defaultRunId?.trim() ?? "";
+  if (trimmedDefault && RUN_ID_PATTERN.test(trimmedDefault)) return trimmedDefault;
+  return "";
 }
 
-function ingestMetrics(body: string, options: { persist: boolean; at?: string }): number {
+export function ingestOtlpMetrics(body: string, defaultRunId?: string): number {
+  return ingestMetrics(body, { persist: true, defaultRunId });
+}
+
+export function ingestOtlpTraces(body: string, defaultRunId?: string): number {
+  return ingestTraces(body, { persist: true, defaultRunId });
+}
+
+function ingestMetrics(body: string, options: { persist: boolean; at?: string; defaultRunId?: string }): number {
   const parsed = JSON.parse(body) as { resourceMetrics?: ResourceMetrics[] };
   let points = 0;
   const runs = new Set<string>();
   for (const resource of parsed.resourceMetrics ?? []) {
-    const runId = runIdOf(resource.resource);
-    if (runId) runs.add(runId);
+    if (resource.resource?.attributes) {
+      resource.resource.attributes = scrubOtlpAttributesList(resource.resource.attributes);
+    }
+    const resRunId = runIdOf(resource.resource);
+    if (resRunId) runs.add(resRunId);
     for (const scope of resource.scopeMetrics ?? []) {
       for (const metric of scope.metrics ?? []) {
-        points += recordMetric(metric, runId);
+        points += recordMetric(metric, resRunId, options.defaultRunId, runs);
       }
     }
   }
@@ -240,22 +271,34 @@ function ingestMetrics(body: string, options: { persist: boolean; at?: string })
     metricExports += 1;
     lastExportAt = now;
     noteExport(metricExportsByRun, runs, now);
-    if (options.persist) remember("metrics", body, now, runs);
+    if (options.persist) remember("metrics", JSON.stringify(parsed), now, runs);
   }
   return points;
 }
 
-function ingestTraces(body: string, options: { persist: boolean; at?: string }): number {
+function ingestTraces(body: string, options: { persist: boolean; at?: string; defaultRunId?: string }): number {
   const parsed = JSON.parse(body) as { resourceSpans?: ResourceSpans[] };
   let count = 0;
   const runs = new Set<string>();
   for (const resource of parsed.resourceSpans ?? []) {
-    const runId = runIdOf(resource.resource);
-    if (runId) runs.add(runId);
+    if (resource.resource?.attributes) {
+      resource.resource.attributes = scrubOtlpAttributesList(resource.resource.attributes);
+    }
+    const resRunId = runIdOf(resource.resource);
+    if (resRunId) runs.add(resRunId);
     for (const scope of resource.scopeSpans ?? []) {
       for (const span of scope.spans ?? []) {
+        if (span.attributes) {
+          span.attributes = scrubOtlpAttributesList(span.attributes);
+        }
         const name = span.name?.trim() || "span";
-        spanHits.push({ name, runId, attributes: attributeMap(span.attributes) });
+        const rawAttrs = attributeMap(span.attributes);
+        const effRunId = resolveEffectiveRunId(rawAttrs, resRunId, options.defaultRunId);
+        if (effRunId) runs.add(effRunId);
+        const cleanAttrs = Object.fromEntries(
+          Object.entries(stripSecretAttributes(rawAttrs)).map(([k, v]) => [k, String(v)]),
+        );
+        spanHits.push({ name, runId: effRunId, attributes: cleanAttrs });
         count += 1;
       }
     }
@@ -265,7 +308,7 @@ function ingestTraces(body: string, options: { persist: boolean; at?: string }):
     spanExports += 1;
     lastExportAt = now;
     noteExport(spanExportsByRun, runs, now);
-    if (options.persist) remember("traces", body, now, runs);
+    if (options.persist) remember("traces", JSON.stringify(parsed), now, runs);
   }
   return count;
 }
@@ -429,29 +472,42 @@ interface ResourceSpans {
 
 function runIdOf(resource: { attributes?: DataPoint["attributes"] } | undefined): string {
   for (const attribute of resource?.attributes ?? []) {
-    if (attribute.key === "run.id") return attrValue(attribute.value);
+    if (attribute.key === "run.id" || attribute.key === "swarm.run_id") return attrValue(attribute.value);
   }
   return "";
 }
 
-function recordMetric(metric: Metric, runId: string): number {
+function recordMetric(
+  metric: Metric,
+  resourceRunId: string,
+  defaultRunId?: string,
+  runsOut?: Set<string>,
+): number {
   const name = metric.name?.trim();
   if (!name) return 0;
   const points = metric.histogram?.dataPoints ?? metric.sum?.dataPoints ?? metric.gauge?.dataPoints ?? [];
   let recorded = 0;
   for (const point of points) {
+    if (point.attributes) {
+      point.attributes = scrubOtlpAttributesList(point.attributes);
+    }
     const count = metric.gauge ? 1 : num(point.count);
     const sum = metric.gauge
       ? num(point.asDouble ?? point.asInt ?? point.value)
       : num(point.sum ?? point.asDouble ?? point.asInt);
-    const attributes = attributeMap(point.attributes);
+    const rawAttrs = attributeMap(point.attributes);
+    const effRunId = resolveEffectiveRunId(rawAttrs, resourceRunId, defaultRunId);
+    if (effRunId && runsOut) runsOut.add(effRunId);
+    const attributes = Object.fromEntries(
+      Object.entries(stripSecretAttributes(rawAttrs)).map(([k, v]) => [k, String(v)]),
+    );
     pushSample({
       name,
       unit: metric.unit ?? "",
       label: labelFor(attributes),
       count: Number.isFinite(count) ? count : 0,
       sum: Number.isFinite(sum) ? sum : 0,
-      runId,
+      runId: effRunId,
       attributes,
     });
     recorded += 1;

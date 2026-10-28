@@ -30,7 +30,9 @@ import {
   resolveProject,
   resolveSuite,
   runProjectSuite,
+  projectSuiteVersions,
   setProjectSuiteEnabled,
+  setProjectSuiteVersionDisabled,
   saveLoadProfile,
   saveSuiteFile,
   setSuiteNode,
@@ -163,6 +165,48 @@ export function registerProjectCommands(program: Command): void {
     });
 
   const suite = project.command("suite").description("Versioned suite tree. Each edit saves the next immutable version");
+
+  suite
+    .command("versions")
+    .description("List stored versions of a suite with their status and changelogs")
+    .argument("<project>")
+    .option("--suite <id>", "Suite id or name (default: first suite)")
+    .option("--json", "Print JSON")
+    .action(async (ref: string, opts: { suite?: string; json?: boolean }) => {
+      const versions = await projectSuiteVersions(ref, opts.suite);
+      if (opts.json) printJson(versions);
+      else if (versions.length === 0) console.log("No versions.");
+      else {
+        for (const v of versions) {
+          const status = v.disabled ? "disabled" : v === versions[0] ? "latest" : "read-only";
+          console.log(`v${v.version}\t${status}\t${v.createdAt}\t${v.changelog}`);
+        }
+      }
+    });
+
+  suite
+    .command("disable-version")
+    .description("Disable a stored suite version so it cannot be executed again (runs and steps remain inspectable)")
+    .argument("<project>")
+    .requiredOption("--version <n>", "Version number to disable")
+    .option("--suite <id>")
+    .action(async (ref: string, opts: { version: string; suite?: string }) => {
+      const ver = Number.parseInt(opts.version, 10);
+      const updated = await setProjectSuiteVersionDisabled(ref, ver, true, opts.suite);
+      console.log(`Disabled v${updated.version}`);
+    });
+
+  suite
+    .command("enable-version")
+    .description("Re-enable a previously disabled suite version")
+    .argument("<project>")
+    .requiredOption("--version <n>", "Version number to enable")
+    .option("--suite <id>")
+    .action(async (ref: string, opts: { version: string; suite?: string }) => {
+      const ver = Number.parseInt(opts.version, 10);
+      const updated = await setProjectSuiteVersionDisabled(ref, ver, false, opts.suite);
+      console.log(`Enabled v${updated.version}`);
+    });
 
   suite
     .command("show")

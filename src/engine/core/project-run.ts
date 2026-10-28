@@ -60,6 +60,9 @@ export async function startSuiteRun(input: {
   if (!pointer) return { ok: false, error: "suite_not_found" };
   if (!version) return { ok: false, error: input.version ? "suite_version_not_found" : "suite_not_found" };
   if (pointer.enabled === false) return { ok: false, error: "suite_disabled" };
+  if (version.disabled || pointer.disabledVersions?.includes(version.version)) {
+    return { ok: false, error: "suite_version_disabled" };
+  }
   const dispatch: SuiteDispatch = input.dispatch ?? pointer.dispatch ?? "local";
   if (dispatch === "worker" && !input.workerDispatch) return { ok: false, error: "worker_dispatch_unavailable" };
 
