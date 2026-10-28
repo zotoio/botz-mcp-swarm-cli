@@ -1268,6 +1268,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
         ? Math.max(manifest.sessionPool.size, manifest.load?.maxConcurrency ?? 1)
         : manifest.sessionPool.size,
     reuse: manifest.sessionPool.reuse,
+    headers: { "X-Swarm-Run-Id": runId },
     baseDir: manifestDir,
     retry: {
       policy: retryPolicy,

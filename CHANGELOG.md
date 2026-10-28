@@ -1,5 +1,12 @@
 # Release notes
 
+## 0.12.0
+
+- Suite version history and changelogs: `project suite versions <project>` lists every stored version (`1..N`), its creation timestamp, parent version (`basedOn`), status (`latest`, `read-only`, or `disabled`), step/eval counts, and generated changelog.
+- Per-version disable flag: `project suite disable-version <project> --version <n>` and `enable-version` prevent or re-enable executing a specific version while keeping its stored runs and step details inspectable. `startSuiteRun` refuses a disabled version with `suite_version_disabled`.
+- Only the latest suite version is editable to create `vN+1`, ensuring edits never fork from an older version and skip newer changes.
+- Remote MCP server OpenTelemetry correlation and redaction: HTTP and SSE suite runs send `X-Swarm-Run-Id: <runId>` on every MCP call, and the OTLP collector resolves `run.id` from datapoint/span attributes, resource attributes, or `X-Swarm-Run-Id` while scrubbing secret attributes on ingest.
+
 ## 0.11.2
 
 - Bump `@cursor/sdk` dependency to `^1.0.40` (fixes `grok-4.7` default variant on local runtime).

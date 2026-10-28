@@ -1,6 +1,6 @@
 {
   "name": "@zotoio/botz-mcp-swarm-cli",
-  "version": "0.11.2",
+  "version": "0.12.0",
   "description": "MCP Swarm extension for botz: botz mcp-swarm [args]",
   "type": "module",
   "license": "MIT",

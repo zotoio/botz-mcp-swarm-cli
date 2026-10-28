@@ -41,8 +41,10 @@ import {
   reintrospectProject,
   removeSuite,
   renameProject,
+  listSuiteVersions,
   saveSuiteVersion,
   setSuiteEnabled,
+  setSuiteVersionDisabled,
   updateProjectServer,
   cloneSuite,
   type ProjectDetail,
@@ -611,4 +613,28 @@ function findInTree(nodes: SuiteNode[], id: string): SuiteNode | null {
     }
   }
   return null;
+}
+
+export async function projectSuiteVersions(
+  projectRef: string,
+  suiteRef?: string,
+  options?: ProjectStoreOptions,
+) {
+  const project = await resolveProject(projectRef, options);
+  const suite = resolveSuite(project, suiteRef);
+  return listSuiteVersions(project.id, suite.id, options);
+}
+
+export async function setProjectSuiteVersionDisabled(
+  projectRef: string,
+  version: number,
+  disabled: boolean,
+  suiteRef?: string,
+  options?: ProjectStoreOptions,
+) {
+  const project = await resolveProject(projectRef, options);
+  const suite = resolveSuite(project, suiteRef);
+  const updated = await setSuiteVersionDisabled(project.id, suite.id, version, disabled, options);
+  if (!updated) throw new Error(`suite_version_not_found: ${version}`);
+  return updated;
 }
