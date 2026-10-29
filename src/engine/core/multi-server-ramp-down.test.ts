@@ -97,7 +97,9 @@ describe("multi-server ramp-down", () => {
 
   it("a real failure on the second server before ramp-down still fails the run and is counted on that server", async () => {
     fakeServers({ call: async (host) => { await sleep(5); return host !== "b.example"; } });
-    const report = await runManifest({ manifest: manifest({ maxConcurrency: 1, durationMs: 10, rampDownMs: 1000 }) });
+    // Failed passes never feed the pass estimate, so pin it: otherwise graceful ramp-down keeps starting
+    // optional passes for ~1s and the last one can race the drain deadline (cancelledByRampDown 1).
+    const report = await runManifest({ manifest: manifest({ maxConcurrency: 1, durationMs: 10, rampDownMs: 1000, rampDown: { passEstimateMs: 60_000 } }) });
     expect(report.verdict).toBe("fail");
     expect(serverRow(report, "a")?.errorRate).toBe(0);
     expect(serverRow(report, "b")?.errorRate).toBe(1);
