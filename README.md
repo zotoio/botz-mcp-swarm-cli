@@ -1,6 +1,6 @@
 # @zotoio/botz-mcp-swarm-cli
 
-Standards-based MCP load testing for CI and local development. Measures **MCP operations** (not raw HTTP RPS) across stdio, SSE, and streamable HTTP transports. **Silent green = Fail.**
+MCP server testing for CI and local development. Introspect any MCP server over stdio, SSE or streamable HTTP, generate test suites from tool schemas, annotations and intent-based filters, then run contract/schema checks, evals, and load and latency tests, and get optimisation recommendations. Measures **MCP operations**, not raw HTTP RPS, and a run that never exercises the server is a **Fail**.
 
 ```bash
 npm install -g @zotoio/botz-cli
@@ -212,7 +212,7 @@ botz mcp-swarm compare --base base.json --head head.json
 
 `compare` prints each side's server and endpoint and, when both reports record a server, warns if the server name, transport, or endpoint differs. A different server version is not a warning. The warnings are also in the `--output` JSON under `warnings`; they do not change the exit code.
 
-`run --manifest` writes reports under `.botz/mcp-swarm/runs/` (or the configured `runsDir`) unless `--output` is set. On **Pass** the exit code is `0`; on **Fail** (including silent green), invalid input, or configuration errors it is `1`. Standalone manifest/soak runs only write requested reports; they do not use `.botz/mcp-swarm/data` or service policy. Telemetry is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is explicitly configured. Reports distinguish disabled, configured, delivered, and failed export states; telemetry failure does not discard test results.
+`run --manifest` writes reports under `.botz/mcp-swarm/runs/` (or the configured `runsDir`) unless `--output` is set. On **Pass** the exit code is `0`; on **Fail** (including a run that did no real work), invalid input, or configuration errors it is `1`. Standalone manifest/soak runs only write requested reports; they do not use `.botz/mcp-swarm/data` or service policy. Telemetry is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is explicitly configured. Reports distinguish disabled, configured, delivered, and failed export states; telemetry failure does not discard test results.
 
 On standalone runs, SIGINT requests cancellation and exits 130; SIGTERM exits 143. The runner closes MCP sessions and writes the available report. A second signal forces immediate exit. A model SDK operation already in flight may take time to finish.
 
