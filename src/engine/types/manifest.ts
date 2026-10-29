@@ -6,6 +6,11 @@ import { RetryPolicySchema } from "../core/rate-limit-retry.js";
 export const TransportTypeSchema = z.enum(["stdio", "sse", "streamable-http"]);
 export type TransportType = z.infer<typeof TransportTypeSchema>;
 
+export const ProtocolEraSchema = z.enum(["legacy", "auto", "modern"]);
+export type ProtocolEra = z.infer<typeof ProtocolEraSchema>;
+export const SuiteProtocolEraSchema = z.enum(["legacy", "auto", "modern", "both"]);
+export type SuiteProtocolEra = z.infer<typeof SuiteProtocolEraSchema>;
+
 export const SessionReuseSchema = z.enum(["cold", "warm"]);
 export type SessionReuse = z.infer<typeof SessionReuseSchema>;
 
@@ -15,12 +20,16 @@ export const StdioTargetSchema = z.object({
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
   cwd: z.string().optional(),
+  protocolEra: ProtocolEraSchema.optional(),
+  suppressNotificationStream: z.boolean().optional(),
 });
 
 export const HttpTargetSchema = z.object({
   transport: z.enum(["sse", "streamable-http"]),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
+  protocolEra: ProtocolEraSchema.optional(),
+  suppressNotificationStream: z.boolean().optional(),
 });
 
 export const TargetSchema = z.union([StdioTargetSchema, HttpTargetSchema]);
@@ -180,6 +189,7 @@ export const AssertionsSchema = z.object({
   requireScenarioOutcomes: z.boolean().default(true),
   /** Fail if negotiated protocolVersion differs from this value. */
   requireProtocolVersion: z.string().optional(),
+  requireProtocolEra: z.enum(["legacy", "modern"]).optional(),
   /** Objectives judged over all tool calls on one server, by alias. */
   servers: z.record(z.string(), ServerSloSchema).optional(),
 });
@@ -233,6 +243,8 @@ export const ManifestSchema = z.object({
    * 2025-11-25, capability-mismatch Fail honesty is on for required methods.
    */
   protocolVersion: z.string().optional(),
+  /** Pin every target to one protocol era, or `both` for compare mode. */
+  protocolEra: SuiteProtocolEraSchema.optional(),
   /** The default server. Steps without `server` call it. */
   target: TargetSchema,
   /** Other servers, by alias. Each must pass the allowlist like `target`. */

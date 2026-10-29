@@ -98,12 +98,14 @@ program
   .description("Record redacted MCP wire fixtures to file")
   .option("--target <json>", "Target JSON (transport + connection details)")
   .option("--target-file <path>", "Path to target JSON file")
+  .option("--protocol-era <era>", "MCP protocol era: auto (default), legacy, or modern")
   .requiredOption("--allowlist <hosts>", "Comma-separated allowlist hosts")
   .requiredOption("--output <path>", "Output recording file path")
   .action(
     async (opts: {
       target?: string;
       targetFile?: string;
+      protocolEra?: string;
       allowlist: string;
       output: string;
     }) => {
@@ -127,6 +129,7 @@ program
   .requiredOption("--recording <path>", "Path to recording file")
   .option("--target <json>", "Target JSON (transport + connection details)")
   .option("--target-file <path>", "Path to target JSON file")
+  .option("--protocol-era <era>", "MCP protocol era: auto (default), legacy, or modern")
   .requiredOption("--allowlist <hosts>", "Comma-separated allowlist hosts")
   .option("--mode <mode>", "Replay mode: as-recorded, max-rate, paced", "as-recorded")
   .option("--pace-ms <ms>", "Pace between frames in ms", "100")
@@ -162,6 +165,7 @@ program
   .description("Draft fixtures from allowlisted target (human approve required)")
   .option("--target <json>", "Target JSON")
   .option("--target-file <path>", "Path to target JSON file")
+  .option("--protocol-era <era>", "MCP protocol era: auto (default), legacy, or modern")
   .requiredOption("--allowlist <hosts>", "Comma-separated allowlist hosts")
   .requiredOption("--output <path>", "Output discovery draft JSON path")
   .option("--include-write-tools", "Include write-like tools (default: read-only)")
@@ -169,6 +173,7 @@ program
     async (opts: {
       target?: string;
       targetFile?: string;
+      protocolEra?: string;
       allowlist: string;
       output: string;
       includeWriteTools?: boolean;
@@ -197,12 +202,14 @@ program
   )
   .option("--target <json>", "Target JSON")
   .option("--target-file <path>", "Target JSON file")
+  .option("--protocol-era <era>", "MCP protocol era: auto (default), legacy, or modern")
   .requiredOption("--allowlist <hosts>", "Comma-separated allowlist hosts")
   .requiredOption("--tool <name>", "Tool to optimize")
   .action(
     async (opts: {
       target?: string;
       targetFile?: string;
+      protocolEra?: string;
       allowlist: string;
       tool: string;
     }) => {

@@ -56,6 +56,8 @@ import { appendAudit } from "../store/audit-log.js";
 
 export interface RunOptions {
   manifest: Manifest;
+  /** Internal: keep per-node tools/call result digests (era compare mode). */
+  collectEraDigests?: boolean;
   outputDir?: string;
   mode?: RunMode;
   manifestDir?: string;
@@ -152,6 +154,10 @@ function assertJsonSchemaDialect(
 }
 
 interface StepTrace {
+  protocolEra?: "legacy" | "modern";
+  requestedEra?: "legacy" | "auto" | "modern";
+  eraFallbackReason?: string;
+  resultDigests?: Map<string, string>;
   nodeOutcomes: Map<string, NonNullable<RunReport["nodeOutcomes"]>[number]>;
   redactedArgs: Array<{ nodeId: string; tool?: string; args: unknown }>;
   seenArgs: Set<string>;
@@ -378,6 +384,9 @@ async function executeStep(
       sessionReuse: reused,
     };
     metrics.recordCall(obs);
+    if (method === "tools/call" && step.nodeId && raw.success && trace.resultDigests && !trace.resultDigests.has(step.nodeId)) {
+      trace.resultDigests.set(step.nodeId, eraResultDigest(raw.result));
+    }
     telemetry.recordCall(obs, transport);
     if (gatewayMode) hopObservations.push(observeGatewayHop(result));
     emit("mcp.rpc.duration", {
@@ -636,6 +645,13 @@ async function runScenarioPass(
       if (!pending) {
         pending = pools.acquire(alias).then((acquired) => {
           opened.set(alias, acquired);
+          if (!run.trace.protocolEra) {
+            const sm = acquired.session.getServerMeta();
+            run.trace.protocolEra = sm.protocolEra ?? acquired.session.protocolEra ?? "legacy";
+            run.trace.requestedEra = sm.requestedEra ?? acquired.session.requestedEra;
+            const fb = sm.eraFallbackReason ?? acquired.session.eraFallbackReason;
+            if (fb) run.trace.eraFallbackReason = fb;
+          }
           const transport = run.transports.get(alias) ?? run.transport;
           metrics.recordSessionStart(alias);
           telemetry.recordSessionStart(transport, "started");
@@ -1187,7 +1203,13 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     .slice(0, 16);
 
   const defaultServer = manifest.defaultTarget ?? DEFAULT_SERVER;
+  if (manifest.protocolEra === "both") {
+    return runManifestBothEras(options);
+  }
   const targets = resolveTargets(manifest, manifestDir);
+  if (manifest.protocolEra) {
+    for (const [alias, item] of targets) targets.set(alias, { ...item, protocolEra: manifest.protocolEra } as Target);
+  }
   const multiServer = targets.size > 1;
   const target = targets.get(defaultServer)!;
   // Every server must pass the same checks; the refusal names the server when there is more than one.
@@ -1239,6 +1261,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     ...(multiServer ? { defaultServer } : {}),
     retryPolicy,
     retryDeadline: Date.now() + manifest.quotas.maxDurationMs,
+    resultDigests: new Map(),
     recorder: new RunRecorder(Date.now()),
     hasExtractors: manifest.scenarios.some((scenario) => scenario.steps.some((step) => step.method === "extract")),
   };
@@ -1412,6 +1435,14 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     );
   }
 
+  const requiredEra = manifest.assertions.requireProtocolEra;
+  if (requiredEra && trace.protocolEra && requiredEra !== trace.protocolEra) {
+    failReasons.push(
+      `Protocol era ${requiredEra} required but the run spoke ${trace.protocolEra}` +
+        (trace.eraFallbackReason ? ` (Auto fell back: ${trace.eraFallbackReason})` : ""),
+    );
+  }
+
   failReasons.push(...serverSloReasons(manifest, metrics.getObservations(), defaultServer));
 
   const verdict = computeVerdict(failReasons, silentGreen);
@@ -1448,6 +1479,12 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     sessionMetrics: metrics.getSessionMetrics(manifest.target.transport),
     processSeries,
     loadTimeline: timeline.finish(),
+    ...(trace.protocolEra ? { protocolEra: trace.protocolEra } : {}),
+    ...(trace.requestedEra ? { protocolEraRequested: trace.requestedEra } : {}),
+    ...(trace.eraFallbackReason ? { protocolEraFallback: trace.eraFallbackReason } : {}),
+    ...(options.collectEraDigests && trace.resultDigests?.size
+      ? { eraResultDigests: Object.fromEntries(trace.resultDigests) }
+      : {}),
     processSummary,
     toolSeries,
     rpcSeries,
@@ -1482,4 +1519,80 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
         }
       : {}),
   };
+}
+
+
+/** Keys whose values legitimately differ between two runs (time, ids, tracing). */
+const VOLATILE_KEY = /(^|_|-)(ts|time|timestamp|at|date|id|uuid|trace|traceid|traceparent|span|spanid|request_?id|run_?id|session_?id|duration|duration_ms|latency|latency_ms|elapsed|elapsed_ms|took|took_ms|nonce|etag|expires|expires_at|created|created_at|updated|updated_at)$/i;
+
+function normaliseForEra(value: unknown, depth = 0): unknown {
+  if (depth > 12) return "…";
+  if (Array.isArray(value)) return value.map((v) => normaliseForEra(v, depth + 1));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      if (key === "_meta" || key === "resultType" || VOLATILE_KEY.test(key)) continue;
+      out[key] = normaliseForEra((value as Record<string, unknown>)[key], depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** Era-neutral digest of a tools/call result: structuredContent (else content), volatile keys removed. */
+export function eraResultDigest(result: unknown): string {
+  const r = (result ?? {}) as { structuredContent?: unknown; content?: unknown; isError?: boolean };
+  const body = r.structuredContent !== undefined ? r.structuredContent : r.content;
+  return createHash("sha256").update(JSON.stringify({ isError: Boolean(r.isError), body: normaliseForEra(body) })).digest("hex").slice(0, 16);
+}
+
+/**
+ * Compare mode (`protocolEra: both`): run the suite pinned to legacy, then
+ * pinned to modern, and diff verdicts, per-node outcomes and tool-result digests.
+ * The returned report is the modern run, annotated with `eraComparison`; any
+ * divergence (or modern unavailable) fails the run.
+ */
+export async function runManifestBothEras(options: RunOptions): Promise<RunReport> {
+  const pin = (era: "legacy" | "modern"): RunOptions => ({
+    ...options,
+    collectEraDigests: true,
+    runId: options.runId ? `${options.runId}-${era}` : undefined,
+    manifest: { ...options.manifest, protocolEra: era },
+  });
+  const legacy = await runManifest(pin("legacy"));
+  const modern = await runManifest({ ...pin("modern"), runId: options.runId });
+  const diffs: string[] = [];
+  if (legacy.verdict !== modern.verdict) diffs.push(`verdict: legacy=${legacy.verdict} modern=${modern.verdict}`);
+  const lNodes = new Map((legacy.nodeOutcomes ?? []).map((n) => [n.nodeId, n]));
+  for (const n of modern.nodeOutcomes ?? []) {
+    const l = lNodes.get(n.nodeId);
+    if (!l) { diffs.push(`node ${n.label}: only ran on modern`); continue; }
+    if ((l.errorCount > 0) !== (n.errorCount > 0)) {
+      diffs.push(`node ${n.label}: legacy errors=${l.errorCount} modern errors=${n.errorCount}${n.errorMessage ? ` (${n.errorMessage.slice(0, 160)})` : ""}`);
+    }
+  }
+  const ld = legacy.eraResultDigests ?? {};
+  const md = modern.eraResultDigests ?? {};
+  let compared = 0;
+  for (const [node, digest] of Object.entries(ld)) {
+    if (md[node] === undefined) continue;
+    compared += 1;
+    if (md[node] !== digest) {
+      const label = (modern.nodeOutcomes ?? []).find((n) => n.nodeId === node)?.label ?? node;
+      diffs.push(`node ${label}: tool result differs across eras`);
+    }
+  }
+  const eraComparison = {
+    legacy: { runId: legacy.id, verdict: legacy.verdict, protocolEra: legacy.protocolEra },
+    modern: { runId: modern.id, verdict: modern.verdict, protocolEra: modern.protocolEra },
+    comparedToolResults: compared,
+    equivalent: diffs.length === 0 && modern.protocolEra === "modern" && legacy.protocolEra === "legacy",
+    diffs,
+  };
+  const failReasons = [...modern.failReasons];
+  if (modern.protocolEra !== "modern") failReasons.push(`Compare mode: modern run did not speak modern (${modern.protocolEraFallback ?? modern.failReasons[0] ?? "unknown"})`);
+  for (const d of diffs) failReasons.push(`Era divergence: ${d}`);
+  for (const r of legacy.failReasons) failReasons.push(`[legacy] ${r}`);
+  const verdict: RunReport["verdict"] = eraComparison.equivalent && legacy.verdict === "pass" ? modern.verdict : "fail";
+  return { ...modern, verdict, failReasons, eraComparison };
 }

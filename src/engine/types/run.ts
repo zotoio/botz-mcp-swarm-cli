@@ -169,6 +169,22 @@ export interface RunServer {
 }
 
 export interface RunReport {
+  /** Protocol era the run actually spoke: legacy (initialize/session) or modern (2026-07-28). */
+  protocolEra?: "legacy" | "modern";
+  /** Era the target asked for (legacy | auto | modern). */
+  protocolEraRequested?: "legacy" | "auto" | "modern";
+  /** Set when Auto fell back to legacy: why the modern probe failed. */
+  protocolEraFallback?: string;
+  /** Internal (compare mode): tools/call result digests per node. */
+  eraResultDigests?: Record<string, string>;
+  /** Compare mode (`protocolEra: both`): legacy vs modern diff. */
+  eraComparison?: {
+    legacy: { runId: string; verdict: RunVerdict; protocolEra?: "legacy" | "modern"; protocolVersion?: string };
+    modern: { runId: string; verdict: RunVerdict; protocolEra?: "legacy" | "modern"; protocolVersion?: string };
+    comparedToolResults: number;
+    equivalent: boolean;
+    diffs: string[];
+  };
   id: string;
   manifestName: string;
   manifestHash: string;

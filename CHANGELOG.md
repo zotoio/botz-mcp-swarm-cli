@@ -1,5 +1,9 @@
 # Release notes
 
+## Unreleased
+
+- MCP protocol eras: targets take `protocolEra` (`auto` default: probe `server/discover`, fall back to legacy `initialize`; `legacy`; `modern` 2026-07-28 sessionless) and `suppressNotificationStream`. Manifests/suites can pin an era or use `both` to diff results across eras. New `--protocol-era` flag. Reports record `protocolEra`, `protocolEraRequested` and `protocolEraFallback`. See docs/protocol-eras.md.
+
 ## 0.13.0
 
 - Full Model Context Protocol (MCP `2025-03-26`, `2025-06-18`, `2025-11-25`) 7-stage client & contract coverage:

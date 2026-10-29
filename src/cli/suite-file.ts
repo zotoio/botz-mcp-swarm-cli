@@ -510,6 +510,8 @@ export async function captureSuite(input: {
 
 export interface SuiteRunOptions {
     params: Record<string, string>;
+    /** Pin the protocol era (or `both` for compare mode). */
+    protocolEra?: "legacy" | "auto" | "modern" | "both";
     signal?: AbortSignal;
     outputDir: string;
     /** File name without extension. Defaults to the run id. */
@@ -660,7 +662,7 @@ export async function runSavedSuite(
   const all = suiteServers(suite);
   const multi = isMultiServer(suite);
   let raw = await runManifest({
-    manifest,
+    manifest: options.protocolEra ? { ...manifest, protocolEra: options.protocolEra } : manifest,
     mode: "load",
     manifestDir: baseDir,
     vars: params,

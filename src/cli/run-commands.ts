@@ -21,6 +21,7 @@ import { runRemoteSuite } from "./remote-run.js";
 import { DEFAULT_SWARM_SERVER_URL } from "./worker-transport.js";
 
 interface RunOptions extends AuthFlags, TargetOptions {
+  protocolEra?: string;
   manifest?: string; suite?: string; project?: string; params?: string; set?: string[]; inference?: boolean; allowStdio?: boolean;
   iterations?: string; concurrency?: string; durationMs?: string; rampUpMs?: string;
   rampDownMs?: string; dwellMs?: string; jitterMs?: string; output?: string;
@@ -94,6 +95,7 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
     .option("--jitter-ms <ms>", "Maximum random delay between suite passes")
     .option("--max-call-count <n>", `Suite call-count limit (overrides suite limits; env SWARM_MAX_CALL_COUNT; default 100000; max ${SUITE_LIMIT_CEILINGS.maxCallCount})`)
     .option("--max-payload-bytes <n>", `Suite per-payload byte limit (overrides suite limits; env SWARM_MAX_PAYLOAD_BYTES; default 1048576; max ${SUITE_LIMIT_CEILINGS.maxPayloadBytes})`)
+    .option("--protocol-era <era>", "MCP protocol era: auto (default: probe server/discover, fall back to legacy initialize), legacy, modern, or both (run once per era and diff results)")
     .option("--soak", "Sustained run; suites use the load engine (default 5000ms)")
     .option("--soak-duration-ms <ms>", "Alias for --duration-ms with soak mode")
     .option("--output <dir>", "Report directory; defaults to runsDir in .botz/mcp-swarm/settings.json, else .botz/mcp-swarm/runs")
@@ -157,6 +159,7 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
           signal, params, ...target, load: suiteLoad(opts, soak), limits: suiteLimitFlags(opts), inference: opts.inference === true,
           outputDir, reportBaseName: opts.output ? undefined : runReportBaseName(), baseDir: process.cwd(), auth: authFlags(opts), botz,
           allowStdio: opts.allowStdio === true,
+          ...(opts.protocolEra ? { protocolEra: parseProtocolEra(opts.protocolEra) } : {}),
         }));
         printRunResult(result.report, shownReports(result, botz, opts.output), opts.format);
         return;
@@ -176,6 +179,7 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         if (maxIterations !== undefined) raw.soak.maxIterations = maxIterations;
         if (!raw.soak.durationMs && !raw.soak.maxIterations) raw.soak.durationMs = 5000;
       }
+      if (opts.protocolEra) raw.protocolEra = parseProtocolEra(opts.protocolEra);
       const manifest = parseManifest(raw);
       const report = await withRunSignal((signal) => runManifest({ signal, manifest, manifestDir: dirname(path), mode: selectRunMode(manifest, explicitSoak) }));
       const botz = resolveBotzHome();
@@ -187,4 +191,11 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
       if (!process.exitCode) process.exitCode = 2;
     }
   });
+}
+
+/** Validate a --protocol-era value. */
+export function parseProtocolEra(value: string): "legacy" | "auto" | "modern" | "both" {
+  const v = value.trim().toLowerCase();
+  if (v === "legacy" || v === "auto" || v === "modern" || v === "both") return v;
+  throw new Error(`--protocol-era must be one of auto, legacy, modern, both (got ${value})`);
 }

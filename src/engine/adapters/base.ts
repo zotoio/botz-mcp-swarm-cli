@@ -23,6 +23,9 @@ export interface McpCallResult {
 
 export interface ServerMeta {
   protocolVersion?: string;
+  protocolEra?: "legacy" | "modern";
+  requestedEra?: "legacy" | "auto" | "modern";
+  eraFallbackReason?: string;
   capabilities?: Record<string, unknown>;
   serverInfo?: { name?: string; version?: string; icons?: unknown[] };
   instructions?: string;
@@ -35,6 +38,9 @@ export interface ElicitAutoReply {
 
 export interface McpSession {
   id: string;
+  protocolEra?: "legacy" | "modern";
+  requestedEra?: "legacy" | "auto" | "modern";
+  eraFallbackReason?: string;
   transport: Transport;
   /** Stdio SUT child PID when available. */
   childPid?: number | null;
