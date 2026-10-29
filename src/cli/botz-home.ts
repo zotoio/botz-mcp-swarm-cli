@@ -75,17 +75,28 @@ export function resolveBotzHome(options: { cwd?: string; home?: string } = {}): 
   const dir = join(repoRoot, ".botz", PLUGIN_DIR);
   const display = `.botz/${PLUGIN_DIR}`;
   const settings = readSettings(dir, display);
-  const fromRepo = (value: string | undefined) => value === undefined ? undefined : resolve(repoRoot, expandHome(value, home));
+  // CLI-01: a checked-in repo settings file must not point writes/reads outside the work tree.
+  const fromRepo = (value: string | undefined, key: keyof BotzSettings) =>
+    value === undefined ? undefined : insideWorkspace(repoRoot, resolve(repoRoot, expandHome(value, home)), `${display}/${SETTINGS_FILE}`, key);
   return {
     dir,
     display,
-    suitesDir: fromRepo(settings.suitesDir) ?? userSuites ?? join(dir, "suites"),
-    runsDir: fromRepo(settings.runsDir) ?? userRuns ?? join(dir, "runs"),
+    suitesDir: fromRepo(settings.suitesDir, "suitesDir") ?? userSuites ?? join(dir, "suites"),
+    runsDir: fromRepo(settings.runsDir, "runsDir") ?? userRuns ?? join(dir, "runs"),
     user: { dir: userDir, suitesDir: userSuites ?? join(userDir, "suites") },
     repoRoot,
     home,
     cwd,
   };
+}
+
+/** Return `target` if it is `root` or inside it, else throw naming the offending settings key. */
+export function insideWorkspace(root: string, target: string, where: string, key: string): string {
+  const base = resolve(root);
+  const full = resolve(target);
+  const rel = relative(base, full);
+  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel) && rel.split(sep)[0] !== "..")) return full;
+  throw new Error(`invalid ${where}; ${key} must stay inside the repository (${base})`);
 }
 
 function readSettings(dir: string, display: string): BotzSettings {

@@ -21,7 +21,7 @@ import { runRemoteSuite } from "./remote-run.js";
 import { DEFAULT_SWARM_SERVER_URL } from "./worker-transport.js";
 
 interface RunOptions extends AuthFlags, TargetOptions {
-  manifest?: string; suite?: string; project?: string; params?: string; set?: string[]; inference?: boolean;
+  manifest?: string; suite?: string; project?: string; params?: string; set?: string[]; inference?: boolean; allowStdio?: boolean;
   iterations?: string; concurrency?: string; durationMs?: string; rampUpMs?: string;
   rampDownMs?: string; dwellMs?: string; jitterMs?: string; output?: string;
   soak?: boolean; soakDurationMs?: string; maxIterations?: string; format: OutputFormat;
@@ -76,6 +76,7 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
     .option("--token <token>", "Bearer token (bzt_... or OAuth token) for central Swarm server (defaults to SWARM_TOKEN / SWARM_WORKER_TOKEN)")
     .addOption(new Option("--dispatch <mode>", "Central server execution dispatch mode (local or worker)").choices(["local", "worker"]))
     .option("--inference", "Opt in to model evals and assertion judging", false)
+    .option("--allow-stdio", "Allow stdio servers declared in suite.json; they start a local command, so they are refused by default")
     .option("--no-inference", "Skip model evals (the default)")
     .option("--params <file>", "JSON string map overriding suite parameters")
     .option("--set <key=value>", "Override a suite parameter (repeatable)", collect, [])
@@ -155,6 +156,7 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         const result = await withRunSignal((signal) => runSavedSuite(resolveSuiteArg(opts.suite!, botz), {
           signal, params, ...target, load: suiteLoad(opts, soak), limits: suiteLimitFlags(opts), inference: opts.inference === true,
           outputDir, reportBaseName: opts.output ? undefined : runReportBaseName(), baseDir: process.cwd(), auth: authFlags(opts), botz,
+          allowStdio: opts.allowStdio === true,
         }));
         printRunResult(result.report, shownReports(result, botz, opts.output), opts.format);
         return;

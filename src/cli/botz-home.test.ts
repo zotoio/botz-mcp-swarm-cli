@@ -105,23 +105,35 @@ describe("botz home", () => {
     expect(resolveSuiteArg("./missing", botz)).toBe(join(cwd, "missing"));
   });
 
-  it("reads suitesDir and runsDir from settings.json relative to the git root, ~/, or absolute", async () => {
+  it("reads suitesDir and runsDir from repo settings.json relative to the git root or absolute inside it", async () => {
     const repo = join(root, "settings-repo");
     const home = join(root, "settings-home");
     await mkdir(join(repo, ".git"), { recursive: true });
     await mkdir(join(repo, ".botz", "mcp-swarm"), { recursive: true });
     const settings = join(repo, ".botz", "mcp-swarm", "settings.json");
-    await writeFile(settings, JSON.stringify({ suitesDir: "qa/suites", runsDir: "~/swarm-runs" }));
+    await writeFile(settings, JSON.stringify({ suitesDir: "qa/suites", runsDir: join(repo, "abs-runs") }));
     const botz = resolveBotzHome({ cwd: join(repo), home });
     expect(botz.suitesDir).toBe(join(repo, "qa", "suites"));
-    expect(botz.runsDir).toBe(join(home, "swarm-runs"));
+    expect(botz.runsDir).toBe(join(repo, "abs-runs"));
     expect(defaultSuiteDir(botz, "demo")).toBe(join(repo, "qa", "suites", "demo"));
-    await writeFile(settings, JSON.stringify({ runsDir: join(root, "abs-runs") }));
-    expect(resolveBotzHome({ cwd: repo, home }).runsDir).toBe(join(root, "abs-runs"));
     await writeFile(settings, JSON.stringify({ runsDir: "" }));
     expect(() => resolveBotzHome({ cwd: repo, home })).toThrow(/runsDir must be a non-empty path/);
     await writeFile(settings, "[");
     expect(() => resolveBotzHome({ cwd: repo, home })).toThrow(/expected JSON/);
+  });
+
+  it("CLI-01: rejects repo settings whose runsDir/suitesDir resolve outside the workspace", async () => {
+    const repo = join(root, "escape-repo");
+    const home = join(root, "escape-home");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(join(repo, ".botz", "mcp-swarm"), { recursive: true });
+    const settings = join(repo, ".botz", "mcp-swarm", "settings.json");
+    for (const bad of [{ runsDir: "../outside" }, { suitesDir: "~/stolen" }, { runsDir: join(root, "abs-runs") }, { suitesDir: "/etc" }]) {
+      await writeFile(settings, JSON.stringify(bad));
+      expect(() => resolveBotzHome({ cwd: repo, home })).toThrow(/must stay inside the repository/);
+    }
+    await writeFile(settings, JSON.stringify({ runsDir: "./a/../b" }));
+    expect(resolveBotzHome({ cwd: repo, home }).runsDir).toBe(join(repo, "b"));
   });
 
   it("gives the repo .botz precedence over ~/.botz for settings, suites, and credentials", async () => {

@@ -533,6 +533,29 @@ export interface SuiteRunOptions {
     limits?: Partial<SuiteLimits>;
     /** Environment for SWARM_MAX_CALL_COUNT / SWARM_MAX_PAYLOAD_BYTES. Defaults to process.env. */
     env?: NodeJS.ProcessEnv;
+    /** CLI-02: permit stdio targets that come from suite.json (they launch a local command). */
+    allowStdio?: boolean;
+}
+
+export const SUITE_STDIO_NOT_ALLOWED =
+  "suite.json declares a stdio target, which starts a local command; re-run with --allow-stdio if you trust this suite";
+
+/**
+ * CLI-02: refuse stdio servers that come from suite.json unless the caller passed --allow-stdio.
+ * A stdio target supplied on the command line (--target-file / --target) is the user's own consent.
+ */
+export function assertSuiteStdioAllowed(
+  targets: Map<string, Target>,
+  overriddenAliases: Iterable<string>,
+  allowStdio: boolean | undefined,
+): void {
+  if (allowStdio) return;
+  const overridden = new Set(overriddenAliases);
+  for (const [alias, target] of targets) {
+    if (target.transport === "stdio" && !overridden.has(alias)) {
+      throw new Error(targets.size > 1 ? `${SUITE_STDIO_NOT_ALLOWED} (server ${alias})` : SUITE_STDIO_NOT_ALLOWED);
+    }
+  }
 }
 
 /** Prefixes an error with the server it concerns, when the suite has more than one. */
@@ -629,6 +652,11 @@ export async function runSavedSuite(
 ): Promise<SuiteRunResult> {
   const { suite, saved, home, target, targets, params, manifest, baseDir } = await resolveSuiteExecution(dir, options);
   const defaultAlias = suiteDefaultAlias(suite);
+  const cliStdioAliases = [
+    ...(options.target?.transport === "stdio" ? [defaultAlias] : []),
+    ...Object.entries(options.targets ?? {}).flatMap(([alias, t]) => (typeof t === "object" && t.transport === "stdio" ? [alias] : [])),
+  ];
+  assertSuiteStdioAllowed(targets, cliStdioAliases, options.allowStdio);
   const all = suiteServers(suite);
   const multi = isMultiServer(suite);
   let raw = await runManifest({

@@ -41,7 +41,10 @@ server.setRequestHandler(ListToolsRequestSchema, async()=>({tools:[{name:'echo',
 server.setRequestHandler(CallToolRequestSchema, async r=>({isError:r.params.arguments.message==='fail',content:[{type:'text',text:String(r.params.arguments.message)}]}));
 await server.connect(new StdioServerTransport());
 `);
+  // The suite fixtures use a local stdio server, so suite runs opt in with --allow-stdio (CLI-02).
+  const runsSuite = args => args[0] === "run" || args[0] === "soak" || (args[0] === "suite" && (args[1] === "run" || args[1] === "soak"));
   const cli = (args, cwd = scratch, code = 0) => {
+    if (runsSuite(args) && !args.includes("--help")) args = [...args, "--allow-stdio"];
     const result = spawnSync(process.execPath, [entry, ...args], { cwd, env, encoding: "utf8", timeout: 30_000 });
     assert.equal(result.status, code, result.stderr + result.stdout);
     return result.stdout;
