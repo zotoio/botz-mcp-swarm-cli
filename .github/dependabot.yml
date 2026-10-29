@@ -1,0 +1,28 @@
+# Weekly, grouped Dependabot updates (security decision D5).
+# All GitHub Actions are pinned to full commit SHAs with a version comment; Dependabot bumps SHA + comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Australia/Sydney
+    open-pull-requests-limit: 5
+    groups:
+      github_actions:
+        patterns:
+          - "*"
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Australia/Sydney
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns:
+          - "*"
