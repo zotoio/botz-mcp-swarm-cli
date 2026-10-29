@@ -36,3 +36,5 @@ flowchart LR
 5. **Stage 5 (`completion/complete`)**: Exercises `ref/prompt` and `ref/resource` autocomplete endpoints when `capabilities.completions` is advertised.
 6. **Stage 6 (`sampling/createMessage` & `roots/list`)**: Declares client `sampling` and `roots` capabilities and responds deterministically (`swarm-deterministic-sampler-v1` and `file:///workspace/swarm-sandbox`).
 7. **Stage 7 (Resumability & End-of-Run Teardown)**: Automatically reconnects dropped Streamable HTTP sessions (`isSessionLostError`) and sends `signalCalleeRunCompleted` (`notifications/swarm/run_completed`, `swarm_run_completed`, and `POST /api/swarm/run-completed`) at run completion.
+
+- **Runner HTTP Identification**: Outbound HTTP/SSE runner requests identify with `User-Agent: botz-mcp-swarm/<version> (mcp-tester)` and `X-Swarm-Run-Id: <runId>`.
