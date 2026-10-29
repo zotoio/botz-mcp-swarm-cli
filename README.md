@@ -1,6 +1,8 @@
 # @zotoio/botz-mcp-swarm-cli
 
-MCP server testing for CI and local development. Introspect any MCP server over stdio, SSE or streamable HTTP, generate test suites from tool schemas, annotations and intent-based filters, then run contract/schema checks, evals, and load and latency tests, and get optimisation recommendations. Measures **MCP operations**, not raw HTTP RPS, and a run that never exercises the server is a **Fail**.
+**Test any MCP server, end to end.** Introspect, generate suites, run evals and load tests, and get optimisation advice, in CI or on your laptop.
+
+Introspect any MCP server over stdio, SSE or streamable HTTP, generate test suites from tool schemas, annotations and intent-based filters, then run contract/schema checks, evals, and load and latency tests, and get optimisation recommendations. Measures **MCP operations**, not raw HTTP RPS, and a run that never exercises the server is a **Fail**.
 
 ```bash
 npm install -g @zotoio/botz-cli
