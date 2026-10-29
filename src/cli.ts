@@ -39,8 +39,15 @@ import { resolveStdioTarget } from "./engine/core/target-resolve.js";
 import { assertTargetAllowlisted } from "./engine/core/allowlist.js";
 import { registerProjectCommands } from "./cli/project-commands.js";
 import { registerSuiteCommands } from "./cli/suite-commands.js";
-import { parseTransportChoice, resolveWorkerToken, runWorker, WORKER_TOKEN_ENV } from "./cli/worker.js";
-import { serverOrigin } from "./cli/worker-transport.js";
+import {
+  parseTransportChoice,
+  resolveWorkerMaxVus,
+  resolveWorkerToken,
+  runWorker,
+  WORKER_MAX_VUS_ENV,
+  WORKER_TOKEN_ENV,
+} from "./cli/worker.js";
+import { DEFAULT_SWARM_SERVER_URL, resolveSwarmServerUrl, SWARM_SERVER_URL_ENV } from "./cli/worker-transport.js";
 
 function cliPackageVersion(): string {
   const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
@@ -272,33 +279,52 @@ registerProjectCommands(program);
 
 program
   .command("worker")
-  .description("Run suites assigned by a swarm service. Long-running; does not start the admin server")
-  .requiredOption("--server <baseUrl>", "Service base URL, for example https://swarm.example.com")
-  .option("--token <token>", `Worker token. Defaults to ${WORKER_TOKEN_ENV}`)
+  .description("Run suites and distributed VU slices assigned by a Swarm server, and stream OTEL telemetry. Long-running; does not start the admin server")
+  .option("--server <baseUrl>", `Swarm server base URL (defaults to ${SWARM_SERVER_URL_ENV} or ${DEFAULT_SWARM_SERVER_URL})`)
+  .option("--token <token>", `Worker token. Defaults to ${WORKER_TOKEN_ENV} or SWARM_TOKEN`)
   .option("--transport <kind>", "auto (HTTP/2, then SSE), http2, or sse", "auto")
+  .option("--max-vus <n>", `Maximum virtual users this worker can execute per assigned slice (defaults to ${WORKER_MAX_VUS_ENV} or 50)`)
+  .option("--otel-export", "Stream OpenTelemetry spans and metrics (/otlp/v1/traces & /otlp/v1/metrics) back to the Swarm server", true)
+  .option("--no-otel-export", "Disable OTLP trace/metric export to the Swarm server")
+  .option("--label <name>", "Optional worker label advertised to the Swarm server")
   .option("--allow-stdio", "Run stdio targets. They start a local command chosen by the service, so they are refused by default")
   .option("--base-dir <dir>", "Directory that relative stdio target commands resolve against. Defaults to cwd")
-  .action(async (opts: { server: string; token?: string; transport?: string; allowStdio?: boolean; baseDir?: string }) => {
-    const token = resolveWorkerToken(opts.token);
-    const transport = parseTransportChoice(opts.transport);
-    const server = serverOrigin(opts.server);
-    const controller = new AbortController();
-    const stop = () => controller.abort();
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-    console.log(`Worker starting: server ${server.origin}, transport ${transport}`);
-    const exit = await runWorker({
-      server: server.origin,
-      token,
-      transport,
-      allowStdio: opts.allowStdio === true,
-      baseDir: opts.baseDir ? resolve(opts.baseDir) : process.cwd(),
-      signal: controller.signal,
-    });
-    process.off("SIGINT", stop);
-    process.off("SIGTERM", stop);
-    if (exit.code !== 0) throw new Error(exit.reason);
-  });
+  .action(
+    async (opts: {
+      server?: string;
+      token?: string;
+      transport?: string;
+      maxVus?: string;
+      otelExport?: boolean;
+      label?: string;
+      allowStdio?: boolean;
+      baseDir?: string;
+    }) => {
+      const token = resolveWorkerToken(opts.token);
+      const transport = parseTransportChoice(opts.transport);
+      const server = resolveSwarmServerUrl(opts.server);
+      const maxVus = resolveWorkerMaxVus(opts.maxVus);
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      console.log(`Worker starting: server ${server}, transport ${transport}, maxVus ${maxVus}, otelExport ${opts.otelExport !== false}`);
+      const exit = await runWorker({
+        server,
+        token,
+        transport,
+        maxVus,
+        otelExport: opts.otelExport !== false,
+        label: opts.label,
+        allowStdio: opts.allowStdio === true,
+        baseDir: opts.baseDir ? resolve(opts.baseDir) : process.cwd(),
+        signal: controller.signal,
+      });
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      if (exit.code !== 0) throw new Error(exit.reason);
+    },
+  );
 
 program.parseAsync(process.argv).catch((error: unknown) => {
   console.error("Error:", error instanceof Error ? error.message : error);

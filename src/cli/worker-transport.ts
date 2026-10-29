@@ -1,6 +1,16 @@
 import http2 from "node:http2";
+import { SWARM_TESTER_USER_AGENT } from "../engine/adapters/http-fetch.js";
 
 export type TransportKind = "http2" | "sse";
+
+export const DEFAULT_SWARM_SERVER_URL = "https://swarm.botz.ai";
+export const SWARM_SERVER_URL_ENV = "SWARM_SERVER_URL";
+
+export type VuSliceAssignment = {
+  shardIndex: number;
+  totalShards: number;
+  assignedVus: number;
+};
 
 export type AssignFrame = {
   type: "assign";
@@ -8,6 +18,7 @@ export type AssignFrame = {
   projectId?: unknown;
   suiteId?: unknown;
   version?: unknown;
+  vuSlice?: VuSliceAssignment;
 };
 
 export type ServerFrame =
@@ -19,7 +30,7 @@ export type ServerFrame =
   | { type: "ping" };
 
 export type WorkerFrame =
-  | { type: "accept"; executionId: string }
+  | { type: "accept"; executionId: string; maxVus?: number; capabilities?: string[] }
   | { type: "progress"; executionId: string; event: { name: string; attributes: Record<string, string | number | boolean> } }
   | { type: "complete"; executionId: string; verdict: "pass" | "fail"; report?: unknown }
   | { type: "reject"; executionId: string; reason: string };
@@ -55,9 +66,21 @@ export interface ConnectOptions {
    * `: keepalive` comment (SSE) every 15 s, so the default allows three missed beats.
    */
   idleTimeoutMs?: number;
+  /** Max VUs this worker advertises to the central Swarm server. */
+  maxVus?: number;
+  /** Worker capabilities advertised on connect. */
+  capabilities?: string[];
+  /** Optional worker label. */
+  label?: string;
 }
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 45_000;
+
+/** Resolves `--server`, `SWARM_SERVER_URL`, or defaults to `https://swarm.botz.ai`. */
+export function resolveSwarmServerUrl(flag?: string, env: NodeJS.ProcessEnv = process.env): string {
+  const raw = flag?.trim() || env[SWARM_SERVER_URL_ENV]?.trim() || DEFAULT_SWARM_SERVER_URL;
+  return serverOrigin(raw).origin;
+}
 
 /** Calls `onIdle` once when `touch` has not been called for `ms`. */
 function idleWatchdog(ms: number, onIdle: () => void): { touch: () => void; stop: () => void } {
@@ -194,6 +217,22 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function workerConnectHeaders(options: ConnectOptions): Record<string, string> {
+  const out: Record<string, string> = {
+    "user-agent": SWARM_TESTER_USER_AGENT,
+  };
+  if (typeof options.maxVus === "number" && options.maxVus > 0) {
+    out["x-worker-max-vus"] = String(options.maxVus);
+  }
+  if (Array.isArray(options.capabilities) && options.capabilities.length > 0) {
+    out["x-worker-capabilities"] = options.capabilities.join(",");
+  }
+  if (options.label?.trim()) {
+    out["x-worker-label"] = options.label.trim();
+  }
+  return out;
+}
+
 /** Bidirectional NDJSON over `POST /api/worker/session`. Cleartext uses prior knowledge; https negotiates h2 by ALPN. */
 export async function connectHttp2(options: ConnectOptions): Promise<WorkerTransport> {
   const origin = serverOrigin(options.server);
@@ -203,6 +242,7 @@ export async function connectHttp2(options: ConnectOptions): Promise<WorkerTrans
   const acks: Array<(result: SendResult) => void> = [];
   let reason: CloseReason | null = null;
   let channelId = "";
+  const extraHeaders = workerConnectHeaders(options);
 
   let finish = (next: CloseReason) => {
     if (!reason) reason = next;
@@ -234,6 +274,7 @@ export async function connectHttp2(options: ConnectOptions): Promise<WorkerTrans
         authorization: `Bearer ${options.token}`,
         "content-type": "application/x-ndjson",
         accept: "application/x-ndjson",
+        ...extraHeaders,
       }, { endStream: false });
     } catch (error) {
       fail(new WorkerProtocolError(`HTTP/2 unavailable: ${messageOf(error)}`));
@@ -329,6 +370,7 @@ export async function connectHttp2(options: ConnectOptions): Promise<WorkerTrans
           ":path": `/api/worker/executions/${encodeURIComponent(executionId)}/suite`,
           authorization: `Bearer ${options.token}`,
           accept: ACCEPT_JSON,
+          ...extraHeaders,
           ...(channelId ? { "x-worker-channel": channelId } : {}),
         });
         let status = 0;
@@ -365,10 +407,11 @@ export async function connectSse(options: ConnectOptions): Promise<WorkerTranspo
   const origin = serverOrigin(options.server);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+  const extraHeaders = workerConnectHeaders(options);
   let res: Response;
   try {
     res = await fetch(new URL("/api/worker/events", origin), {
-      headers: { authorization: `Bearer ${options.token}`, accept: "text/event-stream" },
+      headers: { authorization: `Bearer ${options.token}`, accept: "text/event-stream", ...extraHeaders },
       signal: controller.signal,
     });
   } catch (error) {
@@ -420,6 +463,7 @@ export async function connectSse(options: ConnectOptions): Promise<WorkerTranspo
   const headers = () => ({
     authorization: `Bearer ${options.token}`,
     accept: ACCEPT_JSON,
+    ...extraHeaders,
     ...(channelId ? { "x-worker-channel": channelId } : {}),
   });
 

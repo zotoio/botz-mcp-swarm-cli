@@ -17,14 +17,17 @@ import { addTargetOptions, targetOptions, type TargetOptions } from "./target-op
 import { printRunResult, type OutputFormat } from "./run-output.js";
 import { diagnosticError } from "./diagnostic-error.js";
 import { rampDownFlags } from "./ramp-down-flags.js";
+import { runRemoteSuite } from "./remote-run.js";
+import { DEFAULT_SWARM_SERVER_URL } from "./worker-transport.js";
 
 interface RunOptions extends AuthFlags, TargetOptions {
-  manifest?: string; suite?: string; params?: string; set?: string[]; inference?: boolean;
+  manifest?: string; suite?: string; project?: string; params?: string; set?: string[]; inference?: boolean;
   iterations?: string; concurrency?: string; durationMs?: string; rampUpMs?: string;
   rampDownMs?: string; dwellMs?: string; jitterMs?: string; output?: string;
   soak?: boolean; soakDurationMs?: string; maxIterations?: string; format: OutputFormat;
   maxCallCount?: string; maxPayloadBytes?: string; rampDownStrategy?: string; drainTimeoutMs?: string;
   preset?: LoadPresetId; skipImageGen?: boolean; skipExpensiveLlm?: boolean;
+  remote?: boolean; central?: boolean; server?: string; token?: string; dispatch?: "local" | "worker";
 }
 export function integer(value: string | undefined, label: string, minimum = 0): number | undefined {
   if (value === undefined) return undefined;
@@ -64,8 +67,14 @@ function shownReports(paths: { jsonPath: string; markdownPath: string }, botz: B
 }
 
 export function registerRunCommand(parent: Command, name = "run", suiteOnly = false): void {
-  const command = parent.command(name).description(name === "soak" ? "Run a sustained suite or manifest test" : "Execute a saved suite or test manifest")
-    .option("--suite <dir|name>", "Saved suite directory or name")
+  const command = parent.command(name).description(name === "soak" ? "Run a sustained suite or manifest test" : "Execute a saved suite, test manifest, or central Swarm server suite")
+    .option("--suite <dir|name>", "Saved suite directory or name (or central project/suite id when --remote is used)")
+    .option("--project <id>", "Project id on the central Swarm server (when --remote / --server is used)")
+    .option("--remote", `Execute the suite on the central Swarm server (defaults --server to SWARM_SERVER_URL or ${DEFAULT_SWARM_SERVER_URL})`)
+    .option("--central", `Alias for --remote (executes on ${DEFAULT_SWARM_SERVER_URL})`)
+    .option("--server <url>", `Central Swarm server base URL (defaults to SWARM_SERVER_URL or ${DEFAULT_SWARM_SERVER_URL} when --remote is used)`)
+    .option("--token <token>", "Bearer token (bzt_... or OAuth token) for central Swarm server (defaults to SWARM_TOKEN / SWARM_WORKER_TOKEN)")
+    .addOption(new Option("--dispatch <mode>", "Central server execution dispatch mode (local or worker)").choices(["local", "worker"]))
     .option("--inference", "Opt in to model evals and assertion judging", false)
     .option("--no-inference", "Skip model evals (the default)")
     .option("--params <file>", "JSON string map overriding suite parameters")
@@ -93,6 +102,41 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
   addTargetOptions(addAuthOptions(command));
   command.action(async (opts: RunOptions) => {
     try {
+      const useRemote = Boolean(opts.remote || opts.central || opts.server || opts.project);
+      if (useRemote) {
+        const projectId = (opts.project ?? opts.suite ?? "").trim();
+        if (!projectId) throw new Error("provide --suite <id> or --project <id> when running on the central Swarm server");
+        const suiteId = opts.project && opts.suite ? opts.suite.trim() : undefined;
+        const botz = resolveBotzHome();
+        const outputDir = await reportDir(opts.output, botz);
+        const result = await withRunSignal((signal) =>
+          runRemoteSuite({
+            server: opts.server,
+            token: opts.token,
+            projectId,
+            suiteId,
+            preset: opts.preset,
+            dispatch: opts.dispatch,
+            concurrency: integer(opts.concurrency, "concurrency", 1),
+            durationMs: integer(opts.durationMs ?? opts.soakDurationMs, "duration-ms", 1),
+            skipImageGen: opts.skipImageGen || opts.preset === "soak",
+            skipExpensiveLlm: opts.skipExpensiveLlm || opts.preset === "soak",
+            outputDir,
+            signal,
+          }),
+        );
+        const paths = shownReports(
+          {
+            jsonPath: result.jsonPath ?? join(outputDir, `${result.report.id}.json`),
+            markdownPath: result.markdownPath ?? join(outputDir, `${result.report.id}.md`),
+          },
+          botz,
+          opts.output,
+        );
+        printRunResult(result.report, paths, opts.format);
+        return;
+      }
+
       if (Boolean(opts.suite) === Boolean(opts.manifest)) throw new Error("provide exactly one of --suite or --manifest");
       if (opts.durationMs && opts.soakDurationMs) throw new Error("provide --duration-ms or --soak-duration-ms, not both");
       const soak = name === "soak" || Boolean(opts.soak || opts.soakDurationMs);

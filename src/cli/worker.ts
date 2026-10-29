@@ -7,6 +7,7 @@ import type { AllowlistEntry } from "../engine/service/mcp-allowlist.js";
 import type { Target } from "../engine/types/manifest.js";
 import { DEFAULT_SERVER } from "../engine/core/servers.js";
 import type { RunProgressEvent, RunReport } from "../engine/types/run.js";
+import { SWARM_TESTER_USER_AGENT } from "../engine/adapters/http-fetch.js";
 import {
   defaultScrubContext,
   makeReportScrubber,
@@ -19,16 +20,20 @@ import { resolveTargetSecrets } from "./suite-auth.js";
 import {
   connectHttp2,
   connectSse,
+  serverOrigin,
   WorkerAuthError,
   type CloseReason,
   type ConnectOptions,
   type ServerFrame,
   type TransportKind,
+  type VuSliceAssignment,
   type WorkerFrame,
   type WorkerTransport,
 } from "./worker-transport.js";
 
 export const WORKER_TOKEN_ENV = "SWARM_WORKER_TOKEN";
+export const WORKER_MAX_VUS_ENV = "SWARM_WORKER_MAX_VUS";
+export const DEFAULT_WORKER_MAX_VUS = 50;
 
 export type TransportChoice = "auto" | TransportKind;
 
@@ -50,11 +55,21 @@ const MAX_REPORT_BYTES = 7 * 1024 * 1024;
 const DEADLINE_MARGIN_MS = 5_000;
 const MAX_QUEUED_PROGRESS = 500;
 
-/** `--token` wins over `SWARM_WORKER_TOKEN`. Empty values count as missing. */
+/** `--token` wins over `SWARM_WORKER_TOKEN` and `SWARM_TOKEN`. Empty values count as missing. */
 export function resolveWorkerToken(flag: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
-  const token = flag?.trim() || env[WORKER_TOKEN_ENV]?.trim();
+  const token = flag?.trim() || env[WORKER_TOKEN_ENV]?.trim() || env.SWARM_TOKEN?.trim();
   if (!token) throw new Error(`worker token missing: pass --token or set ${WORKER_TOKEN_ENV}`);
   return token;
+}
+
+export function resolveWorkerMaxVus(flag: string | number | undefined, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = flag !== undefined ? String(flag).trim() : env[WORKER_MAX_VUS_ENV]?.trim();
+  if (!raw) return DEFAULT_WORKER_MAX_VUS;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 10_000) {
+    throw new Error(`--max-vus must be an integer between 1 and 10000`);
+  }
+  return parsed;
 }
 
 export function parseTransportChoice(value: string | undefined): TransportChoice {
@@ -97,7 +112,154 @@ export type WorkerSuite = {
   };
   /** `server` names the alias a variable is for, on multi-server assignments. */
   requiredEnv: Array<{ name: string; source: "header" | "env"; key: string; mapped: boolean; server?: string }>;
+  /** Optional distributed VU slice assignment when the central Swarm server shards VUs across multiple workers. */
+  vuSlice?: VuSliceAssignment;
 };
+
+/** Apply a distributed VU slice assignment (or worker maxVus ceiling) to a suite's load profile. */
+export function applyWorkerVuSlice(
+  suite: WorkerSuite,
+  frameSlice?: VuSliceAssignment,
+  maxVus?: number,
+): WorkerSuite {
+  const slice = frameSlice ?? suite.vuSlice;
+  let nextConcurrency = suite.suite.load.maxConcurrency;
+  if (slice && typeof slice.assignedVus === "number" && slice.assignedVus >= 1) {
+    nextConcurrency = slice.assignedVus;
+  }
+  if (typeof maxVus === "number" && maxVus >= 1 && nextConcurrency > maxVus) {
+    nextConcurrency = maxVus;
+  }
+  if (nextConcurrency === suite.suite.load.maxConcurrency && !slice) return suite;
+  return {
+    ...suite,
+    ...(slice ? { vuSlice: slice } : {}),
+    suite: {
+      ...suite.suite,
+      load: {
+        ...suite.suite.load,
+        maxConcurrency: nextConcurrency,
+      },
+    },
+  };
+}
+
+/** Export OpenTelemetry metrics and trace spans for an execution back to the central Swarm server's `/otlp/v1/*` collector. */
+export async function exportWorkerOtelToServer(input: {
+  server: string;
+  token: string;
+  executionId: string;
+  report: RunReport;
+  scrub: (text: string) => string;
+  fetchFn?: typeof fetch;
+}): Promise<{ metricsOk: boolean; tracesOk: boolean }> {
+  const origin = serverOrigin(input.server);
+  const doFetch = input.fetchFn ?? fetch;
+  const runAttr = { key: "run.id", value: { stringValue: input.executionId } };
+  const svcAttr = { key: "service.name", value: { stringValue: "botz-mcp-swarm-worker" } };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-swarm-token": input.token,
+    "x-swarm-run-id": input.executionId,
+    "user-agent": SWARM_TESTER_USER_AGENT,
+  };
+
+  const metricsList: Array<Record<string, unknown>> = [];
+  for (const ts of input.report.toolSeries ?? []) {
+    const toolName = input.scrub(ts.toolName);
+    metricsList.push({
+      name: "mcp.tool.call.duration",
+      unit: "ms",
+      histogram: {
+        dataPoints: [
+          {
+            count: ts.count,
+            sum: Math.round((ts.latencyMs?.mean ?? ts.latencyMs?.p50 ?? 0) * ts.count),
+            attributes: [
+              runAttr,
+              svcAttr,
+              { key: "tool", value: { stringValue: toolName } },
+              { key: "result", value: { stringValue: ts.errorRate > 0 ? "error" : "ok" } },
+            ],
+          },
+        ],
+      },
+    });
+  }
+  if (input.report.processSummary?.worker) {
+    metricsList.push({
+      name: "process.runtime.rss.bytes",
+      unit: "By",
+      gauge: {
+        dataPoints: [
+          {
+            asDouble: input.report.processSummary.worker.rssBytes.max,
+            attributes: [runAttr, svcAttr, { key: "role", value: { stringValue: "worker" } }],
+          },
+        ],
+      },
+    });
+    metricsList.push({
+      name: "process.runtime.cpu.ratio",
+      unit: "1",
+      gauge: {
+        dataPoints: [
+          {
+            asDouble: input.report.processSummary.worker.cpuRatio.max,
+            attributes: [runAttr, svcAttr, { key: "role", value: { stringValue: "worker" } }],
+          },
+        ],
+      },
+    });
+  }
+
+  const startMs = Date.parse(input.report.startedAt) || Date.now();
+  const startNs = BigInt(startMs) * 1_000_000n;
+  const spansList: Array<Record<string, unknown>> = (input.report.toolSeries ?? []).map((ts, idx) => {
+    const durNs = BigInt(Math.max(1, Math.round((ts.latencyMs?.p95 ?? 1) * 1_000_000)));
+    return {
+      name: `mcp.tool.${input.scrub(ts.toolName)}`,
+      traceId: input.executionId.replace(/[^0-9a-f]/gi, "").padEnd(32, "0").slice(0, 32),
+      spanId: String(idx + 1).padStart(16, "0"),
+      startTimeUnixNano: String(startNs),
+      endTimeUnixNano: String(startNs + durNs),
+      attributes: [
+        runAttr,
+        svcAttr,
+        { key: "tool", value: { stringValue: input.scrub(ts.toolName) } },
+        { key: "calls", value: { intValue: ts.count } },
+      ],
+    };
+  });
+
+  let metricsOk = false;
+  let tracesOk = false;
+  try {
+    const mRes = await doFetch(new URL("/otlp/v1/metrics", origin), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        resourceMetrics: [{ resource: { attributes: [runAttr, svcAttr] }, scopeMetrics: [{ metrics: metricsList }] }],
+      }),
+    });
+    metricsOk = mRes.ok;
+  } catch {
+    metricsOk = false;
+  }
+  try {
+    const tRes = await doFetch(new URL("/otlp/v1/traces", origin), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        resourceSpans: [{ resource: { attributes: [runAttr, svcAttr] }, scopeSpans: [{ spans: spansList }] }],
+      }),
+    });
+    tracesOk = tRes.ok;
+  } catch {
+    tracesOk = false;
+  }
+  return { metricsOk, tracesOk };
+}
 
 /** Every target of an assignment by alias, default first. */
 export function workerTargets(suite: Pick<WorkerSuite, "target" | "targets" | "defaultServer">): Array<[string, Target]> {
@@ -144,7 +306,7 @@ export function runnerLimitViolation(suite: Pick<WorkerSuite, "suite" | "limits"
   if (window > limit.maxDurationMs) return `duration ${window}ms exceeds ${limit.maxDurationMs}ms`;
   if (load.maxConcurrency > limit.maxConcurrency) return `concurrency ${load.maxConcurrency} exceeds ${limit.maxConcurrency}`;
   if (load.iterations > limit.maxIterations) return `iterations ${load.iterations} exceeds ${limit.maxIterations}`;
-  if (load.dwellMs > limit.maxDwellMs) return `dwell ${load.dwellMs}ms exceeds ${limit.maxDwellMs}ms`;
+  if (load.dwellMs > limit.maxDwellMs) return `dwell ${load.dwellMs}ms exceeds ${limit.maxDwellMs}`;
   return null;
 }
 
@@ -207,6 +369,12 @@ export interface WorkerOptions {
   allowStdio?: boolean;
   /** Directory relative stdio commands resolve against. Defaults to cwd. */
   baseDir?: string;
+  /** Maximum VUs this worker will accept/execute per slice. */
+  maxVus?: number;
+  /** Stream OpenTelemetry traces/metrics to `/otlp/v1/*` on the central Swarm server. */
+  otelExport?: boolean;
+  /** Optional worker label advertised to the central Swarm server. */
+  label?: string;
   env?: NodeJS.ProcessEnv;
   log?: (line: string) => void;
   signal?: AbortSignal;
@@ -217,6 +385,7 @@ export interface WorkerOptions {
   /** Test hooks. */
   connect?: (kind: TransportKind, options: ConnectOptions) => Promise<WorkerTransport>;
   runSuite?: SuiteRunner;
+  fetchFn?: typeof fetch;
 }
 
 export type WorkerExit = { code: number; reason: string };
@@ -231,11 +400,15 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerExit> {
   const env = options.env ?? process.env;
   const choice = options.transport ?? "auto";
   const connect = options.connect ?? ((kind, opts) => (kind === "http2" ? connectHttp2(opts) : connectSse(opts)));
+  const capabilities = ["vu-slice", ...(options.otelExport !== false ? ["otel-export"] : [])];
   const connectOptions: ConnectOptions = {
     server: options.server,
     token: options.token,
     timeoutMs: options.connectTimeoutMs,
     idleTimeoutMs: options.idleTimeoutMs,
+    ...(options.maxVus ? { maxVus: options.maxVus } : {}),
+    capabilities,
+    ...(options.label ? { label: options.label } : {}),
   };
   const baseScrub = makeScrubber([options.token]);
   const state: WorkerState = { active: null, running: new Set() };
@@ -366,7 +539,12 @@ async function handleAssign(
   const active: Active = { executionId, abort };
   state.active = active;
   try {
-    const accepted = await transport.send({ type: "accept", executionId });
+    const acceptFrame: WorkerFrame = {
+      type: "accept",
+      executionId,
+      ...(options.maxVus ? { maxVus: options.maxVus } : {}),
+    };
+    const accepted = await transport.send(acceptFrame);
     if (!accepted.ok) {
       log(`Execution ${executionId} not accepted: ${accepted.error}`);
       return;
@@ -380,8 +558,9 @@ async function handleAssign(
 
     const fetched = await transport.fetchSuite(executionId);
     if (!fetched.ok) return reject(`suite_unavailable: ${fetched.status} ${fetched.error}`);
-    const suite = parseWorkerSuite(fetched.payload);
-    if (!suite || suite.executionId !== executionId) return reject("suite_invalid");
+    const rawSuite = parseWorkerSuite(fetched.payload);
+    if (!rawSuite || rawSuite.executionId !== executionId) return reject("suite_invalid");
+    const suite = applyWorkerVuSlice(rawSuite, frame.vuSlice, options.maxVus);
     const assigned = workerTargets(suite);
     const multi = assigned.length > 1;
     const stdio = assigned.find(([, item]) => item.transport === "stdio");
@@ -408,7 +587,10 @@ async function handleAssign(
       ...defaultScrubContext(baseDir),
       commands: resolved.flatMap(([, item]) => stdioCommandPaths(item, baseDir)),
     });
-    log(`Running ${runScrub(suite.projectName)} / ${runScrub(suite.suite.name)} v${suite.version}`);
+    const sliceNote = suite.vuSlice
+      ? ` (VU slice ${suite.vuSlice.shardIndex + 1}/${suite.vuSlice.totalShards}: ${suite.suite.load.maxConcurrency} VUs)`
+      : "";
+    log(`Running ${runScrub(suite.projectName)} / ${runScrub(suite.suite.name)} v${suite.version}${sliceNote}`);
 
     const progress = progressSender(transport, executionId, runScrub, abort.signal);
     const deadlineMs = Math.max(1_000, suite.limits.executionDeadlineMs - DEADLINE_MARGIN_MS);
@@ -425,6 +607,16 @@ async function handleAssign(
     if (outcome.kind === "error") return reject(`run_failed: ${messageOf(outcome.error)}`);
     await progress.flush();
     const report = outcome.report;
+    if (options.otelExport) {
+      await exportWorkerOtelToServer({
+        server: options.server,
+        token: options.token,
+        executionId,
+        report,
+        scrub: runScrub,
+        fetchFn: options.fetchFn,
+      });
+    }
     const verdict = report.verdict === "pass" ? "pass" : "fail";
     const done = await transport.send({ type: "complete", executionId, verdict, report: reportForService(report, runScrub) });
     if (done.ok) log(`Execution ${executionId} finished: ${verdict.toUpperCase()}`);

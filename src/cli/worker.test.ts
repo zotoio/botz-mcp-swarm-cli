@@ -2,8 +2,11 @@ import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
 import type { RunReport } from "../engine/types/run.js";
 import {
+  applyWorkerVuSlice,
   backoffDelay,
+  exportWorkerOtelToServer,
   makeScrubber,
+  resolveWorkerMaxVus,
   missingRequiredEnv,
   parseTransportChoice,
   resolveWorkerToken,
@@ -512,5 +515,47 @@ describe("worker loop", () => {
     expect(fake.sent.some((frame) => frame.type === "complete")).toBe(false);
     controller.abort();
     await exit;
+  });
+
+  it("applies distributed VU slice assignments and exports OTLP metrics/traces to the central Swarm server", async () => {
+    expect(resolveWorkerMaxVus("25", {})).toBe(25);
+    expect(resolveWorkerMaxVus(undefined, { SWARM_WORKER_MAX_VUS: "40" })).toBe(40);
+    const sliced = applyWorkerVuSlice(payload("e-slice"), { shardIndex: 1, totalShards: 4, assignedVus: 15 }, 10);
+    expect(sliced.suite.load.maxConcurrency).toBe(10);
+    expect(sliced.vuSlice).toEqual({ shardIndex: 1, totalShards: 4, assignedVus: 15 });
+
+    const otlpPosts: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fakeOtlpFetch: typeof fetch = async (input, init) => {
+      const h: Record<string, string> = {};
+      new Headers(init?.headers).forEach((v, k) => (h[k.toLowerCase()] = v));
+      otlpPosts.push({ url: String(input), headers: h });
+      return new Response("{}", { status: 200 });
+    };
+
+    const sampleReport = {
+      id: "e-slice",
+      startedAt: new Date().toISOString(),
+      verdict: "pass",
+      failReasons: [],
+      toolSeries: [
+        { toolName: "skill_search", count: 5, errorCount: 0, errorRate: 0, latencyMs: { min: 5, max: 20, mean: 10, p50: 10, p90: 18, p95: 20, p99: 20 } },
+      ],
+    } as unknown as RunReport;
+
+    const exported = await exportWorkerOtelToServer({
+      server: "https://swarm.botz.ai",
+      token: TOKEN,
+      executionId: "e-slice",
+      report: sampleReport,
+      scrub: (s) => s,
+      fetchFn: fakeOtlpFetch,
+    });
+    expect(exported).toEqual({ metricsOk: true, tracesOk: true });
+    expect(otlpPosts.map((p) => p.url)).toEqual([
+      "https://swarm.botz.ai/otlp/v1/metrics",
+      "https://swarm.botz.ai/otlp/v1/traces",
+    ]);
+    expect(otlpPosts[0]?.headers["x-swarm-run-id"]).toBe("e-slice");
+    expect(otlpPosts[0]?.headers["user-agent"]).toMatch(/\(mcp-tester\)$/);
   });
 });
