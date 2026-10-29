@@ -35,7 +35,9 @@ const instruments = {
 };
 
 function getEndpoint(): string | undefined {
-  return process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/$/, "");
+  // CLI-specific collector wins so the CLI never shares a collector with Swarm or botz-mcp by accident.
+  const ep = process.env.SWARM_CLI_OTEL_EXPORTER_OTLP_ENDPOINT?.trim() || process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
+  return ep ? ep.replace(/\/$/, "") : undefined;
 }
 
 export function isOtelEnabled(): boolean {

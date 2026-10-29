@@ -5,6 +5,7 @@ import {
   applyWorkerVuSlice,
   backoffDelay,
   exportWorkerOtelToServer,
+  resolveWorkerOtelExport,
   makeScrubber,
   resolveWorkerMaxVus,
   missingRequiredEnv,
@@ -557,5 +558,34 @@ describe("worker loop", () => {
     ]);
     expect(otlpPosts[0]?.headers["x-swarm-run-id"]).toBe("e-slice");
     expect(otlpPosts[0]?.headers["user-agent"]).toMatch(/\(mcp-tester\)$/);
+  });
+});
+
+describe("worker swarm telemetry opt-in (key required)", () => {
+  it("is off by default and opt-in via flag or SWARM_WORKER_OTEL_EXPORT", () => {
+    expect(resolveWorkerOtelExport(undefined, "tok", {})).toBe(false);
+    expect(resolveWorkerOtelExport(true, "tok", {})).toBe(true);
+    expect(resolveWorkerOtelExport(undefined, "tok", { SWARM_WORKER_OTEL_EXPORT: "1" })).toBe(true);
+    expect(resolveWorkerOtelExport(false, "tok", { SWARM_WORKER_OTEL_EXPORT: "1" })).toBe(false);
+  });
+
+  it("errors clearly when enabled without a key", () => {
+    expect(() => resolveWorkerOtelExport(true, "", {})).toThrow(/no key is configured/);
+    expect(resolveWorkerOtelExport(false, "", {})).toBe(false);
+  });
+
+  it("refuses to export unauthenticated telemetry", async () => {
+    const calls: string[] = [];
+    await expect(
+      exportWorkerOtelToServer({
+        server: "https://swarm.botz.ai",
+        token: "",
+        executionId: "e1",
+        report: { id: "e1", startedAt: new Date().toISOString(), toolSeries: [] } as unknown as RunReport,
+        scrub: (s) => s,
+        fetchFn: (async (u: string | URL) => { calls.push(String(u)); return new Response("{}"); }) as typeof fetch,
+      }),
+    ).rejects.toThrow(/requires a worker token/);
+    expect(calls).toEqual([]);
   });
 });

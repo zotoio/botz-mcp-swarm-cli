@@ -144,6 +144,21 @@ export function applyWorkerVuSlice(
   };
 }
 
+export const WORKER_OTEL_EXPORT_ENV = "SWARM_WORKER_OTEL_EXPORT";
+
+/**
+ * Sending telemetry to Swarm is opt-in (`--otel-export` or SWARM_WORKER_OTEL_EXPORT=1) and
+ * requires the worker token. Throws a clear error when enabled without a token.
+ */
+export function resolveWorkerOtelExport(flag: boolean | undefined, token: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env[WORKER_OTEL_EXPORT_ENV]?.trim().toLowerCase();
+  const enabled = flag ?? (raw === "1" || raw === "true" || raw === "yes");
+  if (enabled && !token?.trim()) {
+    throw new Error(`Swarm telemetry export is enabled but no key is configured: pass --token or set ${WORKER_TOKEN_ENV}`);
+  }
+  return enabled;
+}
+
 /** Export OpenTelemetry metrics and trace spans for an execution back to the central Swarm server's `/otlp/v1/*` collector. */
 export async function exportWorkerOtelToServer(input: {
   server: string;
@@ -153,6 +168,9 @@ export async function exportWorkerOtelToServer(input: {
   scrub: (text: string) => string;
   fetchFn?: typeof fetch;
 }): Promise<{ metricsOk: boolean; tracesOk: boolean }> {
+  if (!input.token?.trim()) {
+    throw new Error("Swarm telemetry export requires a worker token (key); refusing to send unauthenticated telemetry");
+  }
   const origin = serverOrigin(input.server);
   const doFetch = input.fetchFn ?? fetch;
   const runAttr = { key: "run.id", value: { stringValue: input.executionId } };
@@ -371,7 +389,7 @@ export interface WorkerOptions {
   baseDir?: string;
   /** Maximum VUs this worker will accept/execute per slice. */
   maxVus?: number;
-  /** Stream OpenTelemetry traces/metrics to `/otlp/v1/*` on the central Swarm server. */
+  /** Opt-in: stream OpenTelemetry traces/metrics to `/otlp/v1/*` on the central Swarm server (token required). Default off. */
   otelExport?: boolean;
   /** Optional worker label advertised to the central Swarm server. */
   label?: string;
@@ -400,7 +418,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerExit> {
   const env = options.env ?? process.env;
   const choice = options.transport ?? "auto";
   const connect = options.connect ?? ((kind, opts) => (kind === "http2" ? connectHttp2(opts) : connectSse(opts)));
-  const capabilities = ["vu-slice", ...(options.otelExport !== false ? ["otel-export"] : [])];
+  const capabilities = ["vu-slice", ...(options.otelExport === true ? ["otel-export"] : [])];
   const connectOptions: ConnectOptions = {
     server: options.server,
     token: options.token,
