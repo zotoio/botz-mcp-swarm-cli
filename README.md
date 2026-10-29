@@ -1,6 +1,6 @@
 # @zotoio/botz-mcp-swarm-cli
 
-**Test any MCP server, end to end.** Introspect, generate suites, run evals and load tests, and get optimisation advice, in CI or on your laptop.
+**From introspection to optimisation.** Point swarm at any MCP server and it builds, runs and scores the tests for you.
 
 Introspect any MCP server over stdio, SSE or streamable HTTP, generate test suites from tool schemas, annotations and intent-based filters, then run contract/schema checks, evals, and load and latency tests, and get optimisation recommendations. Measures **MCP operations**, not raw HTTP RPS, and a run that never exercises the server is a **Fail**.
 
