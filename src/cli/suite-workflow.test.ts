@@ -135,7 +135,8 @@ describe("standalone workflow", () => {
       target: { transport: "stdio", command: join(home, "bin", "mcp-fixture"), args: [join(home, "srv", "index.js"), "--verbose"] },
     };
     const dir = await setup(suite);
-    const { report, jsonPath } = await runSavedSuite(dir, { params: {}, outputDir: join(dir, "runs"), reportBaseName: "botz-run-stdio" });
+    await expect(runSavedSuite(dir, { params: {}, outputDir: join(dir, "runs"), reportBaseName: "botz-run-stdio" })).rejects.toThrow(/--allow-stdio/);
+    const { report, jsonPath } = await runSavedSuite(dir, { params: {}, outputDir: join(dir, "runs"), reportBaseName: "botz-run-stdio", allowStdio: true });
     expect(report.server).toEqual({ name: "captured-server", version: "1.0.0", transport: "stdio", endpoint: "mcp-fixture index.js --verbose" });
     expect(await readFile(jsonPath, "utf8")).not.toContain(home);
   });
