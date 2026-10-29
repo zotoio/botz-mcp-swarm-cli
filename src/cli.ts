@@ -42,6 +42,7 @@ import { registerSuiteCommands } from "./cli/suite-commands.js";
 import {
   parseTransportChoice,
   resolveWorkerMaxVus,
+  resolveWorkerOtelExport,
   resolveWorkerToken,
   runWorker,
   WORKER_MAX_VUS_ENV,
@@ -284,8 +285,8 @@ program
   .option("--token <token>", `Worker token. Defaults to ${WORKER_TOKEN_ENV} or SWARM_TOKEN`)
   .option("--transport <kind>", "auto (HTTP/2, then SSE), http2, or sse", "auto")
   .option("--max-vus <n>", `Maximum virtual users this worker can execute per assigned slice (defaults to ${WORKER_MAX_VUS_ENV} or 50)`)
-  .option("--otel-export", "Stream OpenTelemetry spans and metrics (/otlp/v1/traces & /otlp/v1/metrics) back to the Swarm server", true)
-  .option("--no-otel-export", "Disable OTLP trace/metric export to the Swarm server")
+  .option("--otel-export", "Opt in: send OpenTelemetry spans and metrics (/otlp/v1/traces & /otlp/v1/metrics) to the Swarm server (requires the worker token). Off by default; also SWARM_WORKER_OTEL_EXPORT=1")
+  .option("--no-otel-export", "Do not send telemetry to the Swarm server (default)")
   .option("--label <name>", "Optional worker label advertised to the Swarm server")
   .option("--allow-stdio", "Run stdio targets. They start a local command chosen by the service, so they are refused by default")
   .option("--base-dir <dir>", "Directory that relative stdio target commands resolve against. Defaults to cwd")
@@ -308,13 +309,14 @@ program
       const stop = () => controller.abort();
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);
-      console.log(`Worker starting: server ${server}, transport ${transport}, maxVus ${maxVus}, otelExport ${opts.otelExport !== false}`);
+      const otelExport = resolveWorkerOtelExport(opts.otelExport, token);
+      console.log(`Worker starting: server ${server}, transport ${transport}, maxVus ${maxVus}, otelExport ${otelExport}`);
       const exit = await runWorker({
         server,
         token,
         transport,
         maxVus,
-        otelExport: opts.otelExport !== false,
+        otelExport,
         label: opts.label,
         allowStdio: opts.allowStdio === true,
         baseDir: opts.baseDir ? resolve(opts.baseDir) : process.cwd(),

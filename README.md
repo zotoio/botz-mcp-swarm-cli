@@ -190,6 +190,11 @@ botz mcp-swarm worker --server https://swarm.example.com
 
 Each assignment lists the environment variables the worker needs: `${env:NAME}` references stored on the target, and `SWARM_TARGET_HEADER_<KEY>` / `SWARM_TARGET_ENV_<KEY>` for values the service will not send. Set each to the full value, scheme included (`SWARM_TARGET_HEADER_AUTHORIZATION="Bearer <token>"`). A missing variable rejects the run with `missing credential: NAME`. A revoked or unknown token stops the worker with exit 1; other disconnects reconnect with backoff.
 
+### Telemetry: local collector vs. Swarm (opt-in, key required)
+
+- **Local OTEL.** The CLI exports to its own collector: `SWARM_CLI_OTEL_EXPORTER_OTLP_ENDPOINT` (CLI-only, takes precedence), else `OTEL_EXPORTER_OTLP_ENDPOINT`, else the in-process loopback collector on the dashboard. Use a CLI-specific endpoint so the CLI never shares a collector with the Swarm service or botz-mcp. No Swarm key is used.
+- **Sending to Swarm is optional and off by default.** Enable with `worker --otel-export` or `SWARM_WORKER_OTEL_EXPORT=1`. When enabled, the worker token (`--token` / `SWARM_WORKER_TOKEN`) is sent as `X-Swarm-Token` to `/otlp/v1/metrics` and `/otlp/v1/traces`; enabling it without a token fails fast with `Swarm telemetry export is enabled but no key is configured`. Unauthenticated telemetry is never sent.
+
 ## Run report data
 
 Besides the summary series, every run report JSON includes two optional fields:

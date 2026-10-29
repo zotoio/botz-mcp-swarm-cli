@@ -74,7 +74,8 @@ export function isLoopbackAddress(address: string | undefined): boolean {
 /** Point export at the policy URL, or the in-process collector, unless the operator set an endpoint. */
 export function installOtelExportTarget(port: number, policyEndpoint?: string): string {
   if (operatorEndpoint === null) {
-    operatorEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim() ?? "";
+    operatorEndpoint =
+      process.env.SWARM_CLI_OTEL_EXPORTER_OTLP_ENDPOINT?.trim() || process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim() || "";
   }
   if (operatorEndpoint) return operatorEndpoint.replace(/\/$/, "");
   const target = (policyEndpoint?.trim() || defaultLocalOtelEndpoint(port)).replace(/\/$/, "");

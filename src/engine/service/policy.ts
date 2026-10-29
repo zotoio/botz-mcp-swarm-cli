@@ -188,7 +188,7 @@ export function defaultLocalOtelEndpoint(port = Number.parseInt(process.env.PORT
 }
 
 export function effectiveOtelEndpoint(policy: OrgPolicy, port?: number): string {
-  const fromEnv = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
+  const fromEnv = process.env.SWARM_CLI_OTEL_EXPORTER_OTLP_ENDPOINT?.trim() || process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, "");
   if (policy.otelEndpoint?.trim()) return policy.otelEndpoint.trim().replace(/\/$/, "");
   return defaultLocalOtelEndpoint(port);
