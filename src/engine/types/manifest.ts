@@ -13,14 +13,14 @@ export const StdioTargetSchema = z.object({
   transport: z.literal("stdio"),
   command: z.string().min(1),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   cwd: z.string().optional(),
 });
 
 export const HttpTargetSchema = z.object({
   transport: z.enum(["sse", "streamable-http"]),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
 });
 
 export const TargetSchema = z.union([StdioTargetSchema, HttpTargetSchema]);
@@ -87,7 +87,7 @@ export const ErrorClassSchema = z.enum([
 export const ElicitAutoReplySchema = z.object({
   action: z.enum(["accept", "decline", "cancel"]).default("accept"),
   /** Form-mode content matching requestedSchema properties. */
-  content: z.record(z.unknown()).optional(),
+  content: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const ScenarioStepSchema = z.object({
@@ -95,7 +95,7 @@ export const ScenarioStepSchema = z.object({
   tool: z.string().optional(),
   resourceUri: z.string().optional(),
   prompt: z.string().optional(),
-  args: z.record(z.unknown()).optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
   expect: z
     .object({
       resultShape: z.enum([
@@ -111,8 +111,8 @@ export const ScenarioStepSchema = z.object({
         "completion",
         "logging",
       ]),
-      inputSchema: z.record(z.unknown()).optional(),
-      outputSchema: z.record(z.unknown()).optional(),
+      inputSchema: z.record(z.string(), z.unknown()).optional(),
+      outputSchema: z.record(z.string(), z.unknown()).optional(),
     })
     .optional(),
   auth: AuthScenarioSchema.optional(),
@@ -181,7 +181,7 @@ export const AssertionsSchema = z.object({
   /** Fail if negotiated protocolVersion differs from this value. */
   requireProtocolVersion: z.string().optional(),
   /** Objectives judged over all tool calls on one server, by alias. */
-  servers: z.record(ServerSloSchema).optional(),
+  servers: z.record(z.string(), ServerSloSchema).optional(),
 });
 
 export const ProcessAssertionsSchema = z.object({
@@ -236,15 +236,15 @@ export const ManifestSchema = z.object({
   /** The default server. Steps without `server` call it. */
   target: TargetSchema,
   /** Other servers, by alias. Each must pass the allowlist like `target`. */
-  targets: z.record(TargetSchema).optional(),
+  targets: z.record(z.string(), TargetSchema).optional(),
   /** Alias that `target` stands for in reports and on steps. Defaults to `default`. */
   defaultTarget: z.string().optional(),
   gateway: GatewayTargetSchema.optional(),
   allowlist: z.array(z.string()).min(1),
-  sessionPool: SessionPoolSchema.default({}),
-  quotas: QuotasSchema.default({}),
+  sessionPool: SessionPoolSchema.prefault({}),
+  quotas: QuotasSchema.prefault({}),
   scenarios: z.array(ScenarioSchema).min(1),
-  assertions: AssertionsSchema.default({}),
+  assertions: AssertionsSchema.prefault({}),
   processAssertions: ProcessAssertionsSchema.optional(),
   soak: SoakSchema.optional(),
   load: LoadProfileSchema.optional(),

@@ -110,7 +110,7 @@ describe("multi-server standalone suites", () => {
     expect(validated).toMatch(/tracker\s+ticket -> ticketKey\s+-> chat\s+notify/);
     expect(cli(["suite", "show", "--suite", "triage"])).toMatch(/\[tracker\] lookup_issue/);
 
-    const junit = cli(["suite", "run", "--suite", "triage", "--format", "junit"]);
+    const junit = cli(["suite", "run", "--suite", "triage", "--format", "junit", "--allow-stdio"]);
     expect(junit).toMatch(/classname="tracker"/);
     expect(junit).toMatch(/failures="0"/);
     const runs = join(work, ".botz", "mcp-swarm", "runs");

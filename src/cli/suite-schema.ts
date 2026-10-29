@@ -6,10 +6,10 @@ import { isServerAlias, MAX_SERVERS } from "../engine/core/servers.js";
 
 const name = z.string().min(1);
 const alias = z.string().refine(isServerAlias, { message: "use 1-32 characters of a-z, 0-9 and -" });
-const jsonObject = z.record(z.unknown());
+const jsonObject = z.record(z.string(), z.unknown());
 const nonnegative = z.number().finite().int().nonnegative();
 const positive = z.number().finite().int().positive();
-const node: z.ZodType<SuiteNode, z.ZodTypeDef, unknown> = z.lazy(() => z.object({
+const node: z.ZodType<SuiteNode, unknown> = z.lazy(() => z.object({
   id: name, type: z.enum(["sampler", "think", "extractor", "loop", "group"]), enabled: z.boolean(),
   label: z.string().optional(), method: z.enum(SAMPLER_METHODS).optional(), tool: name.optional(),
   resourceUri: name.optional(), prompt: name.optional(), args: jsonObject.optional(),
@@ -49,7 +49,7 @@ export const SuiteInputSchema = z.object({
   kind: z.literal("botz-suite"), schemaVersion: z.literal(1).optional(), id: z.string().uuid().optional(),
   cwdBase: z.literal("suite").optional(),
   capturedAt: z.string().optional(), name, target: TargetSchema,
-  nodes: z.array(node), params: z.record(z.object({ example: z.string(), usedBy: z.array(z.string()) })),
+  nodes: z.array(node), params: z.record(z.string(), z.object({ example: z.string(), usedBy: z.array(z.string()) })),
   load: SuiteLoadSchema.optional(),
   limits: SuiteLimitsSchema.optional(),
   surface: SurfaceSchema,
@@ -71,7 +71,7 @@ export const SuiteV2Schema = z.object({
   capturedAt: z.string().optional(), name,
   defaultServer: alias,
   servers: z.record(z.string(), SuiteServerSchema),
-  nodes: z.array(node), params: z.record(z.object({ example: z.string(), usedBy: z.array(z.string()) })),
+  nodes: z.array(node), params: z.record(z.string(), z.object({ example: z.string(), usedBy: z.array(z.string()) })),
   load: SuiteLoadSchema.optional(),
   limits: SuiteLimitsSchema.optional(),
 }).superRefine((suite, context) => {
