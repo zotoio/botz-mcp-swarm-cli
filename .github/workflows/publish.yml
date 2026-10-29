@@ -22,7 +22,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       publish: ${{ steps.release.outputs.publish }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: release
         run: node scripts/check-release.mjs
   validate:
@@ -38,12 +38,12 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@11
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: cli-package
           path: .artifacts
@@ -60,8 +60,8 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
       - run: node scripts/diagnose-publisher.mjs

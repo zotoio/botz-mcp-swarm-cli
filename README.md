@@ -306,3 +306,5 @@ the same `limits` object, and remote workers apply the limits the service sends.
 Manifests keep `quotas.maxCallCount` (default 1000) and `quotas.maxPayloadBytes`,
 now validated against the same ceilings. Run reports record the enforced values in
 `limits`.
+
+CI actions are pinned to commit SHAs, workflows default to a read-only token, and Dependabot proposes grouped updates weekly. See [docs/security.md](docs/security.md).
