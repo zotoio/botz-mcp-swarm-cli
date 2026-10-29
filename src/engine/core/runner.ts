@@ -158,6 +158,7 @@ interface StepTrace {
   requestedEra?: "legacy" | "auto" | "modern";
   eraFallbackReason?: string;
   resultDigests?: Map<string, string>;
+  eraIgnoreKeys?: string[];
   nodeOutcomes: Map<string, NonNullable<RunReport["nodeOutcomes"]>[number]>;
   redactedArgs: Array<{ nodeId: string; tool?: string; args: unknown }>;
   seenArgs: Set<string>;
@@ -385,7 +386,7 @@ async function executeStep(
     };
     metrics.recordCall(obs);
     if (method === "tools/call" && step.nodeId && raw.success && trace.resultDigests && !trace.resultDigests.has(step.nodeId)) {
-      trace.resultDigests.set(step.nodeId, eraResultDigest(raw.result));
+      trace.resultDigests.set(step.nodeId, eraResultDigest(raw.result, trace.eraIgnoreKeys));
     }
     telemetry.recordCall(obs, transport);
     if (gatewayMode) hopObservations.push(observeGatewayHop(result));
@@ -1262,6 +1263,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     retryPolicy,
     retryDeadline: Date.now() + manifest.quotas.maxDurationMs,
     resultDigests: new Map(),
+    eraIgnoreKeys: manifest.eraCompare?.ignoreKeys ?? [],
     recorder: new RunRecorder(Date.now()),
     hasExtractors: manifest.scenarios.some((scenario) => scenario.steps.some((step) => step.method === "extract")),
   };
@@ -1525,14 +1527,14 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
 /** Keys whose values legitimately differ between two runs (time, ids, tracing). */
 const VOLATILE_KEY = /(^|_|-)(ts|time|timestamp|at|date|id|uuid|trace|traceid|traceparent|span|spanid|request_?id|run_?id|session_?id|duration|duration_ms|latency|latency_ms|elapsed|elapsed_ms|took|took_ms|nonce|etag|expires|expires_at|created|created_at|updated|updated_at)$/i;
 
-function normaliseForEra(value: unknown, depth = 0): unknown {
+function normaliseForEra(value: unknown, depth = 0, ignore: ReadonlySet<string> = new Set()): unknown {
   if (depth > 12) return "…";
-  if (Array.isArray(value)) return value.map((v) => normaliseForEra(v, depth + 1));
+  if (Array.isArray(value)) return value.map((v) => normaliseForEra(v, depth + 1, ignore));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      if (key === "_meta" || key === "resultType" || VOLATILE_KEY.test(key)) continue;
-      out[key] = normaliseForEra((value as Record<string, unknown>)[key], depth + 1);
+      if (key === "_meta" || key === "resultType" || VOLATILE_KEY.test(key) || ignore.has(key)) continue;
+      out[key] = normaliseForEra((value as Record<string, unknown>)[key], depth + 1, ignore);
     }
     return out;
   }
@@ -1540,10 +1542,10 @@ function normaliseForEra(value: unknown, depth = 0): unknown {
 }
 
 /** Era-neutral digest of a tools/call result: structuredContent (else content), volatile keys removed. */
-export function eraResultDigest(result: unknown): string {
+export function eraResultDigest(result: unknown, ignoreKeys: readonly string[] = []): string {
   const r = (result ?? {}) as { structuredContent?: unknown; content?: unknown; isError?: boolean };
   const body = r.structuredContent !== undefined ? r.structuredContent : r.content;
-  return createHash("sha256").update(JSON.stringify({ isError: Boolean(r.isError), body: normaliseForEra(body) })).digest("hex").slice(0, 16);
+  return createHash("sha256").update(JSON.stringify({ isError: Boolean(r.isError), body: normaliseForEra(body, 0, new Set(ignoreKeys)) })).digest("hex").slice(0, 16);
 }
 
 /**

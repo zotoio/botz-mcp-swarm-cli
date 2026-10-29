@@ -245,6 +245,8 @@ export const ManifestSchema = z.object({
   protocolVersion: z.string().optional(),
   /** Pin every target to one protocol era, or `both` for compare mode. */
   protocolEra: SuiteProtocolEraSchema.optional(),
+  /** Compare mode: extra result keys to ignore when diffing tool results across eras. */
+  eraCompare: z.object({ ignoreKeys: z.array(z.string()).optional() }).optional(),
   /** The default server. Steps without `server` call it. */
   target: TargetSchema,
   /** Other servers, by alias. Each must pass the allowlist like `target`. */
