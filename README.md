@@ -193,7 +193,7 @@ Each assignment lists the environment variables the worker needs: `${env:NAME}` 
 ### Telemetry: local collector vs. Swarm (opt-in, key required)
 
 - **Local OTEL.** The CLI exports to its own collector: `SWARM_CLI_OTEL_EXPORTER_OTLP_ENDPOINT` (CLI-only, takes precedence), else `OTEL_EXPORTER_OTLP_ENDPOINT`, else the in-process loopback collector on the dashboard. Use a CLI-specific endpoint so the CLI never shares a collector with the Swarm service or botz-mcp. No Swarm key is used.
-- **Sending to Swarm is optional and off by default.** Enable with `worker --otel-export` or `SWARM_WORKER_OTEL_EXPORT=1`. When enabled, the worker token (`--token` / `SWARM_WORKER_TOKEN`) is sent as `X-Swarm-Token` to `/otlp/v1/metrics` and `/otlp/v1/traces`; enabling it without a token fails fast with `Swarm telemetry export is enabled but no key is configured`. Unauthenticated telemetry is never sent.
+- **Sending to Swarm is optional and off by default.** Enable with `worker --otel-export` or `SWARM_WORKER_OTEL_EXPORT=1`. When enabled, each body sent to `/otlp/v1/metrics` and `/otlp/v1/traces` is signed with `X-Swarm-Signature: sha256=<hex HMAC-SHA256(secret, body)>` using `SWARM_CLI_TELEMETRY_HMAC_SECRET` (or `SWARM_TELEMETRY_HMAC_SECRET`, the same value as the Swarm server's); without a secret the worker token (`--token` / `SWARM_WORKER_TOKEN`) is sent as `X-Swarm-Token`. Enabling it with neither fails fast with `Swarm telemetry export is enabled but no key is configured`. Unauthenticated telemetry is never sent.
 
 ## Run report data
 

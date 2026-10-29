@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { SuiteLimitsInput } from "../engine/core/suite-limits.js";
 import { compileProjectSuite, runCompiledSuite } from "../engine/core/project-run.js";
 import { assertOrgTargetAllowlisted } from "../engine/core/org-target-policy.js";
@@ -150,11 +151,29 @@ export const WORKER_OTEL_EXPORT_ENV = "SWARM_WORKER_OTEL_EXPORT";
  * Sending telemetry to Swarm is opt-in (`--otel-export` or SWARM_WORKER_OTEL_EXPORT=1) and
  * requires the worker token. Throws a clear error when enabled without a token.
  */
+export const WORKER_TELEMETRY_HMAC_SECRET_ENVS = ["SWARM_CLI_TELEMETRY_HMAC_SECRET", "SWARM_TELEMETRY_HMAC_SECRET"] as const;
+
+/** Shared HMAC secret for signing telemetry sent to Swarm (never logged). */
+export function resolveWorkerTelemetryHmacSecret(env: NodeJS.ProcessEnv = process.env): string {
+  for (const name of WORKER_TELEMETRY_HMAC_SECRET_ENVS) {
+    const v = env[name]?.trim();
+    if (v) return v;
+  }
+  return "";
+}
+
+/** `X-Swarm-Signature` value: `sha256=<hex HMAC-SHA256(secret, body)>`. */
+export function signTelemetryBody(secret: string, body: string): string {
+  return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
+}
+
 export function resolveWorkerOtelExport(flag: boolean | undefined, token: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = env[WORKER_OTEL_EXPORT_ENV]?.trim().toLowerCase();
   const enabled = flag ?? (raw === "1" || raw === "true" || raw === "yes");
-  if (enabled && !token?.trim()) {
-    throw new Error(`Swarm telemetry export is enabled but no key is configured: pass --token or set ${WORKER_TOKEN_ENV}`);
+  if (enabled && !token?.trim() && !resolveWorkerTelemetryHmacSecret(env)) {
+    throw new Error(
+      `Swarm telemetry export is enabled but no key is configured: set ${WORKER_TELEMETRY_HMAC_SECRET_ENVS.join(" or ")}, or pass --token / set ${WORKER_TOKEN_ENV}`,
+    );
   }
   return enabled;
 }
@@ -167,9 +186,12 @@ export async function exportWorkerOtelToServer(input: {
   report: RunReport;
   scrub: (text: string) => string;
   fetchFn?: typeof fetch;
+  /** Shared HMAC secret; when set, bodies are signed (X-Swarm-Signature) instead of sending the token. */
+  hmacSecret?: string;
 }): Promise<{ metricsOk: boolean; tracesOk: boolean }> {
-  if (!input.token?.trim()) {
-    throw new Error("Swarm telemetry export requires a worker token (key); refusing to send unauthenticated telemetry");
+  const hmacSecret = input.hmacSecret?.trim() ?? "";
+  if (!hmacSecret && !input.token?.trim()) {
+    throw new Error("Swarm telemetry export requires a key (HMAC secret or worker token); refusing to send unauthenticated telemetry");
   }
   const origin = serverOrigin(input.server);
   const doFetch = input.fetchFn ?? fetch;
@@ -177,7 +199,7 @@ export async function exportWorkerOtelToServer(input: {
   const svcAttr = { key: "service.name", value: { stringValue: "botz-mcp-swarm-worker" } };
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    "x-swarm-token": input.token,
+    ...(hmacSecret ? {} : { "x-swarm-token": input.token }),
     "x-swarm-run-id": input.executionId,
     "user-agent": SWARM_TESTER_USER_AGENT,
   };
@@ -250,28 +272,24 @@ export async function exportWorkerOtelToServer(input: {
     };
   });
 
+  const signed = (body: string): Record<string, string> =>
+    hmacSecret ? { ...headers, "x-swarm-signature": signTelemetryBody(hmacSecret, body) } : headers;
   let metricsOk = false;
   let tracesOk = false;
   try {
-    const mRes = await doFetch(new URL("/otlp/v1/metrics", origin), {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        resourceMetrics: [{ resource: { attributes: [runAttr, svcAttr] }, scopeMetrics: [{ metrics: metricsList }] }],
-      }),
+    const body = JSON.stringify({
+      resourceMetrics: [{ resource: { attributes: [runAttr, svcAttr] }, scopeMetrics: [{ metrics: metricsList }] }],
     });
+    const mRes = await doFetch(new URL("/otlp/v1/metrics", origin), { method: "POST", headers: signed(body), body });
     metricsOk = mRes.ok;
   } catch {
     metricsOk = false;
   }
   try {
-    const tRes = await doFetch(new URL("/otlp/v1/traces", origin), {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        resourceSpans: [{ resource: { attributes: [runAttr, svcAttr] }, scopeSpans: [{ spans: spansList }] }],
-      }),
+    const body = JSON.stringify({
+      resourceSpans: [{ resource: { attributes: [runAttr, svcAttr] }, scopeSpans: [{ spans: spansList }] }],
     });
+    const tRes = await doFetch(new URL("/otlp/v1/traces", origin), { method: "POST", headers: signed(body), body });
     tracesOk = tRes.ok;
   } catch {
     tracesOk = false;
@@ -633,6 +651,7 @@ async function handleAssign(
         report,
         scrub: runScrub,
         fetchFn: options.fetchFn,
+        hmacSecret: resolveWorkerTelemetryHmacSecret(env),
       });
     }
     const verdict = report.verdict === "pass" ? "pass" : "fail";
