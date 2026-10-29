@@ -79,13 +79,33 @@ export function resolveStdioTarget(target: Target, baseDir?: string): Target {
   return { ...target, command, cwd };
 }
 
+/**
+ * CLI-03: variables inherited by stdio MCP servers. Everything else in the parent environment
+ * (API keys, cloud credentials, tokens) is withheld unless configured on the target's `env`
+ * or named in SWARM_STDIO_PASS_ENV (comma-separated).
+ */
+export const STDIO_ENV_ALLOWLIST: readonly string[] = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "COLORTERM",
+  "TMPDIR", "TMP", "TEMP", "TZ", "PWD",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+  "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+  // Windows essentials
+  "SYSTEMROOT", "SystemRoot", "COMSPEC", "ComSpec", "PATHEXT", "WINDIR", "windir",
+  "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "ProgramData", "PROGRAMFILES", "ProgramFiles", "Path",
+];
+
 export function buildStdioEnv(
   userEnv?: Record<string, string>,
+  parentEnv: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
-  const env: Record<string, string> = { ...process.env, ...userEnv } as Record<
-    string,
-    string
-  >;
-  delete env.NPM_CONFIG_PREFIX;
-  return env;
+  const pass = new Set<string>(STDIO_ENV_ALLOWLIST);
+  for (const name of (parentEnv.SWARM_STDIO_PASS_ENV ?? "").split(",")) {
+    if (name.trim()) pass.add(name.trim());
+  }
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parentEnv)) {
+    if (value === undefined) continue;
+    if (pass.has(key) || key.startsWith("LC_")) env[key] = value;
+  }
+  return { ...env, ...userEnv };
 }
