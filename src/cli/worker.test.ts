@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
 import type { RunReport } from "../engine/types/run.js";
@@ -6,6 +7,7 @@ import {
   backoffDelay,
   exportWorkerOtelToServer,
   resolveWorkerOtelExport,
+  resolveWorkerTelemetryHmacSecret,
   makeScrubber,
   resolveWorkerMaxVus,
   missingRequiredEnv,
@@ -585,7 +587,39 @@ describe("worker swarm telemetry opt-in (key required)", () => {
         scrub: (s) => s,
         fetchFn: (async (u: string | URL) => { calls.push(String(u)); return new Response("{}"); }) as typeof fetch,
       }),
-    ).rejects.toThrow(/requires a worker token/);
+    ).rejects.toThrow(/requires a key/);
     expect(calls).toEqual([]);
+  });
+});
+
+describe("worker swarm telemetry HMAC signing", () => {
+  it("accepts an HMAC secret instead of a token and prefers the CLI-named var", () => {
+    expect(resolveWorkerOtelExport(true, "", { SWARM_TELEMETRY_HMAC_SECRET: "s" })).toBe(true);
+    expect(resolveWorkerTelemetryHmacSecret({ SWARM_CLI_TELEMETRY_HMAC_SECRET: "a", SWARM_TELEMETRY_HMAC_SECRET: "b" })).toBe("a");
+    expect(resolveWorkerTelemetryHmacSecret({})).toBe("");
+  });
+
+  it("signs OTLP bodies with X-Swarm-Signature and omits the token", async () => {
+    const posts: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+    const fetchFn = (async (u: string | URL, init?: RequestInit) => {
+      posts.push({ url: String(u), headers: init?.headers as Record<string, string>, body: String(init?.body) });
+      return new Response("{}");
+    }) as typeof fetch;
+    const out = await exportWorkerOtelToServer({
+      server: "https://swarm.botz.ai",
+      token: "tok",
+      hmacSecret: "s3cret",
+      executionId: "e1",
+      report: { id: "e1", startedAt: new Date().toISOString(), toolSeries: [] } as unknown as RunReport,
+      scrub: (s) => s,
+      fetchFn,
+    });
+    expect(out).toEqual({ metricsOk: true, tracesOk: true });
+    expect(posts).toHaveLength(2);
+    for (const p of posts) {
+      const want = `sha256=${createHmac("sha256", "s3cret").update(p.body).digest("hex")}`;
+      expect(p.headers["x-swarm-signature"]).toBe(want);
+      expect(p.headers["x-swarm-token"]).toBeUndefined();
+    }
   });
 });
