@@ -58,7 +58,9 @@ export async function introspectServer(
     const prompts = capabilities.includes("prompts")
       ? await listAll("prompts", timed((cursor) => session.listPrompts(cursor)))
       : { items: [] };
+    const protocolVersion = session.getServerMeta?.().protocolVersion;
     return {
+      ...(protocolVersion ? { protocolVersion } : {}),
       serverName: info.name,
       serverVersion: info.version,
       latency: { connectMs: Math.ceil(connectMs), rpcMs: Math.ceil(rpcMs) },

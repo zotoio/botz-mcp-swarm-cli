@@ -1,5 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { rampDownFlags } from "./ramp-down-flags.js";
+import { registerServerUpdateCommands } from "./server-update-commands.js";
+import { parseTagList, projectTaggedRunRows } from "./server-update-ops.js";
 import { resolve } from "node:path";
 import type { Command } from "commander";
 import { formatCompareMarkdown } from "../engine/core/compare.js";
@@ -87,9 +89,10 @@ export function registerProjectCommands(program: Command): void {
       if (project.introspectError) process.exitCode = 1;
     });
 
-  project
+  const serverCmd = project
     .command("server")
-    .description("Servers inside a project")
+    .description("Servers inside a project: add, update checks, changelog, descriptions");
+  serverCmd
     .command("add")
     .description("Add another MCP server to a project and generate a default suite for it")
     .argument("<project>", "Project id or name")
@@ -166,6 +169,7 @@ export function registerProjectCommands(program: Command): void {
     });
 
   const suite = project.command("suite").description("Versioned suite tree. Each edit saves the next immutable version");
+  registerServerUpdateCommands(project, serverCmd, suite);
 
   suite
     .command("versions")
@@ -533,9 +537,10 @@ export function registerProjectCommands(program: Command): void {
     .command("runs")
     .description("List stored runs for a project")
     .argument("<project>")
+    .option("--tags <tags>", "Only runs carrying every one of these comma-separated tags")
     .option("--json")
-    .action(async (ref: string, opts: { json?: boolean }) => {
-      const runs = await projectRunRows(ref);
+    .action(async (ref: string, opts: { json?: boolean; tags?: string }) => {
+      const runs = opts.tags ? await projectTaggedRunRows(ref, parseTagList(opts.tags)) : await projectRunRows(ref);
       if (opts.json) printJson(runs);
       else if (runs.length === 0) console.log("No runs.");
       else {

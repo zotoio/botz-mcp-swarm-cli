@@ -138,6 +138,27 @@ botz mcp-swarm project load my-project --preset peak
 
 The CLI's MCP session engine (`src/engine/adapters/mcp-session.ts`) implements all 7 MCP specification stages, including `outputSchema` validation on `structuredContent`, 5-field `ToolAnnotations`, `notifications/progress` (`ttfpMs`), `completion/complete`, deterministic mock handlers for `sampling/createMessage` and `roots/list`, and end-of-run `signalCalleeRunCompleted` lifecycle signaling. See [docs/architecture.md](docs/architecture.md) for the full architecture and sequence diagrams.
 
+## Server updates, changelog, descriptions and tags
+
+Each project server records the MCP spec (protocol) version negotiated at `initialize`.
+
+```bash
+swarm project server updates <project> [--server <id>] [--json]     # re-probe + diff vs stored snapshot
+swarm project server accept-update <project> --server <id> [--change <proposalId> ...] [--notes "why"]
+swarm project server discard-update <project> --server <id>
+swarm project server changelog <project> [--server <id>] [--entry <id> --notes "edited"]
+swarm project server describe <project> "Primary search MCP" --server <id>
+swarm project suite describe <project> "Nightly contract suite" --suite <suite>
+swarm project suite tag <project> smoke nightly --suite <suite>
+swarm project suite list <project> --tags smoke
+swarm project scenarios <project> --tags checkout
+swarm project scenario-tag <project> <scenarioId> checkout --suite <suite>
+swarm project run-tag <project> <runId> regression
+swarm project runs <project> --tags regression
+```
+
+A check compares serverInfo version, protocol version, capabilities, and every tool (description, input/output schema, annotations), resource, resource template and prompt. Only steps that reference a removed or changed primitive get a proposal: removed primitives disable the step (kept for history), changed schemas refresh the step arguments. Added primitives never rewrite existing suites. Accepting writes one new version per affected suite and records a changelog entry (auto summary plus notes) on the server. The same operations are exposed by the Swarm service API and its MCP tools (`swarm_server_check_updates`, `swarm_server_update_apply`, `swarm_server_changelog`, `swarm_describe`, `swarm_tags_set`, `swarm_scenarios_list`, and `tags` on `swarm_suites_list` / `swarm_runs_list`).
+
 ## Multi-server suites
 
 A suite can call tools on several MCP servers in one flow, passing values extracted from one server's result into another server's call:

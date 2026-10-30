@@ -28,6 +28,7 @@ import { tidyPositions } from "../core/suite-graph.js";
 import { forgetRunExports } from "../otel/local-collector.js";
 import type { RunReport } from "../types/run.js";
 import { swarmDataDir } from "../core/data-dirs.js";
+import type { PendingServerUpdate, ServerVersionAnnotation, SurfaceSnapshot } from "../core/server-updates.js";
 import { aliasFromName, DEFAULT_SERVER, nodesForServer, usedServers } from "../core/servers.js";
 import { suiteEnablesDestructive } from "../core/suite-compatibility.js";
 
@@ -60,6 +61,12 @@ export interface SuitePointer {
   dispatch?: SuiteDispatch;
   /** Version numbers explicitly disabled from being executed again. */
   disabledVersions?: number[];
+  /** Free-form, editable description. */
+  description?: string;
+  /** Ad-hoc tags (normalised lower-case). */
+  tags?: string[];
+  /** Ad-hoc tags on scenario frames, by scenario id; kept here so tagging never forks a suite version. */
+  scenarioTags?: Record<string, string[]>;
 }
 
 export type SuiteDispatch = "local" | "worker";
@@ -107,9 +114,20 @@ export interface ProjectServer {
   surface?: ProjectSurface;
   catalogAt?: string;
   introspectError?: string;
+  /** MCP spec (protocol) version negotiated at initialize on the latest probe. */
+  protocolVersion?: string;
+  /** Free-form, editable description. */
+  description?: string;
+  /** Surface the suites are currently pinned to (set on accept, or on a clean update check). */
+  snapshot?: SurfaceSnapshot;
+  /** A probe that differs from `snapshot`, awaiting review. */
+  pendingUpdate?: PendingServerUpdate;
+  /** Changelog annotations recorded on accepted updates, newest first. */
+  versionHistory?: ServerVersionAnnotation[];
 }
 
 export interface ProjectSurface {
+  protocolVersion?: string;
   serverName?: string;
   serverVersion?: string;
   /** Measured at the last introspection; sizes the load profile of suites generated from it. */
@@ -140,6 +158,8 @@ export interface ProjectRecord {
   lastSuiteName?: string;
   /** Every MCP server in this project. The first one is the server the project was created from. */
   servers?: ProjectServer[];
+  /** Ad-hoc run tags, by run id. */
+  runTags?: Record<string, string[]>;
   suites: SuitePointer[];
 }
 
@@ -244,6 +264,9 @@ function mirrorPrimary(project: ProjectRecord): void {
 
 /** Older projects stored one server on the project itself. Lift that into servers[]. */
 export function normalizeProject(project: ProjectRecord): ProjectRecord {
+  for (const server of project.servers ?? []) {
+    if (!server.protocolVersion && server.surface?.protocolVersion) server.protocolVersion = server.surface.protocolVersion;
+  }
   if (!project.servers?.length) {
     project.servers = [{
       id: "sv_primary",
@@ -369,6 +392,7 @@ async function defaultIntrospect(target: McpServerConfig): Promise<ServerSurface
 
 function storedSurface(surface: ServerSurface): ProjectSurface {
   return {
+    ...(surface.protocolVersion ? { protocolVersion: surface.protocolVersion } : {}),
     serverName: surface.serverName,
     serverVersion: surface.serverVersion,
     latency: surface.latency,
@@ -1219,4 +1243,20 @@ export async function listSavedRunIds(options?: ProjectStoreOptions): Promise<st
 
 export function projectAllowlistHosts(target: McpServerConfig): string[] {
   return allowlistHosts([target]);
+}
+
+/** Load, change, and save one project record (used for descriptions, tags, and server update state). */
+export async function mutateProjectRecord(
+  projectId: string,
+  mutate: (project: ProjectRecord) => void | Promise<void>,
+  options?: ProjectStoreOptions,
+): Promise<ProjectRecord | null> {
+  const project = await loadRecord(projectId, options);
+  if (!project || project.archived) return null;
+  await mutate(project);
+  project.updatedAt = new Date().toISOString();
+  mirrorPrimary(project);
+  await writeJson(projectPath(project.id, options), project);
+  await upsertIndex(project, options);
+  return project;
 }

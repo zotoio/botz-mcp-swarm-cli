@@ -114,6 +114,8 @@ export interface SurfaceLatency {
 }
 
 export interface ServerSurface {
+  /** MCP spec version negotiated at initialize. */
+  protocolVersion?: string;
   serverName?: string;
   serverVersion?: string;
   latency?: SurfaceLatency;
@@ -201,6 +203,8 @@ export interface SuiteNode {
    * The runner ignores it.
    */
   layout?: { x: number; y: number };
+  /** Scenario metadata when this group frame represents a use-case scenario (written by the control plane). */
+  scenarioMeta?: { id: string; name: string; goal?: string; category?: string };
 }
 
 /** Enabled tool steps that carry at least one eval prompt. Loops are not unrolled. */
