@@ -45,16 +45,24 @@ export function normalizeCallSlo(value: unknown): CallSlo | undefined {
   if (maxP95Ms !== undefined) slo.maxP95Ms = maxP95Ms;
   if (maxP99Ms !== undefined) slo.maxP99Ms = maxP99Ms;
   if (maxErrorRate !== undefined) slo.maxErrorRate = maxErrorRate;
+  // p99 can never be tighter than p95: an objective like p95 30795 / p99 3500 can only ever fail.
+  if (slo.maxP95Ms !== undefined && slo.maxP99Ms !== undefined && slo.maxP99Ms < slo.maxP95Ms) slo.maxP99Ms = slo.maxP95Ms;
   return Object.keys(slo).length > 0 ? slo : undefined;
+}
+
+/** Same consistency rule for a resolved objective: lift p99 to p95 when a step's p95 outgrows an inherited p99. */
+export function consistentCallSlo(slo: CallSlo): CallSlo {
+  if (slo.maxP95Ms !== undefined && slo.maxP99Ms !== undefined && slo.maxP99Ms < slo.maxP95Ms) return { ...slo, maxP99Ms: slo.maxP95Ms };
+  return slo;
 }
 
 /** Step fields replace the suite objective. Unset step fields keep the suite value. */
 export function effectiveCallSlo(suite: CallSlo | undefined, step: CallSlo | undefined): CallSlo {
-  return {
+  return consistentCallSlo({
     maxP95Ms: step?.maxP95Ms ?? suite?.maxP95Ms,
     maxP99Ms: step?.maxP99Ms ?? suite?.maxP99Ms,
     maxErrorRate: step?.maxErrorRate ?? suite?.maxErrorRate ?? 0,
-  };
+  });
 }
 
 function judge(kind: "Step" | "Tool" | "Server", name: string, samples: CallSloSample[], limits: CallSlo): string[] {

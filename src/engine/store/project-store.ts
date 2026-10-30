@@ -28,6 +28,8 @@ import { tidyPositions } from "../core/suite-graph.js";
 import { forgetRunExports } from "../otel/local-collector.js";
 import type { RunReport } from "../types/run.js";
 import { swarmDataDir } from "../core/data-dirs.js";
+import { snapshotFromSurface, type PendingServerUpdate, type ServerVersionAnnotation, type SurfaceSnapshot } from "../core/server-updates.js";
+import { protocolEraFor, snapshotHash } from "../core/introspection-freshness.js";
 import { aliasFromName, DEFAULT_SERVER, nodesForServer, usedServers } from "../core/servers.js";
 import { suiteEnablesDestructive } from "../core/suite-compatibility.js";
 
@@ -60,6 +62,12 @@ export interface SuitePointer {
   dispatch?: SuiteDispatch;
   /** Version numbers explicitly disabled from being executed again. */
   disabledVersions?: number[];
+  /** Free-form, editable description. */
+  description?: string;
+  /** Ad-hoc tags (normalised lower-case). */
+  tags?: string[];
+  /** Ad-hoc tags on scenario frames, by scenario id; kept here so tagging never forks a suite version. */
+  scenarioTags?: Record<string, string[]>;
 }
 
 export type SuiteDispatch = "local" | "worker";
@@ -107,9 +115,28 @@ export interface ProjectServer {
   surface?: ProjectSurface;
   catalogAt?: string;
   introspectError?: string;
+  /** MCP spec (protocol) version negotiated at initialize on the latest probe. */
+  protocolVersion?: string;
+  /** Free-form, editable description. */
+  description?: string;
+  /** Surface the suites are currently pinned to (set on accept, or on a clean update check). */
+  snapshot?: SurfaceSnapshot;
+  /** A probe that differs from `snapshot`, awaiting review. */
+  pendingUpdate?: PendingServerUpdate;
+  /** Changelog annotations recorded on accepted updates, newest first. */
+  versionHistory?: ServerVersionAnnotation[];
+  /** When the server was last live-introspected successfully (create, refresh or update check). */
+  lastIntrospectedAt?: string;
+  /** Hash of the surface seen at `lastIntrospectedAt`. */
+  snapshotHash?: string;
+  /** Protocol era detected at `lastIntrospectedAt`: `modern` (2026-07-28+), `legacy` or `unknown`. */
+  protocolEra?: string;
+  /** Error from the latest failed live introspection, cleared on the next success. */
+  lastIntrospectionError?: string;
 }
 
 export interface ProjectSurface {
+  protocolVersion?: string;
   serverName?: string;
   serverVersion?: string;
   /** Measured at the last introspection; sizes the load profile of suites generated from it. */
@@ -140,6 +167,8 @@ export interface ProjectRecord {
   lastSuiteName?: string;
   /** Every MCP server in this project. The first one is the server the project was created from. */
   servers?: ProjectServer[];
+  /** Ad-hoc run tags, by run id. */
+  runTags?: Record<string, string[]>;
   suites: SuitePointer[];
 }
 
@@ -244,6 +273,9 @@ function mirrorPrimary(project: ProjectRecord): void {
 
 /** Older projects stored one server on the project itself. Lift that into servers[]. */
 export function normalizeProject(project: ProjectRecord): ProjectRecord {
+  for (const server of project.servers ?? []) {
+    if (!server.protocolVersion && server.surface?.protocolVersion) server.protocolVersion = server.surface.protocolVersion;
+  }
   if (!project.servers?.length) {
     project.servers = [{
       id: "sv_primary",
@@ -369,6 +401,7 @@ async function defaultIntrospect(target: McpServerConfig): Promise<ServerSurface
 
 function storedSurface(surface: ServerSurface): ProjectSurface {
   return {
+    ...(surface.protocolVersion ? { protocolVersion: surface.protocolVersion } : {}),
     serverName: surface.serverName,
     serverVersion: surface.serverVersion,
     latency: surface.latency,
@@ -381,6 +414,8 @@ function storedSurface(surface: ServerSurface): ProjectSurface {
 
 function suiteSurface(catalog: ToolCatalogEntry[], surface?: ProjectRecord["surface"]): ServerSurface {
   return {
+    // Keep the negotiated spec version: the generator must not emit removed methods (ping) on the modern era.
+    ...(surface?.protocolVersion ? { protocolVersion: surface.protocolVersion } : {}),
     serverName: surface?.serverName,
     serverVersion: surface?.serverVersion,
     capabilities: surface?.capabilities ?? (catalog.length > 0 ? ["tools"] : []),
@@ -560,6 +595,21 @@ function makeServer(
     surface: filled.surface,
     catalogAt: filled.introspectError ? undefined : now,
     introspectError: filled.introspectError,
+    ...(filled.introspectError ? {} : introspectionStamp(filled, now)),
+  };
+}
+
+/** `lastIntrospectedAt`, snapshot hash, protocol version and era for a successful live introspection. */
+export function introspectionStamp(
+  filled: { catalog: ToolCatalogEntry[]; surface?: ProjectSurface },
+  at: string,
+): Pick<ProjectServer, "lastIntrospectedAt" | "snapshotHash" | "protocolEra" | "protocolVersion"> {
+  const snap = snapshotFromSurface({ ...(filled.surface ?? { capabilities: [], resources: [], resourceTemplates: [], prompts: [] }), tools: filled.catalog }, at);
+  return {
+    lastIntrospectedAt: at,
+    snapshotHash: snapshotHash(snap),
+    protocolEra: protocolEraFor(snap.protocolVersion),
+    ...(snap.protocolVersion ? { protocolVersion: snap.protocolVersion } : {}),
   };
 }
 
@@ -725,6 +775,8 @@ export async function reintrospectProject(
     server.surface = filled.surface;
     server.catalogAt = project.updatedAt;
     server.introspectError = undefined;
+    Object.assign(server, introspectionStamp(filled, project.updatedAt));
+    delete server.lastIntrospectionError;
     await replaceUntouchedStubSuite(project, server, options);
   }
   mirrorPrimary(project);
@@ -1219,4 +1271,20 @@ export async function listSavedRunIds(options?: ProjectStoreOptions): Promise<st
 
 export function projectAllowlistHosts(target: McpServerConfig): string[] {
   return allowlistHosts([target]);
+}
+
+/** Load, change, and save one project record (used for descriptions, tags, and server update state). */
+export async function mutateProjectRecord(
+  projectId: string,
+  mutate: (project: ProjectRecord) => void | Promise<void>,
+  options?: ProjectStoreOptions,
+): Promise<ProjectRecord | null> {
+  const project = await loadRecord(projectId, options);
+  if (!project || project.archived) return null;
+  await mutate(project);
+  project.updatedAt = new Date().toISOString();
+  mirrorPrimary(project);
+  await writeJson(projectPath(project.id, options), project);
+  await upsertIndex(project, options);
+  return project;
 }
