@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-export const SWARM_TESTER_USER_AGENT = "botz-mcp-swarm/0.14.0 (mcp-tester)";
+export const SWARM_TESTER_USER_AGENT = "botz-mcp-swarm/0.15.0 (mcp-tester)";
 
 export interface HeaderCapture {
   lastHeaders: Record<string, string>;
