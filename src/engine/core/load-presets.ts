@@ -248,6 +248,7 @@ export function parseConversationalSuitePrompt(input: {
   if (p99Match) {
     slo.maxP99Ms = Math.max(50, parseTimeMs(p99Match[1]!, p99Match[2]!));
   }
+  if (slo.maxP95Ms !== undefined && slo.maxP99Ms !== undefined && slo.maxP99Ms < slo.maxP95Ms) slo.maxP99Ms = slo.maxP95Ms;
 
   // Optional tool focus filtering if the user asks to "focus on <tool1>, <tool2>" or "only run <tool1>"
   let nextNodes = structuredClone(input.currentNodes);
@@ -256,6 +257,8 @@ export function parseConversationalSuitePrompt(input: {
       for (const n of items) {
         if (n.slo?.maxP95Ms) {
           n.slo.maxP95Ms = Math.max(n.slo.maxP95Ms, slo.maxP95Ms ?? 2500);
+          // Scale p99 with p95 so a step never ends up with p95 above its p99.
+          if (n.slo.maxP99Ms !== undefined) n.slo.maxP99Ms = Math.max(n.slo.maxP99Ms, slo.maxP99Ms ?? 3500, n.slo.maxP95Ms);
         }
         if (n.children) scaleWalk(n.children);
       }

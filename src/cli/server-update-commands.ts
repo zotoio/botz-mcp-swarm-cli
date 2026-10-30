@@ -6,6 +6,9 @@ import {
   projectDescribe,
   projectDiscardServerUpdate,
   projectEditChangelogNotes,
+  projectRefreshServer,
+  projectIntrospectionStatus,
+  formatIntrospectionStatus,
   projectScenarioRows,
   projectServerChangelog,
   projectServerUpdates,
@@ -30,6 +33,39 @@ export function registerServerUpdateCommands(project: Command, server: Command, 
       if (opts.json) printJson(results);
       else console.log(formatUpdateCheck(results));
       if (results.some((r) => r.error)) process.exitCode = 1;
+    });
+
+  server
+    .command("refresh")
+    .description("Refresh from server: live-introspect now, record last-introspected time, snapshot hash, MCP spec version and protocol era, and flag drift between the server and the suites for review (never applied)")
+    .argument("<project>", "Project id or name")
+    .option("--server <id>", "Server id or name")
+    .option("--suite <id>", "Suite id or name: refresh the server that suite runs against")
+    .option("--stale-hours <n>", "Staleness threshold in hours (default SWARM_INTROSPECTION_STALE_HOURS or 24)")
+    .option("--json", "Print JSON")
+    .action(async (ref: string, opts: { server?: string; suite?: string; staleHours?: string; json?: boolean }) => {
+      const hours = Number.parseFloat(opts.staleHours ?? "");
+      const out = await projectRefreshServer(ref, { server: opts.server, suite: opts.suite }, Number.isFinite(hours) && hours > 0 ? { staleAfterMs: hours * 3_600_000 } : undefined);
+      if (opts.json) printJson({ results: out.results, introspection: out.state });
+      else console.log(`${formatUpdateCheck(out.results)}\n${formatIntrospectionStatus(out.state)}`);
+      if (out.results.some((r) => r.error)) process.exitCode = 1;
+    });
+
+  server
+    .command("status")
+    .description("Show when each server was last live-introspected, its protocol era and MCP spec version, whether that is stale, and suite changes pending review")
+    .argument("<project>", "Project id or name")
+    .option("--server <id>", "Server id or name")
+    .option("--suite <id>", "Suite id or name (its server only)")
+    .option("--stale-hours <n>", "Staleness threshold in hours (default 24)")
+    .option("--json", "Print JSON")
+    .action(async (ref: string, opts: { server?: string; suite?: string; staleHours?: string; json?: boolean }) => {
+      const hours = Number.parseFloat(opts.staleHours ?? "");
+      const rows = await projectIntrospectionStatus(ref, { server: opts.server, suite: opts.suite, ...(Number.isFinite(hours) && hours > 0 ? { staleAfterMs: hours * 3_600_000 } : {}) });
+      if (opts.json) printJson(rows);
+      else console.log(formatIntrospectionStatus(rows));
+      // Non-zero when anything is stale, so scripts can gate on it.
+      if (rows.some((r) => r.stale)) process.exitCode = 2;
     });
 
   server

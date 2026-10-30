@@ -28,7 +28,8 @@ import { tidyPositions } from "../core/suite-graph.js";
 import { forgetRunExports } from "../otel/local-collector.js";
 import type { RunReport } from "../types/run.js";
 import { swarmDataDir } from "../core/data-dirs.js";
-import type { PendingServerUpdate, ServerVersionAnnotation, SurfaceSnapshot } from "../core/server-updates.js";
+import { snapshotFromSurface, type PendingServerUpdate, type ServerVersionAnnotation, type SurfaceSnapshot } from "../core/server-updates.js";
+import { protocolEraFor, snapshotHash } from "../core/introspection-freshness.js";
 import { aliasFromName, DEFAULT_SERVER, nodesForServer, usedServers } from "../core/servers.js";
 import { suiteEnablesDestructive } from "../core/suite-compatibility.js";
 
@@ -124,6 +125,14 @@ export interface ProjectServer {
   pendingUpdate?: PendingServerUpdate;
   /** Changelog annotations recorded on accepted updates, newest first. */
   versionHistory?: ServerVersionAnnotation[];
+  /** When the server was last live-introspected successfully (create, refresh or update check). */
+  lastIntrospectedAt?: string;
+  /** Hash of the surface seen at `lastIntrospectedAt`. */
+  snapshotHash?: string;
+  /** Protocol era detected at `lastIntrospectedAt`: `modern` (2026-07-28+), `legacy` or `unknown`. */
+  protocolEra?: string;
+  /** Error from the latest failed live introspection, cleared on the next success. */
+  lastIntrospectionError?: string;
 }
 
 export interface ProjectSurface {
@@ -405,6 +414,8 @@ function storedSurface(surface: ServerSurface): ProjectSurface {
 
 function suiteSurface(catalog: ToolCatalogEntry[], surface?: ProjectRecord["surface"]): ServerSurface {
   return {
+    // Keep the negotiated spec version: the generator must not emit removed methods (ping) on the modern era.
+    ...(surface?.protocolVersion ? { protocolVersion: surface.protocolVersion } : {}),
     serverName: surface?.serverName,
     serverVersion: surface?.serverVersion,
     capabilities: surface?.capabilities ?? (catalog.length > 0 ? ["tools"] : []),
@@ -584,6 +595,21 @@ function makeServer(
     surface: filled.surface,
     catalogAt: filled.introspectError ? undefined : now,
     introspectError: filled.introspectError,
+    ...(filled.introspectError ? {} : introspectionStamp(filled, now)),
+  };
+}
+
+/** `lastIntrospectedAt`, snapshot hash, protocol version and era for a successful live introspection. */
+export function introspectionStamp(
+  filled: { catalog: ToolCatalogEntry[]; surface?: ProjectSurface },
+  at: string,
+): Pick<ProjectServer, "lastIntrospectedAt" | "snapshotHash" | "protocolEra" | "protocolVersion"> {
+  const snap = snapshotFromSurface({ ...(filled.surface ?? { capabilities: [], resources: [], resourceTemplates: [], prompts: [] }), tools: filled.catalog }, at);
+  return {
+    lastIntrospectedAt: at,
+    snapshotHash: snapshotHash(snap),
+    protocolEra: protocolEraFor(snap.protocolVersion),
+    ...(snap.protocolVersion ? { protocolVersion: snap.protocolVersion } : {}),
   };
 }
 
@@ -749,6 +775,8 @@ export async function reintrospectProject(
     server.surface = filled.surface;
     server.catalogAt = project.updatedAt;
     server.introspectError = undefined;
+    Object.assign(server, introspectionStamp(filled, project.updatedAt));
+    delete server.lastIntrospectionError;
     await replaceUntouchedStubSuite(project, server, options);
   }
   mirrorPrimary(project);

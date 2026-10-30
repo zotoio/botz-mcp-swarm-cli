@@ -1,3 +1,4 @@
+import { isModernEra } from "./protocol-era.js";
 import { DEFAULT_SUITE_LIMITS, type SuiteLimits } from "./suite-limits.js";
 import { DEFAULT_LOAD_PROFILE, DEFAULT_RAMP_DOWN, type RampDownStrategy } from "./load-defaults.js";
 import type { CallSlo } from "./call-slo.js";
@@ -116,6 +117,8 @@ export interface SurfaceLatency {
 export interface ServerSurface {
   /** MCP spec version negotiated at initialize. */
   protocolVersion?: string;
+  /** Protocol era, when the transport reports it (`modern` = 2026-07-28+ sessionless). */
+  protocolEra?: string;
   serverName?: string;
   serverVersion?: string;
   latency?: SurfaceLatency;
@@ -537,9 +540,11 @@ function sampler(
 
 export function buildDefaultSuiteNodes(input: ToolCatalogEntry[] | ServerSurface): SuiteNode[] {
   const surface = asServerSurface(input);
+  // The modern era (2026-07-28+) removed `ping` and `logging/setLevel`; never generate steps that must fail there.
+  const modern = isModernEra(surface.protocolVersion, surface.protocolEra);
   const children: SuiteNode[] = [
     sampler("initialize", "Initialize", { expect: { resultShape: "initialize" } }),
-    sampler("ping", "Ping", { expect: { resultShape: "ping" } }),
+    ...(modern ? [] : [sampler("ping", "Ping", { expect: { resultShape: "ping" } })]),
     ...(surface.capabilities.includes("tools") || surface.tools.length > 0
       ? [sampler("tools/list", "List tools", { expect: { resultShape: "tools/list" } })] : []),
   ];
@@ -586,7 +591,7 @@ export function buildDefaultSuiteNodes(input: ToolCatalogEntry[] | ServerSurface
   }
   const completion = completionNode(surface);
   if (completion) children.push(completion);
-  if (surface.capabilities.includes("logging")) {
+  if (surface.capabilities.includes("logging") && !modern) {
     children.push(sampler("logging/setLevel", "Set log level", {
       args: { level: "info" },
       expect: { resultShape: "logging" },

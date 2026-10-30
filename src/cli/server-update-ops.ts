@@ -12,7 +12,10 @@ import {
   setServerMeta,
   setSuiteMeta,
   storedSnapshot,
+  projectIntrospectionState,
+  refreshServerIntrospection,
   type ProbeFn,
+  type ServerIntrospectionState,
   type ServerUpdateCheck,
 } from "../engine/store/server-updates-store.js";
 import { normalizeTags } from "../engine/core/server-updates.js";
@@ -31,6 +34,63 @@ export async function projectServerUpdates(ref: string, serverRef?: string, opti
   const results = await checkServerUpdates(project.id, { serverId, probe: options?.probe }, options);
   if (!results) throw new Error("project_not_found");
   return { projectId: project.id, results };
+}
+
+/**
+ * `project server refresh`: live-introspect one server (or the suite's server, or all) now. Records
+ * lastIntrospectedAt + snapshot hash + era, and flags drift as a pending review. Never edits suites.
+ */
+export async function projectRefreshServer(
+  ref: string,
+  target: { server?: string; suite?: string },
+  options?: ProjectStoreOptions & { probe?: ProbeFn; staleAfterMs?: number },
+) {
+  const project = await resolveProject(ref, options);
+  const serverId = target.server ? resolveServer(project, target.server).id : undefined;
+  const suiteId = !serverId && target.suite ? resolveSuite(project, target.suite).id : undefined;
+  const out = await refreshServerIntrospection(project.id, { serverId, suiteId, probe: options?.probe, staleAfterMs: options?.staleAfterMs }, options);
+  if (!out) throw new Error("project_not_found");
+  return { projectId: project.id, ...out };
+}
+
+/** `project server status`: last live introspection per server, era/spec, stale flag, pending review. */
+export async function projectIntrospectionStatus(
+  ref: string,
+  target: { server?: string; suite?: string; staleAfterMs?: number },
+  options?: ProjectStoreOptions,
+) {
+  const project = await resolveProject(ref, options);
+  const serverId = target.server ? resolveServer(project, target.server).id : undefined;
+  const suiteId = !serverId && target.suite ? resolveSuite(project, target.suite).id : undefined;
+  return (await projectIntrospectionState(project.id, { serverId, suiteId, staleAfterMs: target.staleAfterMs }, options)) ?? [];
+}
+
+function relative(ms: number | null): string {
+  if (ms === null) return "never";
+  const m = Math.floor(ms / 60_000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} hr${h === 1 ? "" : "s"} ago`;
+  const d = Math.floor(h / 24);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+
+export function formatIntrospectionStatus(rows: ServerIntrospectionState[]): string {
+  return rows.map((r) => {
+    const parts = [
+      `${r.stale ? "⚠" : "✓"} ${r.serverName} (${r.serverId})`,
+      `Last introspected: ${relative(r.ageMs)}${r.lastIntrospectedAt ? ` (${r.lastIntrospectedAt})` : ""}`,
+      `${r.protocolEra} era · MCP ${r.protocolVersion ?? "unknown"}`,
+      ...(r.snapshotHash ? [`surface ${r.snapshotHash}`] : []),
+      ...(r.stale ? [`STALE (> ${Math.round(r.staleAfterMs / 3_600_000)}h) — run \`project server refresh\``] : []),
+      ...(r.lastError ? [`last refresh failed: ${r.lastError}`] : []),
+    ];
+    const pending = r.pendingReview
+      ? `\n    Suite changes pending review: ${r.pendingReview.proposalCount} across ${r.pendingReview.suiteIds.length} suite(s) — \`project server changelog\` / \`accept-update --change <id>\``
+      : "";
+    return parts.join(" · ") + pending;
+  }).join("\n");
 }
 
 export async function projectAcceptServerUpdate(
@@ -118,14 +178,16 @@ export function formatUpdateCheck(results: ServerUpdateCheck[]): string {
       lines.push(`✗ ${r.serverName} (${r.serverId}): ${r.error}`);
       continue;
     }
-    if (!r.diff?.changed) {
-      lines.push(`✓ ${r.serverName} (${r.serverId}) · MCP ${pv} · serverVersion ${r.current?.serverVersion ?? "?"} · no changes`);
+    const era = r.protocolEra ? ` (${r.protocolEra} era)` : "";
+    if (!r.diff?.changed && r.proposals.length === 0) {
+      lines.push(`✓ ${r.serverName} (${r.serverId}) · MCP ${pv}${era} · serverVersion ${r.current?.serverVersion ?? "?"} · no changes · introspected ${r.checkedAt}`);
       continue;
     }
-    lines.push(`△ ${r.serverName} (${r.serverId}) · MCP ${pv} · ${r.proposals.length} proposal(s) across ${r.affectedSuiteIds.length} suite(s)`);
-    lines.push(...r.diff.summary.split("\n").map((l) => `    ${l}`));
+    lines.push(`△ ${r.serverName} (${r.serverId}) · MCP ${pv}${era} · ${r.proposals.length} proposal(s) across ${r.affectedSuiteIds.length} suite(s) · pending review, nothing applied`);
+    if (r.diff?.changed) lines.push(...r.diff.summary.split("\n").map((l) => `    ${l}`));
+    else lines.push("    Suite drift: the suites expect things this server no longer offers.");
     for (const p of r.proposals) {
-      lines.push(`    [${p.id}] ${p.action} ${p.suiteName ?? p.suiteId} › ${p.scenarioName ? `${p.scenarioName} › ` : ""}${p.nodeLabel ?? p.nodeId}`);
+      lines.push(`    [${p.id}] ${p.action} ${p.suiteName ?? p.suiteId} › ${p.scenarioName ? `${p.scenarioName} › ` : ""}${p.nodeLabel ?? p.nodeId} — ${p.reason}`);
     }
   }
   return lines.join("\n");

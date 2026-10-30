@@ -15,6 +15,9 @@ import {
   projectSuiteRows,
   projectTag,
   projectTaggedRunRows,
+  projectRefreshServer,
+  projectIntrospectionStatus,
+  formatIntrospectionStatus,
 } from "./server-update-ops.js";
 import { registerProjectCommands } from "./project-commands.js";
 
@@ -79,10 +82,28 @@ describe("server update CLI ops", () => {
     registerProjectCommands(program);
     const project = program.commands.find((c) => c.name() === "project")!;
     const names = (cmd: Command) => cmd.commands.map((c) => c.name());
-    expect(names(project.commands.find((c) => c.name() === "server")!)).toEqual(expect.arrayContaining(["add", "updates", "accept-update", "discard-update", "changelog", "describe"]));
+    expect(names(project.commands.find((c) => c.name() === "server")!)).toEqual(expect.arrayContaining(["add", "updates", "refresh", "status", "accept-update", "discard-update", "changelog", "describe"]));
     expect(names(project.commands.find((c) => c.name() === "suite")!)).toEqual(expect.arrayContaining(["describe", "tag", "list"]));
     expect(names(project)).toEqual(expect.arrayContaining(["scenarios", "scenario-tag", "run-tag", "runs"]));
     const runs = project.commands.find((c) => c.name() === "runs")!;
     expect(runs.options.map((o) => o.long)).toContain("--tags");
+  });
+
+  it("refresh records last-introspected and era, flags modern-era drift for review, and status reports staleness", async () => {
+    const { dataDir, projectId } = await setup();
+    const before = await projectIntrospectionStatus(projectId, {}, { dataDir });
+    expect(before[0]).toMatchObject({ protocolVersion: "2025-06-18", protocolEra: "legacy", stale: false });
+    expect(formatIntrospectionStatus(before)).toMatch(/Last introspected: (just now|\d+ min ago)/);
+
+    const modern: ServerSurface = { ...v1, protocolVersion: "2026-07-28" };
+    const out = await projectRefreshServer(projectId, {}, { dataDir, probe: async () => modern });
+    expect(out.results[0]!.protocolEra).toBe("modern");
+    expect(out.results[0]!.proposals.map((p) => `${p.action}:${p.primitive.key}`)).toContain("disable-step:ping");
+    expect(formatUpdateCheck(out.results)).toContain("pending review, nothing applied");
+    const after = await projectIntrospectionStatus(projectId, { staleAfterMs: 1 }, { dataDir });
+    expect(after[0]).toMatchObject({ protocolEra: "modern", protocolVersion: "2026-07-28" });
+    expect(after[0]!.pendingReview?.proposalCount).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 5));
+    expect((await projectIntrospectionStatus(projectId, { staleAfterMs: 1 }, { dataDir }))[0]!.stale).toBe(true);
   });
 });
