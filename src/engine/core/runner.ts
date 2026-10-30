@@ -1529,6 +1529,14 @@ const VOLATILE_KEY = /(^|_|-)(ts|time|timestamp|at|date|id|uuid|trace|traceid|tr
 
 function normaliseForEra(value: unknown, depth = 0, ignore: ReadonlySet<string> = new Set()): unknown {
   if (depth > 12) return "…";
+  // Tool text content is often JSON-encoded: normalise inside it so volatile keys are dropped there too.
+  if (typeof value === "string" && /^\s*[[{]/.test(value)) {
+    try {
+      return normaliseForEra(JSON.parse(value), depth + 1, ignore);
+    } catch {
+      return value;
+    }
+  }
   if (Array.isArray(value)) return value.map((v) => normaliseForEra(v, depth + 1, ignore));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
