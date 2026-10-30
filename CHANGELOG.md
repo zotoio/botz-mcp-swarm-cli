@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0
+
 - Server update checks: `project server updates <project> [--server] [--json]` re-probes serverInfo version, the negotiated MCP protocol (spec) version, capabilities and every tool/resource/template/prompt schema, diffs against the stored snapshot, and proposes per-step suite edits (disable steps for removed primitives, refresh arguments for changed schemas). `project server accept-update [--change <id...>] [--notes]` applies only accepted proposals (one new version per affected suite, unaffected suites untouched) and records a changelog annotation (auto summary + editable notes) on the server; `discard-update` and `changelog [--entry --notes]` complete the loop. Servers now store `protocolVersion` from initialize.
 - Descriptions and ad-hoc tags: `project server describe`, `project suite describe|tag|list --tags`, `project scenarios --tags`, `project scenario-tag`, `project run-tag`, `project runs --tags`. Tags are stored as optional fields on `project.json` (no migration).
 - Refresh and freshness: `project server refresh <project> [--server|--suite] [--stale-hours] [--json]` re-introspects live and stamps `lastIntrospectedAt`, snapshot hash and protocol era (drift becomes a pending review, never auto-applied); `project server status` shows last introspected, era/spec and a stale flag (default 24h, `SWARM_INTROSPECTION_STALE_HOURS`; exits 2 when stale). Modern-era suites skip `ping`/logging steps; call SLOs keep p99 >= p95.
