@@ -256,19 +256,23 @@ export function proposeSuiteChanges(input: ImpactInput, diff: SurfaceDiff, next:
   return [...out, ...proposeAddedSteps(input, diff, next)];
 }
 
-/** Slots (`tools/call:name`, ...) the suite already calls on this server, enabled or not. */
-function serverSlots(input: ImpactInput): Set<string> {
+/** Slots (`tools/call:name`, ...) the suite already calls on this server, and the explicit alias its steps use for it. */
+function serverSlots(input: ImpactInput): { slots: Set<string>; alias?: string } {
   const slots = new Set<string>();
-  const walk = (list: SuiteNode[], alias: string | undefined) => {
+  let alias: string | undefined;
+  const walk = (list: SuiteNode[], inherited: string | undefined) => {
     for (const node of list) {
-      const own = node.server ?? alias;
+      const own = node.server ?? inherited;
       if (node.children?.length) walk(node.children, own);
       const ref = stepPrimitive(node);
-      if (ref && input.callsServer(own)) slots.add(`${ref.kind}:${ref.key}`);
+      if (ref && input.callsServer(own)) {
+        slots.add(`${ref.kind}:${ref.key}`);
+        if (own && !alias) alias = own;
+      }
     }
   };
   walk(input.nodes, undefined);
-  return slots;
+  return { slots, alias };
 }
 
 /** A generated contract step for one newly advertised primitive (same shape as a freshly generated suite). */
@@ -311,16 +315,19 @@ export function stepForAddedPrimitive(change: PrimitiveChange, next: SurfaceSnap
 }
 
 /**
- * `add-step` proposals for primitives added since the snapshot. Only suites whose default server is the
- * updated server get them (a step for another alias would need an explicit server choice), and never twice.
+ * `add-step` proposals for primitives added since the snapshot. A suite whose default server is the updated
+ * server gets untagged steps; a multi-server suite that calls it through an alias gets steps tagged with that
+ * `server` alias. Suites that never call the server get nothing, and a primitive is never added twice.
  */
 export function proposeAddedSteps(input: ImpactInput, diff: SurfaceDiff, next: SurfaceSnapshot): SuiteChangeProposal[] {
-  if (!input.callsServer(undefined)) return [];
-  const present = serverSlots(input);
+  const isDefault = input.callsServer(undefined);
+  const { slots: present, alias } = serverSlots(input);
+  if (!isDefault && !alias) return [];
+  const tag = isDefault ? undefined : alias;
   const out: SuiteChangeProposal[] = [];
   for (const change of diff.primitives) {
     if (change.change !== "added" || present.has(`${change.kind}:${change.key}`)) continue;
-    const node = stepForAddedPrimitive(change, next);
+    const node = stepForAddedPrimitive(change, next, tag);
     if (!node) continue;
     const contract = node.expect?.outputSchema ? " with input + outputSchema contract checks" : node.expect?.inputSchema ? " with an inputSchema contract check" : "";
     out.push({
@@ -333,7 +340,7 @@ export function proposeAddedSteps(input: ImpactInput, diff: SurfaceDiff, next: S
       nodeLabel: node.label,
       primitive: change,
       action: "add-step",
-      reason: `${KIND_LABEL[change.kind]} '${change.key}' is newly advertised; add a generated step${contract}${node.enabled ? "" : " (disabled by default: destructive/expensive)"}.`,
+      reason: `${KIND_LABEL[change.kind]} '${change.key}' is newly advertised; add a generated step${tag ? ` (server '${tag}')` : ""}${contract}${node.enabled ? "" : " (disabled by default: destructive/expensive)"}.`,
       ...(node.args ? { afterArgs: node.args } : {}),
       newNode: node,
     });

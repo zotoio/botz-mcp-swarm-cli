@@ -117,7 +117,12 @@ describe("server update diff", () => {
     // A suite that already calls the tool, or does not target this server, gets no add-step.
     const again = proposeSuiteChanges({ suiteId: "su", nodes: updated, callsServer: (a) => !a }, diff, snapshotFromSurface(grown));
     expect(again.filter((p) => p.action === "add-step")).toHaveLength(0);
-    expect(proposeSuiteChanges({ suiteId: "x", nodes: suiteNodes, callsServer: (a) => a === "other" }, diff, snapshotFromSurface(grown)).filter((p) => p.action === "add-step")).toHaveLength(0);
+    // A multi-server suite calling this server through an alias gets steps tagged with that alias.
+    const tagged = proposeSuiteChanges({ suiteId: "x", nodes: suiteNodes, callsServer: (a) => a === "other" }, diff, snapshotFromSurface(grown)).filter((p) => p.action === "add-step");
+    expect(tagged.map((p) => p.newNode?.server)).toEqual(["other", "other", "other"]);
+    expect(tagged[0]?.reason).toContain("server 'other'");
+    // A suite that never calls the server gets nothing.
+    expect(proposeSuiteChanges({ suiteId: "y", nodes: suiteNodes, callsServer: (a) => a === "nobody" }, diff, snapshotFromSurface(grown)).filter((p) => p.action === "add-step")).toHaveLength(0);
   });
 
   it("writes a versioned changelog for an applied update", () => {
