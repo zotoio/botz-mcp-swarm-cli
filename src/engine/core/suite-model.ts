@@ -925,7 +925,23 @@ export function substituteValue(value: unknown, ctx: VarContext, uuid?: () => st
   return value;
 }
 
+/**
+ * Read a dotted path. Generated extractors use `a.b|c.d||fallback`: the first alternative that yields a non-empty
+ * value wins, otherwise the literal fallback after `||` (Smoke v89: these were read as one literal path, so
+ * `${agent_name}` resolved to '' and agent_* steps sent an empty name).
+ */
 export function readPath(root: unknown, path: string): unknown {
+  if (!path.includes("|")) return readSinglePath(root, path);
+  const idx = path.lastIndexOf("||");
+  const alternatives = (idx >= 0 ? path.slice(0, idx) : path).split("|").map((p) => p.trim()).filter(Boolean);
+  for (const alt of alternatives) {
+    const value = readSinglePath(root, alt);
+    if (value != null && value !== "") return value;
+  }
+  return idx >= 0 ? path.slice(idx + 2).trim() || undefined : undefined;
+}
+
+function readSinglePath(root: unknown, path: string): unknown {
   const trimmed = path.trim().replace(/^\$\.?/, "");
   if (!trimmed) return root;
   const parts = trimmed.split(/\.|\[|\]/).filter((part) => part.length > 0);
