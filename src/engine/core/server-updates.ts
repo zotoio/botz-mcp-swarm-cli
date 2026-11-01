@@ -12,6 +12,7 @@ import type {
   SuiteNode,
   ToolCatalogEntry,
 } from "./suite-model.js";
+import { defaultToolEvals, insertBeforeTeardown, newNodeId, toolIsCalledByDefault } from "./suite-model.js";
 import { sampleArgsForTool, type JsonSchema } from "./tool-args.js";
 
 /** `method` is a JSON-RPC method the server's protocol era no longer offers (e.g. `ping` on 2026-07-28). */
@@ -53,7 +54,11 @@ export interface SurfaceDiff {
   summary: string;
 }
 
-export type SuiteChangeAction = "disable-step" | "refresh-args" | "acknowledge";
+/**
+ * `add-step`: generate a contract step for a newly advertised tool/prompt/resource.
+ * `disable-step`: retire a step whose primitive is gone (kept, disabled and marked `retired`, never deleted).
+ */
+export type SuiteChangeAction = "add-step" | "disable-step" | "refresh-args" | "acknowledge";
 
 /** One proposed edit to one step of one suite, accepted or rejected on its own. */
 export interface SuiteChangeProposal {
@@ -74,6 +79,8 @@ export interface SuiteChangeProposal {
    * with the accepted catalog. `null` clears a pinned schema the server no longer declares.
    */
   afterExpect?: { inputSchema?: unknown; outputSchema?: unknown };
+  /** `add-step` only: the generated step inserted (before teardown) when accepted. */
+  newNode?: SuiteNode;
   /** Suite version the proposal was computed against; accept re-checks it so later edits are not clobbered. */
   suiteVersion?: number;
   /** `diff`: the server changed since the stored snapshot. `drift`: the suite expects something the server no longer offers. */
@@ -211,7 +218,7 @@ export interface ImpactInput {
 export function proposeSuiteChanges(input: ImpactInput, diff: SurfaceDiff, next: SurfaceSnapshot): SuiteChangeProposal[] {
   const out: SuiteChangeProposal[] = [];
   const relevant = diff.primitives.filter((p) => p.change !== "added");
-  if (!relevant.length) return out;
+  if (!relevant.length) return [...out, ...proposeAddedSteps(input, diff, next)];
   const walk = (list: SuiteNode[], alias: string | undefined, scenario?: { id: string; name: string }) => {
     for (const node of list) {
       const ownAlias = node.server ?? alias;
@@ -246,6 +253,91 @@ export function proposeSuiteChanges(input: ImpactInput, diff: SurfaceDiff, next:
     }
   };
   walk(input.nodes, undefined);
+  return [...out, ...proposeAddedSteps(input, diff, next)];
+}
+
+/** Slots (`tools/call:name`, ...) the suite already calls on this server, enabled or not. */
+function serverSlots(input: ImpactInput): Set<string> {
+  const slots = new Set<string>();
+  const walk = (list: SuiteNode[], alias: string | undefined) => {
+    for (const node of list) {
+      const own = node.server ?? alias;
+      if (node.children?.length) walk(node.children, own);
+      const ref = stepPrimitive(node);
+      if (ref && input.callsServer(own)) slots.add(`${ref.kind}:${ref.key}`);
+    }
+  };
+  walk(input.nodes, undefined);
+  return slots;
+}
+
+/** A generated contract step for one newly advertised primitive (same shape as a freshly generated suite). */
+export function stepForAddedPrimitive(change: PrimitiveChange, next: SurfaceSnapshot, serverAlias?: string): SuiteNode | null {
+  const server = serverAlias ? { server: serverAlias } : {};
+  if (change.kind === "tool") {
+    const tool = next.tools.find((t) => t.name === change.key);
+    if (!tool) return null;
+    return {
+      id: newNodeId(),
+      type: "sampler",
+      enabled: toolIsCalledByDefault(tool),
+      label: tool.name,
+      method: "tools/call",
+      tool: tool.name,
+      args: sampleArgsForTool({ name: tool.name, inputSchema: tool.inputSchema }),
+      expect: {
+        resultShape: "tools/call",
+        ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
+        // Output contract check: structuredContent must validate against the advertised outputSchema.
+        ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+      },
+      evals: defaultToolEvals(tool),
+      ...server,
+    } as SuiteNode;
+  }
+  if (change.kind === "prompt") {
+    const prompt = next.prompts.find((p) => p.name === change.key);
+    if (!prompt) return null;
+    const args: Record<string, unknown> = {};
+    for (const a of prompt.arguments ?? []) if (a.required) args[a.name] = "fixture";
+    return { id: newNodeId(), type: "sampler", enabled: true, label: prompt.name, method: "prompts/get", prompt: prompt.name, args, expect: { resultShape: "prompts/get" }, ...server } as SuiteNode;
+  }
+  if (change.kind === "resource") {
+    const resource = next.resources.find((r) => r.uri === change.key);
+    if (!resource) return null;
+    return { id: newNodeId(), type: "sampler", enabled: true, label: resource.name || resource.uri, method: "resources/read", resourceUri: resource.uri, expect: { resultShape: "resources/read" }, ...server } as SuiteNode;
+  }
+  return null;
+}
+
+/**
+ * `add-step` proposals for primitives added since the snapshot. Only suites whose default server is the
+ * updated server get them (a step for another alias would need an explicit server choice), and never twice.
+ */
+export function proposeAddedSteps(input: ImpactInput, diff: SurfaceDiff, next: SurfaceSnapshot): SuiteChangeProposal[] {
+  if (!input.callsServer(undefined)) return [];
+  const present = serverSlots(input);
+  const out: SuiteChangeProposal[] = [];
+  for (const change of diff.primitives) {
+    if (change.change !== "added" || present.has(`${change.kind}:${change.key}`)) continue;
+    const node = stepForAddedPrimitive(change, next);
+    if (!node) continue;
+    const contract = node.expect?.outputSchema ? " with input + outputSchema contract checks" : node.expect?.inputSchema ? " with an inputSchema contract check" : "";
+    out.push({
+      id: `${input.suiteId}:add:${change.kind}:${change.key}`,
+      suiteId: input.suiteId,
+      ...(input.suiteName ? { suiteName: input.suiteName } : {}),
+      ...(input.suiteVersion !== undefined ? { suiteVersion: input.suiteVersion } : {}),
+      source: "diff",
+      nodeId: node.id,
+      nodeLabel: node.label,
+      primitive: change,
+      action: "add-step",
+      reason: `${KIND_LABEL[change.kind]} '${change.key}' is newly advertised; add a generated step${contract}${node.enabled ? "" : " (disabled by default: destructive/expensive)"}.`,
+      ...(node.args ? { afterArgs: node.args } : {}),
+      newNode: node,
+    });
+  }
   return out;
 }
 
@@ -345,14 +437,22 @@ function refreshedArgs(node: SuiteNode, change: PrimitiveChange, next: SurfaceSn
 }
 
 /** Apply accepted proposals to one suite's nodes. Untouched steps keep their identity and position. */
-export function applySuiteChanges(nodes: SuiteNode[], accepted: SuiteChangeProposal[]): { nodes: SuiteNode[]; applied: SuiteChangeProposal[] } {
+export function applySuiteChanges(
+  nodes: SuiteNode[],
+  accepted: SuiteChangeProposal[],
+  opts: { now?: string } = {},
+): { nodes: SuiteNode[]; applied: SuiteChangeProposal[] } {
+  const now = opts.now ?? new Date().toISOString();
   const byNode = new Map<string, SuiteChangeProposal[]>();
-  for (const p of accepted) byNode.set(p.nodeId, [...(byNode.get(p.nodeId) ?? []), p]);
+  for (const p of accepted) if (p.action !== "add-step") byNode.set(p.nodeId, [...(byNode.get(p.nodeId) ?? []), p]);
   const applied: SuiteChangeProposal[] = [];
   const walk = (list: SuiteNode[]): SuiteNode[] => list.map((node) => {
     const copy: SuiteNode = { ...node, ...(node.children ? { children: walk(node.children) } : {}) };
     for (const p of byNode.get(node.id) ?? []) {
-      if (p.action === "disable-step") copy.enabled = false;
+      if (p.action === "disable-step") {
+        copy.enabled = false;
+        copy.retired = { at: now, reason: p.reason, primitive: `${p.primitive.kind}:${p.primitive.key}` };
+      }
       else if (p.action === "refresh-args" && p.afterArgs) copy.args = { ...p.afterArgs };
       if (p.action !== "disable-step" && p.afterExpect) {
         const expect: Record<string, unknown> = { ...((copy.expect ?? {}) as Record<string, unknown>) };
@@ -366,12 +466,23 @@ export function applySuiteChanges(nodes: SuiteNode[], accepted: SuiteChangePropo
     }
     return copy;
   });
-  return { nodes: walk(nodes), applied };
+  let out = walk(nodes);
+  const additions = accepted.filter((p) => p.action === "add-step" && p.newNode);
+  if (additions.length) {
+    out = insertBeforeTeardown(out, additions.map((p) => structuredClone(p.newNode!)));
+    applied.push(...additions);
+  }
+  return { nodes: out, applied };
 }
 
-export function suiteUpdateChangelog(applied: SuiteChangeProposal[], serverLabel: string): string {
-  if (!applied.length) return `Re-pinned to the updated catalog of ${serverLabel}.`;
-  return [`Server update from ${serverLabel}:`, ...applied.map((p) => `- ${p.action} ${p.nodeLabel ?? p.nodeId}${p.scenarioName ? ` [${p.scenarioName}]` : ""}: ${p.reason}`)].join("\n");
+export function suiteUpdateChangelog(applied: SuiteChangeProposal[], serverLabel: string, versions?: { serverVersion?: string; previousServerVersion?: string }): string {
+  const ver = versions?.serverVersion && versions.serverVersion !== versions.previousServerVersion
+    ? ` (${versions.previousServerVersion ?? "?"} → ${versions.serverVersion})` : "";
+  if (!applied.length) return `Re-pinned to the updated catalog of ${serverLabel}${ver}.`;
+  const count = (a: SuiteChangeAction) => applied.filter((p) => p.action === a).length;
+  const head = `Server update from ${serverLabel}${ver}: ${count("add-step")} added, ${count("refresh-args")} updated, ${count("disable-step")} retired, ${count("acknowledge")} acknowledged.`;
+  const verb: Record<SuiteChangeAction, string> = { "add-step": "added", "refresh-args": "updated", "disable-step": "retired", acknowledge: "acknowledged" };
+  return [head, ...applied.map((p) => `- ${verb[p.action]} ${p.nodeLabel ?? p.nodeId}${p.scenarioName ? ` [${p.scenarioName}]` : ""}: ${p.reason}`)].join("\n");
 }
 
 /**

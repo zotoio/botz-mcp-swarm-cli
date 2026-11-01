@@ -74,14 +74,14 @@ describe("server update store", () => {
     expect(check.diff?.changed).toBe(true);
     expect(check.current?.protocolVersion).toBe("2025-11-25");
     const actions = check.proposals.map((p) => p.action).sort();
-    expect(actions).toEqual(["disable-step", "refresh-args"]);
+    expect(actions).toEqual(["add-step", "disable-step", "refresh-args"]);
     expect(check.affectedSuiteIds.every((id) => !secondSuites.some((s) => s.id === id))).toBe(true);
 
     const refresh = check.proposals.find((p) => p.action === "refresh-args")!;
     const result = await acceptServerUpdate(project.id, primary!.id, { acceptChangeIds: [refresh.id], notes: "Renamed q→query", principal: "andrew" }, { dataDir });
     if ("error" in result) throw new Error(result.error);
     expect(result.annotation.summary).toContain("serverVersion: 1.0.0 → 2.0.0");
-    expect(result.annotation.rejectedChangeIds).toHaveLength(1);
+    expect(result.annotation.rejectedChangeIds).toHaveLength(2);
 
     const after = (await getProject(project.id, { dataDir }))!;
     const server = after.servers!.find((s) => s.id === primary!.id)!;
@@ -100,6 +100,45 @@ describe("server update store", () => {
 
     const edited = await setServerChangelogNotes(project.id, primary!.id, result.annotation.id, "edited", { dataDir });
     expect(edited?.notes).toBe("edited");
+  });
+
+  it("force-detects a selected set of servers, previews, then applies add/retire with a versioned changelog", async () => {
+    const { dataDir, project } = await setup();
+    const [primary, second] = project.servers!;
+    const probe = async (t: unknown) => (JSON.stringify(t).includes("5555") ? other : v2);
+    expect(await checkServerUpdates(project.id, { serverIds: [primary!.id, "nope"], probe }, { dataDir })).toBeNull();
+    const checks = (await checkServerUpdates(project.id, { serverIds: [primary!.id, second!.id], probe }, { dataDir }))!;
+    expect(checks.map((c) => c.serverId).sort()).toEqual([primary!.id, second!.id].sort());
+    const check = checks.find((c) => c.serverId === primary!.id)!;
+    expect(check.diff?.primitives.find((p) => p.key === "brand_new")?.change).toBe("added");
+
+    const before = (await getProject(project.id, { dataDir }))!;
+    const preview = await acceptServerUpdate(project.id, primary!.id, { dryRun: true }, { dataDir });
+    if ("error" in preview) throw new Error(preview.error);
+    expect(preview.dryRun).toBe(true);
+    expect(preview.suiteVersions).toEqual([]);
+    const p0 = preview.preview[0]!;
+    expect(p0.added.map((a) => a.primitive)).toEqual(["tool:brand_new"]);
+    expect(p0.retired.map((r) => r.primitive)).toEqual(["tool:legacy"]);
+    expect(p0.toVersion).toBe(p0.fromVersion + 1);
+    // Dry run writes nothing.
+    const still = (await getProject(project.id, { dataDir }))!;
+    expect(still.servers!.find((s) => s.id === primary!.id)!.pendingUpdate).toBeTruthy();
+    expect(still.suites.map((s) => s.currentVersion)).toEqual(before.suites.map((s) => s.currentVersion));
+
+    const result = await acceptServerUpdate(project.id, primary!.id, { principal: "andrew" }, { dataDir });
+    if ("error" in result) throw new Error(result.error);
+    const v = result.suiteVersions[0]!;
+    const doc = (await loadSuiteVersion(project.id, v.suiteId, v.version, { dataDir }))!;
+    const flat: Array<{ tool?: string; enabled: boolean; retired?: unknown }> = [];
+    const walk = (list: any[]) => list.forEach((n) => { flat.push(n); if (n.children) walk(n.children); });
+    walk(doc.nodes as any[]);
+    expect(flat.find((n) => n.tool === "brand_new")).toBeTruthy();
+    const legacy = flat.find((n) => n.tool === "legacy")!;
+    expect(legacy.enabled).toBe(false);
+    expect(legacy.retired).toBeTruthy();
+    expect(doc.changelog).toContain("1 added");
+    expect(doc.changelog).toContain("1 retired");
   });
 
   it("stores descriptions and tags and filters by them", async () => {

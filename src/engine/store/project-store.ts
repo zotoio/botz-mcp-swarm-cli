@@ -947,7 +947,7 @@ function withStoredSuite(doc: SuiteVersionDocument): SuiteVersionDocument {
 export async function saveSuiteVersion(
   projectId: string,
   suiteId: string,
-  input: { name?: string; nodes: SuiteNode[]; load: LoadProfile; basedOn?: number; slo?: CallSlo | null; serverSlo?: Record<string, CallSlo> | null; limits?: SuiteLimitsInput | null },
+  input: { name?: string; nodes: SuiteNode[]; load: LoadProfile; basedOn?: number; slo?: CallSlo | null; serverSlo?: Record<string, CallSlo> | null; limits?: SuiteLimitsInput | null; changelog?: string },
   options?: ProjectStoreOptions,
 ): Promise<SuiteVersionDocument | null> {
   const project = await loadRecord(projectId, options);
@@ -980,7 +980,8 @@ export async function saveSuiteVersion(
     catalogFingerprint: catalogFingerprint(server.catalog),
     basedOn,
   };
-  doc.changelog = computeDeterministicSuiteChangelog(doc, parent);
+  // An explicit changelog (e.g. from a server update) is authoritative.
+  doc.changelog = input.changelog?.trim() ? input.changelog.trim().slice(0, 4000) : computeDeterministicSuiteChangelog(doc, parent);
   doc.changelogStatus = "fallback";
   doc.changelogUpdatedAt = doc.createdAt;
   await writeSuiteVersion(project, suite, doc, options);
