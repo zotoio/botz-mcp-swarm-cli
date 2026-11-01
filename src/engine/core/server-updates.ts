@@ -82,6 +82,8 @@ export interface SuiteChangeProposal {
   afterExpect?: { inputSchema?: unknown; outputSchema?: unknown };
   /** Regenerated tool evals (prompt states the concrete arg values; assertions check them). */
   afterEvals?: SuiteNode["evals"];
+  /** Extractor steps: new `path` (e.g. a placeholder `||agent-fixture` fallback replaced by a real id). */
+  afterPath?: string;
   /** `add-step` only: the generated step inserted (before teardown) when accepted. */
   newNode?: SuiteNode;
   /** Suite version the proposal was computed against; accept re-checks it so later edits are not clobbered. */
@@ -466,6 +468,7 @@ export function applySuiteChanges(
       }
       else if (p.action === "refresh-args" && p.afterArgs) copy.args = { ...p.afterArgs };
       if (p.action === "refresh-args" && p.afterEvals) copy.evals = structuredClone(p.afterEvals);
+      if (p.action === "refresh-args" && p.afterPath !== undefined) copy.path = p.afterPath;
       if (p.action !== "disable-step" && p.afterExpect) {
         const expect: Record<string, unknown> = { ...((copy.expect ?? {}) as Record<string, unknown>) };
         for (const [key, value] of Object.entries(p.afterExpect)) {
@@ -675,7 +678,75 @@ export function proposeStepResync(input: ImpactInput, next: SurfaceSnapshot, opt
 /** Everything "Update suite from server" would do to one suite, independent of the stored snapshot. */
 export function suiteRefreshProposals(input: ImpactInput, next: SurfaceSnapshot, opts: { regenerateAll?: boolean; modern?: boolean; removedMethods?: ReadonlySet<string>; references?: ReferenceValues } = {}): SuiteChangeProposal[] {
   const drift = suiteDriftProposals(input, next, opts);
-  return mergeProposals(mergeProposals(drift, proposeStepResync(input, next, opts)), proposeMissingSteps(input, next, opts.references));
+  const fallbacks = proposeExtractorFallbacks(input, opts.references, next);
+  return mergeProposals(mergeProposals(mergeProposals(drift, proposeStepResync(input, next, opts)), proposeMissingSteps(input, next, opts.references)), fallbacks);
+}
+
+interface PlaceholderFallback { nodeId: string; label?: string; variable: string; placeholder: string; real: string; path: string }
+
+/** Extractors whose `||fallback` is a sampler placeholder (`agent-fixture`) for a domain the server resolved. */
+export function placeholderFallbacks(nodes: SuiteNode[], references?: ReferenceValues): PlaceholderFallback[] {
+  if (!references || !Object.keys(references).length) return [];
+  const out: PlaceholderFallback[] = [];
+  const walk = (list: SuiteNode[]) => {
+    for (const node of list) {
+      if (node.children?.length) walk(node.children);
+      if (node.type !== "extractor" || !node.variable || typeof node.path !== "string" || !node.path.includes("||")) continue;
+      const domain = /^([a-z]+)_(?:name|id|slug)$/i.exec(node.variable)?.[1]?.toLowerCase();
+      const real = domain ? references[domain] : undefined;
+      const idx = node.path.lastIndexOf("||");
+      const placeholder = node.path.slice(idx + 2).trim();
+      if (!real || !isPlaceholderValue(placeholder) || placeholder === real) continue;
+      out.push({ nodeId: node.id, ...(node.label ? { label: node.label } : {}), variable: node.variable, placeholder, real, path: `${node.path.slice(0, idx)}||${real}` });
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+/** Steps whose args read `variable` (`${v}` / `{{v}}`). */
+function consumersOf(nodes: SuiteNode[], variable: string): SuiteNode[] {
+  const re = new RegExp(`\\$\\{${variable}\\}|\\{\\{\\s*${variable}\\s*\\}\\}`);
+  const out: SuiteNode[] = [];
+  const walk = (list: SuiteNode[]) => { for (const n of list) { if (n.children?.length) walk(n.children); if (n.type === "sampler" && re.test(JSON.stringify(n.args ?? {}))) out.push(n); } };
+  walk(nodes);
+  return out;
+}
+
+/**
+ * When no producer step yields an id (e.g. the search tool is disabled on this server), an extractor's placeholder
+ * fallback becomes the value every consumer passes. Point the fallback at a real id discovered on the server, and
+ * rewrite consumer eval prompts/assertions that quote the placeholder so the judge checks the real value.
+ */
+export function proposeExtractorFallbacks(input: ImpactInput, references?: ReferenceValues, next?: SurfaceSnapshot): SuiteChangeProposal[] {
+  const out: SuiteChangeProposal[] = [];
+  const base = {
+    suiteId: input.suiteId,
+    ...(input.suiteName ? { suiteName: input.suiteName } : {}),
+    ...(input.suiteVersion !== undefined ? { suiteVersion: input.suiteVersion } : {}),
+    source: "coverage" as const,
+  };
+  for (const fb of placeholderFallbacks(input.nodes, references)) {
+    const consumers = consumersOf(input.nodes, fb.variable);
+    const key = consumers.find((c) => c.tool)?.tool ?? fb.variable;
+    out.push({ ...base, id: `${input.suiteId}:${fb.nodeId}:extractor:${fb.variable}`, nodeId: fb.nodeId, nodeLabel: fb.label ?? `Extract ${fb.variable}`, primitive: { kind: "tool", key, change: "changed", fields: ["inputSchema"] }, action: "refresh-args", reason: `Extractor '${fb.variable}' falls back to placeholder '${fb.placeholder}'; use the real id '${fb.real}' discovered on the server.`, afterPath: fb.path });
+    const quote = (text: string) => text.split(fb.placeholder).join(fb.real);
+    const varRe = new RegExp(`\\$\\{${fb.variable}\\}|\\{\\{\\s*${fb.variable}\\s*\\}\\}`, "g");
+    for (const node of consumers) {
+      if (!node.evals?.length) continue;
+      let afterEvals = node.evals.map((e) => ({ ...e, prompt: quote(e.prompt), assertions: e.assertions.map((a) => ({ ...a, text: quote(a.text) })) }));
+      // Built-in evals that only say "Include name." get the concrete value the step will actually send.
+      const tool = next?.tools.find((t) => t.name === node.tool);
+      if (tool) {
+        const effective = JSON.parse(JSON.stringify(node.args ?? {}).replace(varRe, fb.real)) as Record<string, unknown>;
+        const required = ((tool.inputSchema as JsonSchema | undefined)?.required ?? []) as string[];
+        if (toolEvalsNeedRefresh(afterEvals, effective, required)) afterEvals = mergeAutoEvals(afterEvals, defaultToolEvals(tool, effective));
+      }
+      if (stableJson(afterEvals) === stableJson(node.evals)) continue;
+      out.push({ ...base, id: `${input.suiteId}:${node.id}:evals:${fb.variable}`, nodeId: node.id, ...(node.label ? { nodeLabel: node.label } : {}), primitive: { kind: "tool", key: node.tool ?? key, change: "changed", fields: ["inputSchema"] }, action: "refresh-args", reason: `Eval prompts quote placeholder '${fb.placeholder}' for ${fb.variable}; use the real id '${fb.real}'.`, afterEvals });
+    }
+  }
+  return out;
 }
 
 function hasVariableRef(args: Record<string, unknown>): boolean {

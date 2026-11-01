@@ -541,7 +541,7 @@ export function toolEvalsNeedRefresh(evals: ToolEvalCase[] | undefined, args: Re
   if (!evals?.length) return false;
   const pos = evals.find((e) => e.polarity === "positive" && /^auto-.*-pos$/.test(e.id));
   if (!pos) return false;
-  return required.some((key) => args && key in args && !isVariableToken(args[key]) && !pos.prompt.includes(JSON.stringify(args[key])));
+  return required.some((key) => args && key in args && !isVariableToken(args[key]) && !pos.prompt.includes(typeof args[key] === "string" ? (args[key] as string) : JSON.stringify(args[key])));
 }
 
 export function blankSuiteNode(type: SuiteNodeType): SuiteNode {

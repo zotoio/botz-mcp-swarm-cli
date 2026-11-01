@@ -93,3 +93,36 @@ describe("Smoke v85 regressions: schema-valid fixture args", () => {
     }
   });
 });
+
+describe("Smoke v87 regression: extractor placeholder fallback with no producer step", () => {
+  it("points `||agent-fixture` at the resolved agent and rewrites consumer evals quoting it", async () => {
+    const { suiteRefreshProposals } = await import("./server-updates.js");
+    const nodes = [
+      { id: "nmvnnz27f1c", type: "sampler", enabled: false, method: "tools/call", tool: "agent_search", args: { query: "x" } },
+      { id: "nmvrp5c3j3", type: "extractor", enabled: true, variable: "agent_name", path: "structuredContent.matches.0.name|agents.0.name||agent-fixture" },
+      { id: "nmvxksdu62", type: "sampler", enabled: true, method: "tools/call", tool: "agent_install", args: { name: "{{agent_name}}" }, evals: [{ id: "auto-agent_install-pos", polarity: "positive", prompt: "Build an install plan for the subagent named 'agent-fixture' (pass name='agent-fixture').", assertions: [{ id: "a", text: "Called agent_install with name 'agent-fixture'." }] }] },
+    ] as never[];
+    const proposals = suiteRefreshProposals({ suiteId: "s", nodes, callsServer: () => true } as never, snap, { references: { agent: "fixture-agent" } });
+    const { nodes: out } = applySuiteChanges(nodes, proposals);
+    const by = Object.fromEntries((out as Array<{ id: string; path?: string; args?: Record<string, unknown>; evals?: Array<{ prompt: string; assertions: Array<{ text: string }> }> }>).map((n) => [n.id, n]));
+    expect(by.nmvrp5c3j3!.path).toBe("structuredContent.matches.0.name|agents.0.name||fixture-agent");
+    expect(by.nmvxksdu62!.args).toEqual({ name: "{{agent_name}}" });
+    expect(by.nmvxksdu62!.evals![0]!.prompt).toContain("'fixture-agent'");
+    expect(by.nmvxksdu62!.evals![0]!.prompt).not.toContain("agent-fixture");
+    expect(by.nmvxksdu62!.evals![0]!.assertions[0]!.text).toContain("'fixture-agent'");
+  });
+});
+
+describe("Smoke v87 regression: variable-arg steps with built-in 'Include name.' evals", () => {
+  it("regenerates them with the value the extractor fallback will send", async () => {
+    const { suiteRefreshProposals } = await import("./server-updates.js");
+    const nodes = [
+      { id: "x1", type: "extractor", enabled: true, variable: "agent_name", path: "agents.0.name||agent-fixture" },
+      { id: "nmvxksdu61", type: "sampler", enabled: true, method: "tools/call", tool: "agent_diff", args: { name: "{{agent_name}}", from_version: 1 }, evals: defaultToolEvals(agentDiff as never) },
+    ] as never[];
+    const proposals = suiteRefreshProposals({ suiteId: "s", nodes, callsServer: () => true } as never, snap, { references: { agent: "fixture-agent" } });
+    const { nodes: out } = applySuiteChanges(nodes, proposals);
+    const diff = (out as Array<{ id: string; evals?: Array<{ polarity: string; prompt: string }> }>).find((n) => n.id === "nmvxksdu61")!;
+    expect(diff.evals!.find((e) => e.polarity === "positive")!.prompt).toContain('name = "fixture-agent", from_version = 1');
+  });
+});
