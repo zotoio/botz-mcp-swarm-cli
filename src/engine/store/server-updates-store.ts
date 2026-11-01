@@ -3,6 +3,8 @@
  * Everything is stored as optional fields on the existing project.json record, so older records load unchanged.
  */
 import { introspectServer } from "../core/suite-introspect.js";
+import { discoverReferenceValues } from "../core/reference-discovery.js";
+import type { ReferenceValues } from "../core/tool-args.js";
 import {
   applySuiteChanges,
   diffSnapshots,
@@ -101,12 +103,13 @@ export function suiteProposals(
   input: { suiteId: string; suiteName?: string; suiteVersion?: number; nodes: SuiteNode[]; callsServer: (alias: string | undefined) => boolean },
   diff: SurfaceDiff | null,
   next: SurfaceSnapshot,
+  references?: ReferenceValues,
 ): SuiteChangeProposal[] {
-  const fromDiff = diff?.changed ? proposeSuiteChanges(input, diff, next) : [];
+  const fromDiff = diff?.changed ? proposeSuiteChanges(input, diff, next, references) : [];
   const drift = suiteDriftProposals(input, next, { modern: isModernEra(next.protocolVersion), removedMethods: MODERN_REMOVED_METHODS });
   // Compare against the suite's actual steps too: anything advertised that this suite has no step for.
   const adding = new Set(fromDiff.filter((p) => p.action === "add-step").map((p) => `${p.primitive.kind}:${p.primitive.key}`));
-  const missing = proposeMissingSteps(input, next).filter((p) => !adding.has(`${p.primitive.kind}:${p.primitive.key}`));
+  const missing = proposeMissingSteps(input, next, references).filter((p) => !adding.has(`${p.primitive.kind}:${p.primitive.key}`));
   return mergeProposals(mergeProposals(fromDiff, drift), missing);
 }
 
@@ -116,12 +119,13 @@ async function proposalsFor(
   diff: SurfaceDiff | null,
   next: SurfaceSnapshot,
   options?: ProjectStoreOptions,
+  references?: ReferenceValues,
 ): Promise<SuiteChangeProposal[]> {
   const out: SuiteChangeProposal[] = [];
   for (const suite of project.suites) {
     const doc = await loadSuiteVersion(project.id, suite.id, suite.currentVersion, options);
     if (!doc) continue;
-    out.push(...suiteProposals({ suiteId: suite.id, suiteName: suite.name, suiteVersion: suite.currentVersion, nodes: doc.nodes as SuiteNode[], callsServer: suiteCallsServer(project, suite, serverId) }, diff, next));
+    out.push(...suiteProposals({ suiteId: suite.id, suiteName: suite.name, suiteVersion: suite.currentVersion, nodes: doc.nodes as SuiteNode[], callsServer: suiteCallsServer(project, suite, serverId) }, diff, next, references));
   }
   return out;
 }
@@ -132,7 +136,7 @@ async function proposalsFor(
  */
 export async function checkServerUpdates(
   projectId: string,
-  input: { serverId?: string; serverIds?: string[]; probe?: ProbeFn } = {},
+  input: { serverId?: string; serverIds?: string[]; probe?: ProbeFn; resolveReferences?: (target: ProjectServer["target"], tools: SurfaceSnapshot["tools"]) => Promise<ReferenceValues> } = {},
   options?: ProjectStoreOptions,
 ): Promise<ServerUpdateCheck[] | null> {
   const project = await getProject(projectId, options);
@@ -155,7 +159,12 @@ export async function checkServerUpdates(
       if (!previous.protocolVersion && current.protocolVersion) previous = { ...previous, protocolVersion: current.protocolVersion };
       const diff = diffSnapshots(previous, current);
       // Drift is checked on every probe: a suite can expect something the server never offered or the era removed.
-      const proposals = await proposalsFor(project, server.id, diff, current, options);
+      const resolve = input.resolveReferences ?? (input.probe ? undefined : (target: ProjectServer["target"], tools: SurfaceSnapshot["tools"]) => discoverReferenceValues(target, tools));
+      let references: ReferenceValues = {};
+      if (resolve) {
+        try { references = await resolve(server.target, current.tools); } catch { references = {}; }
+      }
+      const proposals = await proposalsFor(project, server.id, diff, current, options, references);
       if (current.protocolVersion) protocols.set(server.id, current.protocolVersion);
       const hash = snapshotHash(current);
       const era = protocolEraFor(current.protocolVersion);
@@ -417,7 +426,7 @@ function serversForSuite(project: ProjectRecord, suite: SuitePointer, nodes: Sui
 export async function updateSuiteFromServer(
   projectId: string,
   suiteId: string,
-  input: { serverIds?: string[]; regenerateAll?: boolean; dryRun?: boolean; acceptChangeIds?: string[]; principal?: string; notes?: string; probe?: ProbeFn } = {},
+  input: { serverIds?: string[]; regenerateAll?: boolean; dryRun?: boolean; acceptChangeIds?: string[]; principal?: string; notes?: string; probe?: ProbeFn; resolveReferences?: (target: ProjectServer["target"], tools: SurfaceSnapshot["tools"]) => Promise<ReferenceValues> } = {},
   options?: ProjectStoreOptions,
 ): Promise<UpdateSuiteFromServerResult | { error: "project_not_found" | "suite_not_found" | "server_not_found" | "probe_failed"; message?: string }> {
   const project = await getProject(projectId, options);
@@ -442,7 +451,14 @@ export async function updateSuiteFromServer(
       const current = snapshotFromSurface(asSurface(await probe(server.target)), checkedAt);
       snapshots.set(server.id, current);
       const impact = { suiteId, suiteName: pointer.name, suiteVersion: pointer.currentVersion, nodes, callsServer: suiteCallsServer(project, pointer, server.id) };
-      const proposals = suiteRefreshProposals(impact, current, { regenerateAll, modern: isModernEra(current.protocolVersion), removedMethods: MODERN_REMOVED_METHODS });
+      // Real identifiers for entity-reference params (e.g. an agent slug), so steps never pass placeholders or the
+      // wrong kind. Read-only discovery calls only; an injected probe (tests) skips it unless a resolver is given.
+      const resolve = input.resolveReferences ?? (input.probe ? undefined : (target: ProjectServer["target"], tools: SurfaceSnapshot["tools"]) => discoverReferenceValues(target, tools));
+      let references: ReferenceValues = {};
+      if (resolve) {
+        try { references = await resolve(server.target, current.tools); } catch { references = {}; }
+      }
+      const proposals = suiteRefreshProposals(impact, current, { regenerateAll, modern: isModernEra(current.protocolVersion), removedMethods: MODERN_REMOVED_METHODS, references });
       all.push(...proposals);
       report.push({ serverId: server.id, serverName: server.name, checkedAt, ...(current.protocolVersion ? { protocolVersion: current.protocolVersion } : {}), ...(current.serverVersion ? { serverVersion: current.serverVersion } : {}), coverage: suiteCoverage(impact, current) });
     } catch (error) {

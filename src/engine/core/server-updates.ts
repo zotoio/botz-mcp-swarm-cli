@@ -12,8 +12,9 @@ import type {
   SuiteNode,
   ToolCatalogEntry,
 } from "./suite-model.js";
-import { defaultToolEvals, insertBeforeTeardown, newNodeId, toolIsCalledByDefault } from "./suite-model.js";
-import { sampleArgsForTool, type JsonSchema } from "./tool-args.js";
+import { defaultToolEvals, insertBeforeTeardown, newNodeId, toolEvalsNeedRefresh, toolIsCalledByDefault } from "./suite-model.js";
+import { schemaAccepts } from "./contract.js";
+import { applyReferenceValues, isPlaceholderValue, referenceParams, sampleArgsForTool, type JsonSchema, type ReferenceValues } from "./tool-args.js";
 
 /** `method` is a JSON-RPC method the server's protocol era no longer offers (e.g. `ping` on 2026-07-28). */
 export type PrimitiveKind = "tool" | "resource" | "resourceTemplate" | "prompt" | "method";
@@ -79,6 +80,8 @@ export interface SuiteChangeProposal {
    * with the accepted catalog. `null` clears a pinned schema the server no longer declares.
    */
   afterExpect?: { inputSchema?: unknown; outputSchema?: unknown };
+  /** Regenerated tool evals (prompt states the concrete arg values; assertions check them). */
+  afterEvals?: SuiteNode["evals"];
   /** `add-step` only: the generated step inserted (before teardown) when accepted. */
   newNode?: SuiteNode;
   /** Suite version the proposal was computed against; accept re-checks it so later edits are not clobbered. */
@@ -215,10 +218,10 @@ export interface ImpactInput {
  * Proposals for one suite. Only steps that reference a removed or changed primitive are touched;
  * added primitives never rewrite existing suites.
  */
-export function proposeSuiteChanges(input: ImpactInput, diff: SurfaceDiff, next: SurfaceSnapshot): SuiteChangeProposal[] {
+export function proposeSuiteChanges(input: ImpactInput, diff: SurfaceDiff, next: SurfaceSnapshot, references?: ReferenceValues): SuiteChangeProposal[] {
   const out: SuiteChangeProposal[] = [];
   const relevant = diff.primitives.filter((p) => p.change !== "added");
-  if (!relevant.length) return [...out, ...proposeAddedSteps(input, diff, next)];
+  if (!relevant.length) return [...out, ...proposeAddedSteps(input, diff, next, references)];
   const walk = (list: SuiteNode[], alias: string | undefined, scenario?: { id: string; name: string }) => {
     for (const node of list) {
       const ownAlias = node.server ?? alias;
@@ -253,7 +256,7 @@ export function proposeSuiteChanges(input: ImpactInput, diff: SurfaceDiff, next:
     }
   };
   walk(input.nodes, undefined);
-  return [...out, ...proposeAddedSteps(input, diff, next)];
+  return [...out, ...proposeAddedSteps(input, diff, next, references)];
 }
 
 /** Slots (`tools/call:name`, ...) the suite already calls on this server, and the explicit alias its steps use for it. */
@@ -276,11 +279,12 @@ function serverSlots(input: ImpactInput): { slots: Set<string>; alias?: string }
 }
 
 /** A generated contract step for one newly advertised primitive (same shape as a freshly generated suite). */
-export function stepForAddedPrimitive(change: PrimitiveChange, next: SurfaceSnapshot, serverAlias?: string): SuiteNode | null {
+export function stepForAddedPrimitive(change: PrimitiveChange, next: SurfaceSnapshot, serverAlias?: string, references?: ReferenceValues): SuiteNode | null {
   const server = serverAlias ? { server: serverAlias } : {};
   if (change.kind === "tool") {
     const tool = next.tools.find((t) => t.name === change.key);
     if (!tool) return null;
+    const args = sampleArgsForTool({ name: tool.name, inputSchema: tool.inputSchema }, references);
     return {
       id: newNodeId(),
       type: "sampler",
@@ -288,14 +292,14 @@ export function stepForAddedPrimitive(change: PrimitiveChange, next: SurfaceSnap
       label: tool.name,
       method: "tools/call",
       tool: tool.name,
-      args: sampleArgsForTool({ name: tool.name, inputSchema: tool.inputSchema }),
+      args,
       expect: {
         resultShape: "tools/call",
         ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
         // Output contract check: structuredContent must validate against the advertised outputSchema.
         ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
       },
-      evals: defaultToolEvals(tool),
+      evals: defaultToolEvals(tool, args),
       ...server,
     } as SuiteNode;
   }
@@ -319,7 +323,7 @@ export function stepForAddedPrimitive(change: PrimitiveChange, next: SurfaceSnap
  * server gets untagged steps; a multi-server suite that calls it through an alias gets steps tagged with that
  * `server` alias. Suites that never call the server get nothing, and a primitive is never added twice.
  */
-export function proposeAddedSteps(input: ImpactInput, diff: SurfaceDiff, next: SurfaceSnapshot): SuiteChangeProposal[] {
+export function proposeAddedSteps(input: ImpactInput, diff: SurfaceDiff, next: SurfaceSnapshot, references?: ReferenceValues): SuiteChangeProposal[] {
   const isDefault = input.callsServer(undefined);
   const { slots: present, alias } = serverSlots(input);
   if (!isDefault && !alias) return [];
@@ -327,7 +331,7 @@ export function proposeAddedSteps(input: ImpactInput, diff: SurfaceDiff, next: S
   const out: SuiteChangeProposal[] = [];
   for (const change of diff.primitives) {
     if (change.change !== "added" || present.has(`${change.kind}:${change.key}`)) continue;
-    const node = stepForAddedPrimitive(change, next, tag);
+    const node = stepForAddedPrimitive(change, next, tag, references);
     if (!node) continue;
     const contract = node.expect?.outputSchema ? " with input + outputSchema contract checks" : node.expect?.inputSchema ? " with an inputSchema contract check" : "";
     out.push({
@@ -461,6 +465,7 @@ export function applySuiteChanges(
         copy.retired = { at: now, reason: p.reason, primitive: `${p.primitive.kind}:${p.primitive.key}` };
       }
       else if (p.action === "refresh-args" && p.afterArgs) copy.args = { ...p.afterArgs };
+      if (p.action === "refresh-args" && p.afterEvals) copy.evals = structuredClone(p.afterEvals);
       if (p.action !== "disable-step" && p.afterExpect) {
         const expect: Record<string, unknown> = { ...((copy.expect ?? {}) as Record<string, unknown>) };
         for (const [key, value] of Object.entries(p.afterExpect)) {
@@ -597,10 +602,10 @@ export function suiteCoverage(input: ImpactInput, next: SurfaceSnapshot): Covera
 }
 
 /** `add-step` proposals for every advertised primitive this suite has no step for (compares suite contents, not the snapshot). */
-export function proposeMissingSteps(input: ImpactInput, next: SurfaceSnapshot): SuiteChangeProposal[] {
+export function proposeMissingSteps(input: ImpactInput, next: SurfaceSnapshot, references?: ReferenceValues): SuiteChangeProposal[] {
   const missing = suiteCoverage(input, next).filter((c) => c.status === "missing");
   const diff: SurfaceDiff = { changed: true, meta: [], capabilities: { added: [], removed: [] }, primitives: missing.map((m) => ({ kind: m.kind, key: m.key, change: "added" as const })), summary: "" };
-  return proposeAddedSteps(input, diff, next).map((p) => ({
+  return proposeAddedSteps(input, diff, next, references).map((p) => ({
     ...p,
     id: `${input.suiteId}:cover:${p.primitive.kind}:${p.primitive.key}`,
     source: "coverage" as const,
@@ -613,7 +618,7 @@ export function proposeMissingSteps(input: ImpactInput, next: SurfaceSnapshot): 
  * input/outputSchema contracts, and an outputSchema contract check for tools that now declare one.
  * With `regenerateAll`, every enabled tool/prompt step gets freshly generated args and contracts.
  */
-export function proposeStepResync(input: ImpactInput, next: SurfaceSnapshot, opts: { regenerateAll?: boolean } = {}): SuiteChangeProposal[] {
+export function proposeStepResync(input: ImpactInput, next: SurfaceSnapshot, opts: { regenerateAll?: boolean; references?: ReferenceValues } = {}): SuiteChangeProposal[] {
   const out: SuiteChangeProposal[] = [];
   const tools = new Map(next.tools.map((t) => [t.name, t]));
   const prompts = new Map(next.prompts.map((p) => [p.name, p]));
@@ -642,11 +647,16 @@ export function proposeStepResync(input: ImpactInput, next: SurfaceSnapshot, opt
         else if (!pinned && now && (key === "outputSchema" || opts.regenerateAll)) afterExpect[key] = now;
       }
       const resynced = refreshedArgs(node, primitive, next) ?? { ...(node.args ?? {}) };
-      const afterArgs = opts.regenerateAll ? sampleArgsForTool({ name: tool.name, inputSchema: tool.inputSchema }) : resynced;
+      const descriptor = { name: tool.name, inputSchema: tool.inputSchema as JsonSchema | undefined };
+      let afterArgs = opts.regenerateAll ? sampleArgsForTool(descriptor, opts.references) : repairArgs(descriptor, resynced, opts.references);
       const argsMove = stableJson(afterArgs) !== stableJson(node.args ?? {});
-      if (!argsMove && !Object.keys(afterExpect).length) continue;
-      const what = [argsMove ? "args" : "", ...Object.keys(afterExpect).map((k) => `expect.${k}`)].filter(Boolean).join(", ");
-      out.push({ ...base, primitive, id, action: "refresh-args", reason: `${opts.regenerateAll ? "Regenerate" : "Re-sync"} tool '${tool.name}' step to the live definition (${what}).`, beforeArgs: node.args ?? {}, afterArgs, ...(Object.keys(afterExpect).length ? { afterExpect } : {}) });
+      const required = ((tool.inputSchema as JsonSchema | undefined)?.required ?? []) as string[];
+      const evalsStale = (argsMove && hasAutoEvals(node.evals)) || toolEvalsNeedRefresh(node.evals, afterArgs, required);
+      const afterEvals = evalsStale ? mergeAutoEvals(node.evals, defaultToolEvals(tool, afterArgs)) : undefined;
+      if (!argsMove && !Object.keys(afterExpect).length && !afterEvals) continue;
+      if (!argsMove) afterArgs = { ...(node.args ?? {}) };
+      const what = [argsMove ? "args" : "", ...Object.keys(afterExpect).map((k) => `expect.${k}`), afterEvals ? "evals (concrete values)" : ""].filter(Boolean).join(", ");
+      out.push({ ...base, primitive, id, action: "refresh-args", reason: `${opts.regenerateAll ? "Regenerate" : "Re-sync"} tool '${tool.name}' step to the live definition (${what}).`, beforeArgs: node.args ?? {}, afterArgs, ...(Object.keys(afterExpect).length ? { afterExpect } : {}), ...(afterEvals ? { afterEvals } : {}) });
       continue;
     }
     if (node.method === "prompts/get" && node.prompt && prompts.has(node.prompt)) {
@@ -663,9 +673,66 @@ export function proposeStepResync(input: ImpactInput, next: SurfaceSnapshot, opt
 }
 
 /** Everything "Update suite from server" would do to one suite, independent of the stored snapshot. */
-export function suiteRefreshProposals(input: ImpactInput, next: SurfaceSnapshot, opts: { regenerateAll?: boolean; modern?: boolean; removedMethods?: ReadonlySet<string> } = {}): SuiteChangeProposal[] {
+export function suiteRefreshProposals(input: ImpactInput, next: SurfaceSnapshot, opts: { regenerateAll?: boolean; modern?: boolean; removedMethods?: ReadonlySet<string>; references?: ReferenceValues } = {}): SuiteChangeProposal[] {
   const drift = suiteDriftProposals(input, next, opts);
-  return mergeProposals(mergeProposals(drift, proposeStepResync(input, next, opts)), proposeMissingSteps(input, next));
+  return mergeProposals(mergeProposals(drift, proposeStepResync(input, next, opts)), proposeMissingSteps(input, next, opts.references));
+}
+
+function hasVariableRef(args: Record<string, unknown>): boolean {
+  return /\$\{[^}]+\}|\{\{[^}]+\}\}/.test(JSON.stringify(args));
+}
+
+/**
+ * Args a step keeps must validate against the live inputSchema (e.g. `manifest: "fixture"` against
+ * `array | object` is replaced by a schema-valid sample), and placeholder values of entity-reference params
+ * (`name: "fixture"` on an agent tool) are replaced by a real identifier discovered on the server.
+ */
+export function repairArgs(tool: { name: string; inputSchema?: JsonSchema }, args: Record<string, unknown>, references?: ReferenceValues): Record<string, unknown> {
+  let out = applyReferenceValues(tool, { ...args }, references);
+  const schema = tool.inputSchema as Record<string, unknown> | undefined;
+  if (schema && !hasVariableRef(out) && !schemaAccepts(schema, out)) {
+    const sample = sampleArgsForTool(tool, references);
+    const props = (tool.inputSchema?.properties ?? {}) as Record<string, JsonSchema>;
+    const fixed: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(out)) {
+      if (props[key] && !schemaAccepts(props[key] as Record<string, unknown>, value)) {
+        if (key in sample) fixed[key] = sample[key];
+      } else fixed[key] = value;
+    }
+    for (const key of tool.inputSchema?.required ?? []) if (!(key in fixed) && key in sample) fixed[key] = sample[key];
+    out = schemaAccepts(schema, fixed) ? fixed : sample;
+  }
+  return out;
+}
+
+/** Placeholder values left on reference params (for reporting; the store resolves real ones). */
+export function placeholderReferenceDomains(tools: Array<{ name: string; inputSchema?: unknown }>, nodes: SuiteNode[]): string[] {
+  const byName = new Map(tools.map((t) => [t.name, t]));
+  const out = new Set<string>();
+  const walk = (list: SuiteNode[]) => {
+    for (const node of list) {
+      if (node.children?.length) walk(node.children);
+      const tool = node.method === "tools/call" && node.tool ? byName.get(node.tool) : undefined;
+      if (!tool) continue;
+      for (const { param, domain } of referenceParams({ name: tool.name, inputSchema: tool.inputSchema as JsonSchema })) {
+        const v = (node.args ?? {})[param];
+        if (v === undefined || isPlaceholderValue(v)) out.add(domain);
+      }
+    }
+  };
+  walk(nodes);
+  return [...out];
+}
+
+function hasAutoEvals(evals: SuiteNode["evals"]): boolean {
+  return Boolean(evals?.some((e) => /^auto-/.test(e.id)));
+}
+
+/** Replace the auto-generated eval cases, keep hand-written ones. */
+function mergeAutoEvals(current: SuiteNode["evals"], fresh: NonNullable<SuiteNode["evals"]>): NonNullable<SuiteNode["evals"]> {
+  const ids = new Set(fresh.map((e) => e.id));
+  const kept = (current ?? []).filter((e) => !ids.has(e.id) && !/^auto-/.test(e.id));
+  return [...fresh, ...kept];
 }
 
 // ---- tags -----------------------------------------------------------------
