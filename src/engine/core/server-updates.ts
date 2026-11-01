@@ -84,7 +84,7 @@ export interface SuiteChangeProposal {
   /** Suite version the proposal was computed against; accept re-checks it so later edits are not clobbered. */
   suiteVersion?: number;
   /** `diff`: the server changed since the stored snapshot. `drift`: the suite expects something the server no longer offers. */
-  source?: "diff" | "drift";
+  source?: "diff" | "drift" | "coverage" | "regenerate";
 }
 
 export function snapshotFromSurface(surface: ServerSurface & { protocolVersion?: string }, takenAt = new Date().toISOString()): SurfaceSnapshot {
@@ -552,6 +552,120 @@ export function suiteDriftProposals(input: ImpactInput, next: SurfaceSnapshot, o
 export function mergeProposals(primary: SuiteChangeProposal[], extra: SuiteChangeProposal[]): SuiteChangeProposal[] {
   const seen = new Set(primary.map((p) => p.id));
   return [...primary, ...extra.filter((p) => !seen.has(p.id))];
+}
+
+// ---- update suite from server (always available) ----------------------------
+
+export interface CoverageItem {
+  kind: "tool" | "prompt" | "resource";
+  key: string;
+  /** `covered`: an enabled step calls it. `disabled`: only disabled/retired steps. `missing`: no step in this suite. */
+  status: "covered" | "disabled" | "missing";
+  nodeIds: string[];
+}
+
+function suiteSteps(input: ImpactInput): Array<{ node: SuiteNode; alias?: string; scenario?: { id: string; name: string } }> {
+  const out: Array<{ node: SuiteNode; alias?: string; scenario?: { id: string; name: string } }> = [];
+  const walk = (list: SuiteNode[], alias: string | undefined, scenario?: { id: string; name: string }) => {
+    for (const node of list) {
+      const own = node.server ?? alias;
+      const sc = node.scenarioMeta ? { id: node.scenarioMeta.id, name: node.scenarioMeta.name } : scenario;
+      if (node.children?.length) walk(node.children, own, sc);
+      if (stepPrimitive(node) && input.callsServer(own)) out.push({ node, alias: own, ...(sc ? { scenario: sc } : {}) });
+    }
+  };
+  walk(input.nodes, undefined);
+  return out;
+}
+
+/** Every tool, prompt and resource the server advertises, and whether THIS suite has a step for it. */
+export function suiteCoverage(input: ImpactInput, next: SurfaceSnapshot): CoverageItem[] {
+  const steps = suiteSteps(input);
+  const items: Array<Pick<CoverageItem, "kind" | "key">> = [
+    ...next.tools.map((t) => ({ kind: "tool" as const, key: t.name })),
+    ...next.prompts.map((p) => ({ kind: "prompt" as const, key: p.name })),
+    ...next.resources.map((r) => ({ kind: "resource" as const, key: r.uri })),
+  ];
+  return items.map((item) => {
+    const hits = steps.filter(({ node }) => {
+      const ref = stepPrimitive(node);
+      return ref?.kind === item.kind && ref.key === item.key;
+    });
+    const status: CoverageItem["status"] = !hits.length ? "missing" : hits.some(({ node }) => node.enabled && !node.retired) ? "covered" : "disabled";
+    return { ...item, status, nodeIds: hits.map(({ node }) => node.id) };
+  });
+}
+
+/** `add-step` proposals for every advertised primitive this suite has no step for (compares suite contents, not the snapshot). */
+export function proposeMissingSteps(input: ImpactInput, next: SurfaceSnapshot): SuiteChangeProposal[] {
+  const missing = suiteCoverage(input, next).filter((c) => c.status === "missing");
+  const diff: SurfaceDiff = { changed: true, meta: [], capabilities: { added: [], removed: [] }, primitives: missing.map((m) => ({ kind: m.kind, key: m.key, change: "added" as const })), summary: "" };
+  return proposeAddedSteps(input, diff, next).map((p) => ({
+    ...p,
+    id: `${input.suiteId}:cover:${p.primitive.kind}:${p.primitive.key}`,
+    source: "coverage" as const,
+    reason: p.reason.replace("is newly advertised", "is advertised but this suite has no step for it"),
+  }));
+}
+
+/**
+ * Re-sync existing steps to the live definitions: args that no longer fit the input schema, pinned
+ * input/outputSchema contracts, and an outputSchema contract check for tools that now declare one.
+ * With `regenerateAll`, every enabled tool/prompt step gets freshly generated args and contracts.
+ */
+export function proposeStepResync(input: ImpactInput, next: SurfaceSnapshot, opts: { regenerateAll?: boolean } = {}): SuiteChangeProposal[] {
+  const out: SuiteChangeProposal[] = [];
+  const tools = new Map(next.tools.map((t) => [t.name, t]));
+  const prompts = new Map(next.prompts.map((p) => [p.name, p]));
+  for (const { node, scenario } of suiteSteps(input)) {
+    if (node.type !== "sampler" || !node.enabled || node.retired) continue;
+    const base = {
+      suiteId: input.suiteId,
+      ...(input.suiteName ? { suiteName: input.suiteName } : {}),
+      ...(input.suiteVersion !== undefined ? { suiteVersion: input.suiteVersion } : {}),
+      source: (opts.regenerateAll ? "regenerate" : "coverage") as "regenerate" | "coverage",
+      nodeId: node.id,
+      ...(node.label ? { nodeLabel: node.label } : {}),
+      ...(scenario ? { scenarioId: scenario.id, scenarioName: scenario.name } : {}),
+    };
+    if (node.method === "tools/call" && node.tool && tools.has(node.tool)) {
+      const tool = tools.get(node.tool)!;
+      const primitive: PrimitiveChange = { kind: "tool", key: tool.name, change: "changed", fields: ["inputSchema", "outputSchema"] };
+      const id = `${input.suiteId}:${node.id}:tool:${tool.name}`;
+      const expect = (node.expect ?? {}) as { inputSchema?: unknown; outputSchema?: unknown };
+      const afterExpect: { inputSchema?: unknown; outputSchema?: unknown } = {};
+      for (const key of ["inputSchema", "outputSchema"] as const) {
+        const now = tool[key];
+        const pinned = expect[key] !== undefined;
+        // Pinned contracts follow the server; a newly declared outputSchema gets a contract check; regenerate pins both.
+        if (pinned && stableJson(expect[key]) !== stableJson(now ?? null)) afterExpect[key] = now ?? null;
+        else if (!pinned && now && (key === "outputSchema" || opts.regenerateAll)) afterExpect[key] = now;
+      }
+      const resynced = refreshedArgs(node, primitive, next) ?? { ...(node.args ?? {}) };
+      const afterArgs = opts.regenerateAll ? sampleArgsForTool({ name: tool.name, inputSchema: tool.inputSchema }) : resynced;
+      const argsMove = stableJson(afterArgs) !== stableJson(node.args ?? {});
+      if (!argsMove && !Object.keys(afterExpect).length) continue;
+      const what = [argsMove ? "args" : "", ...Object.keys(afterExpect).map((k) => `expect.${k}`)].filter(Boolean).join(", ");
+      out.push({ ...base, primitive, id, action: "refresh-args", reason: `${opts.regenerateAll ? "Regenerate" : "Re-sync"} tool '${tool.name}' step to the live definition (${what}).`, beforeArgs: node.args ?? {}, afterArgs, ...(Object.keys(afterExpect).length ? { afterExpect } : {}) });
+      continue;
+    }
+    if (node.method === "prompts/get" && node.prompt && prompts.has(node.prompt)) {
+      const primitive: PrimitiveChange = { kind: "prompt", key: node.prompt, change: "changed", fields: ["arguments"] };
+      const resynced = refreshedArgs(node, primitive, next) ?? { ...(node.args ?? {}) };
+      const afterArgs = opts.regenerateAll
+        ? Object.fromEntries((prompts.get(node.prompt)!.arguments ?? []).filter((a) => a.required).map((a) => [a.name, (node.args ?? {})[a.name] ?? "fixture"]))
+        : resynced;
+      if (stableJson(afterArgs) === stableJson(node.args ?? {})) continue;
+      out.push({ ...base, primitive, id: `${input.suiteId}:${node.id}:prompt:${node.prompt}`, action: "refresh-args", reason: `${opts.regenerateAll ? "Regenerate" : "Re-sync"} prompt '${node.prompt}' step arguments to the live definition.`, beforeArgs: node.args ?? {}, afterArgs });
+    }
+  }
+  return out;
+}
+
+/** Everything "Update suite from server" would do to one suite, independent of the stored snapshot. */
+export function suiteRefreshProposals(input: ImpactInput, next: SurfaceSnapshot, opts: { regenerateAll?: boolean; modern?: boolean; removedMethods?: ReadonlySet<string> } = {}): SuiteChangeProposal[] {
+  const drift = suiteDriftProposals(input, next, opts);
+  return mergeProposals(mergeProposals(drift, proposeStepResync(input, next, opts)), proposeMissingSteps(input, next));
 }
 
 // ---- tags -----------------------------------------------------------------
