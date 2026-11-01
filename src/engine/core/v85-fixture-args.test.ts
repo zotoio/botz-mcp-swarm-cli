@@ -106,7 +106,7 @@ describe("Smoke v87 regression: extractor placeholder fallback with no producer 
     const { nodes: out } = applySuiteChanges(nodes, proposals);
     const by = Object.fromEntries((out as Array<{ id: string; path?: string; args?: Record<string, unknown>; evals?: Array<{ prompt: string; assertions: Array<{ text: string }> }> }>).map((n) => [n.id, n]));
     expect(by.nmvrp5c3j3!.path).toBe("structuredContent.matches.0.name|agents.0.name||fixture-agent");
-    expect(by.nmvxksdu62!.args).toEqual({ name: "{{agent_name}}" });
+    expect(by.nmvxksdu62!.args).toEqual({ name: "${agent_name}" });
     expect(by.nmvxksdu62!.evals![0]!.prompt).toContain("'fixture-agent'");
     expect(by.nmvxksdu62!.evals![0]!.prompt).not.toContain("agent-fixture");
     expect(by.nmvxksdu62!.evals![0]!.assertions[0]!.text).toContain("'fixture-agent'");
@@ -124,5 +124,13 @@ describe("Smoke v87 regression: variable-arg steps with built-in 'Include name.'
     const { nodes: out } = applySuiteChanges(nodes, proposals);
     const diff = (out as Array<{ id: string; evals?: Array<{ polarity: string; prompt: string }> }>).find((n) => n.id === "nmvxksdu61")!;
     expect(diff.evals!.find((e) => e.polarity === "positive")!.prompt).toContain('name = "fixture-agent", from_version = 1');
+  });
+});
+
+describe("Smoke v88 regression: mustache variable refs", () => {
+  it("rewrites {{agent_name}} to ${agent_name} so the runner substitutes it", async () => {
+    const { normalizeVariableRefs } = await import("./server-updates.js");
+    expect(normalizeVariableRefs({ name: "{{agent_name}}", m: [{ id: "{{ skill_name }}" }] })).toEqual({ name: "${agent_name}", m: [{ id: "${skill_name}" }] });
+    expect(repairArgs(agentInstall as never, { name: "{{agent_name}}" })).toEqual({ name: "${agent_name}" });
   });
 });

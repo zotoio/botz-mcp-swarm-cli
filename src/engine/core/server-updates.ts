@@ -758,8 +758,19 @@ function hasVariableRef(args: Record<string, unknown>): boolean {
  * `array | object` is replaced by a schema-valid sample), and placeholder values of entity-reference params
  * (`name: "fixture"` on an agent tool) are replaced by a real identifier discovered on the server.
  */
+/**
+ * The runner only substitutes `${name}`. Mustache-style `{{name}}` refs (written by hand or by an LLM-suggested fix)
+ * reach the server verbatim (Smoke v88: agent_install({name: "{{agent_name}}"})). Rewrite them to `${name}`.
+ */
+export function normalizeVariableRefs<T>(value: T): T {
+  if (typeof value === "string") return value.replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (_m, name: string) => `\${${name}}`) as T;
+  if (Array.isArray(value)) return value.map((v) => normalizeVariableRefs(v)) as T;
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, normalizeVariableRefs(v)])) as T;
+  return value;
+}
+
 export function repairArgs(tool: { name: string; inputSchema?: JsonSchema }, args: Record<string, unknown>, references?: ReferenceValues): Record<string, unknown> {
-  let out = applyReferenceValues(tool, { ...args }, references);
+  let out = applyReferenceValues(tool, normalizeVariableRefs({ ...args }), references);
   const schema = tool.inputSchema as Record<string, unknown> | undefined;
   if (schema && !hasVariableRef(out) && !schemaAccepts(schema, out)) {
     const sample = sampleArgsForTool(tool, references);
