@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.17.0
+
+- Force detect changes: `project server updates` (alias `force-detect`) takes several servers (`--server a b` or `--server a,b`). Each server is re-probed (serverInfo version, protocol, capabilities, tools/prompts/resources with input/output schemas and annotations) and diffed against its stored snapshot.
+- Update suite: `project server accept-update` (alias `update-suite`) adds generated steps for newly advertised tools, prompts and resources, with resultShape, inputSchema and outputSchema contract checks. Multi-server suites get these steps tagged with the server alias they already use. Removed primitives are retired: disabled with `retired` metadata, never deleted. Each affected suite gets a new version with an explicit changelog. `--dry-run` previews each suite (vN → vN+1, added/updated/retired) without writing anything.
+- Introspection: a -32601 reply from an advertised optional list (resources, templates, prompts) is recorded as `unsupportedMethods` and no longer fails the whole introspection.
+
 ## 0.16.0
 
 - Server update checks: `project server updates <project> [--server] [--json]` re-probes serverInfo version, the negotiated MCP protocol (spec) version, capabilities and every tool/resource/template/prompt schema, diffs against the stored snapshot, and proposes per-step suite edits (disable steps for removed primitives, refresh arguments for changed schemas). `project server accept-update [--change <id...>] [--notes]` applies only accepted proposals (one new version per affected suite, unaffected suites untouched) and records a changelog annotation (auto summary + editable notes) on the server; `discard-update` and `changelog [--entry --notes]` complete the loop. Servers now store `protocolVersion` from initialize.
