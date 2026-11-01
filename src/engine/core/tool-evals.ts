@@ -498,8 +498,9 @@ export async function generateToolTestData(
 export async function generateToolEvalCases(
   tool: Pick<ToolCatalogEntry, "name" | "description" | "inputSchema">,
   options?: { fetchImpl?: typeof fetch; env?: EvalEnv },
+  args?: Record<string, unknown>,
 ): Promise<ToolEvalCase[]> {
-  const fallback = defaultToolEvals(tool);
+  const fallback = defaultToolEvals(tool, args);
   const explicit = Boolean(options?.fetchImpl || options?.env);
   if (!explicit && process.env.VITEST === "true") return fallback;
   const env = readEnv(options?.env);
@@ -516,7 +517,7 @@ export async function generateToolEvalCases(
           {
             role: "system",
             content:
-              'Write one positive and one negative tool-use eval for an MCP tool. Positive is a user request that should make the model call this tool with arguments that fit the schema. Negative is a user request that should be answered without calling this tool. Each side needs assertion sentences a judge can check against the transcript (prompt, tool calls, arguments, and reply). Output JSON {"positive":{"prompt":"...","assertions":["..."]},"negative":{"prompt":"...","assertions":["..."]}}.',
+              'Write one positive and one negative tool-use eval for an MCP tool. Positive is a user request that should make the model call this tool with arguments that fit the schema. Negative is a user request that should be answered without calling this tool. Each side needs assertion sentences a judge can check against the transcript (prompt, tool calls, arguments, and reply). When `stepArguments` is given, the positive prompt must state every one of those concrete values verbatim (e.g. the exact name/slug) and its assertions must check the tool was called with exactly those values; never ask the model to invent an identifier. Output JSON {"positive":{"prompt":"...","assertions":["..."]},"negative":{"prompt":"...","assertions":["..."]}}.',
           },
           {
             role: "user",
@@ -524,6 +525,7 @@ export async function generateToolEvalCases(
               name: tool.name,
               description: tool.description ?? "",
               inputSchema: tool.inputSchema ?? { type: "object" },
+              ...(args && Object.keys(args).length ? { stepArguments: args } : {}),
             }),
           },
         ],
@@ -563,7 +565,7 @@ export async function fillGeneratedToolEvals(
       if (node.children?.length) walk(node.children);
       if (node.method !== "tools/call" || !node.tool) continue;
       const tool = byName.get(node.tool) ?? { name: node.tool, schemaHash: "", writeLike: false };
-      if (!sameEvals(node.evals, defaultToolEvals(tool))) continue;
+      if (!sameEvals(node.evals, defaultToolEvals(tool)) && !sameEvals(node.evals, defaultToolEvals(tool, node.args))) continue;
       pending.push(node);
     }
   };
@@ -571,7 +573,7 @@ export async function fillGeneratedToolEvals(
   await mapPool(pending, INFERENCE_CONCURRENCY, async (node) => {
     const name = node.tool ?? "";
     const tool = byName.get(name) ?? { name, schemaHash: "", writeLike: false };
-    node.evals = await generateToolEvalCases(tool, options);
+    node.evals = await generateToolEvalCases(tool, options, node.args);
   });
   return nodes;
 }

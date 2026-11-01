@@ -486,17 +486,30 @@ function evalId(name: string, suffix: string): string {
   return `auto-${slug}-${suffix}`;
 }
 
-/** Positive and negative prompts, each with assertions a Jev or LLM judge can score. */
+/**
+ * Positive and negative prompts, each with assertions a Jev or LLM judge can score. When the step's `args` are
+ * known, the positive prompt states every required value verbatim and the args assertion checks those values,
+ * so the model never has to invent a name the judge then rejects.
+ */
 export function defaultToolEvals(tool: {
   name: string;
   description?: string;
   inputSchema?: { required?: string[] };
-}): ToolEvalCase[] {
+}, args?: Record<string, unknown>): ToolEvalCase[] {
   const name = tool.name.trim() || "tool";
   const description = tool.description?.trim();
   const required = (tool.inputSchema?.required ?? []).map((item) => item.trim()).filter(Boolean);
   const about = description ? `${name}: ${description}` : name;
-  const needs = required.length > 0 ? ` Include ${required.join(", ")}.` : "";
+  const concrete = required.filter((key) => args && key in args && !isVariableToken(args[key]));
+  const shown = concrete.map((key) => `${key} = ${JSON.stringify(args![key])}`);
+  const missing = required.filter((key) => !concrete.includes(key));
+  const needs = [
+    shown.length ? ` Use exactly ${shown.join(", ")}.` : "",
+    missing.length ? ` Include ${missing.join(", ")}.` : "",
+  ].join("");
+  const argsCheck = shown.length
+    ? ` and pass ${shown.join(", ")}`
+    : required.length ? ` and include ${required.join(", ")}` : "";
   return [
     {
       id: evalId(name, "pos"),
@@ -506,7 +519,7 @@ export function defaultToolEvals(tool: {
         { id: evalId(name, "pos-called"), text: `The assistant called ${name}.` },
         {
           id: evalId(name, "pos-args"),
-          text: `The arguments passed to ${name} fit the user request${required.length ? ` and include ${required.join(", ")}` : ""}.`,
+          text: `The arguments passed to ${name} fit the user request${argsCheck}.`,
         },
       ],
     },
@@ -517,6 +530,18 @@ export function defaultToolEvals(tool: {
       assertions: [{ id: evalId(name, "neg-absent"), text: `The assistant did not call ${name}.` }],
     },
   ];
+}
+
+function isVariableToken(value: unknown): boolean {
+  return typeof value === "string" && /\$\{[^}]+\}|\{\{[^}]+\}\}/.test(value);
+}
+
+/** Auto-generated positive eval that names a required arg without its concrete value (pre-v86 generator output). */
+export function toolEvalsNeedRefresh(evals: ToolEvalCase[] | undefined, args: Record<string, unknown> | undefined, required: string[]): boolean {
+  if (!evals?.length) return false;
+  const pos = evals.find((e) => e.polarity === "positive" && /^auto-.*-pos$/.test(e.id));
+  if (!pos) return false;
+  return required.some((key) => args && key in args && !isVariableToken(args[key]) && !pos.prompt.includes(JSON.stringify(args[key])));
 }
 
 export function blankSuiteNode(type: SuiteNodeType): SuiteNode {
@@ -569,7 +594,7 @@ export function buildDefaultSuiteNodes(input: ToolCatalogEntry[] | ServerSurface
         ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
         ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
       },
-      evals: defaultToolEvals(tool),
+      evals: defaultToolEvals(tool, sampleArgsForTool({ name: tool.name, inputSchema: tool.inputSchema })),
     });
   }
   if (surface.capabilities.includes("resources") || surface.resources.length > 0 || surface.resourceTemplates.length > 0) {
