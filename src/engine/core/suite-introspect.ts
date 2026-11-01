@@ -49,14 +49,28 @@ export async function introspectServer(
     const listedTools = capabilities.includes("tools")
       ? await listAll("tools", timed((cursor) => session.listTools(cursor)))
       : { items: [] };
+    // Only methods the initialize capabilities advertise are called. Resources, templates and prompts are
+    // optional: a server that advertises a capability but answers -32601 for one of its list methods is
+    // recorded as "not supported" for that list instead of failing the whole introspection (which would
+    // otherwise discard a perfectly good tools/list and leave the server at 0 tools).
+    const unsupported: string[] = [];
+    const optional = async (key: string, fetchPage: (cursor?: string) => Promise<McpCallResult>) => {
+      try {
+        return await listAll(key, fetchPage);
+      } catch (error) {
+        if (!isMethodNotFound(error)) throw error;
+        unsupported.push(key);
+        return { items: [] };
+      }
+    };
     const resources = capabilities.includes("resources")
-      ? await listAll("resources", timed((cursor) => session.listResources(cursor)))
+      ? await optional("resources", timed((cursor) => session.listResources(cursor)))
       : { items: [] };
     const templates = capabilities.includes("resources")
-      ? await listAll("resourceTemplates", timed((cursor) => session.listResourceTemplates(cursor)))
+      ? await optional("resourceTemplates", timed((cursor) => session.listResourceTemplates(cursor)))
       : { items: [] };
     const prompts = capabilities.includes("prompts")
-      ? await listAll("prompts", timed((cursor) => session.listPrompts(cursor)))
+      ? await optional("prompts", timed((cursor) => session.listPrompts(cursor)))
       : { items: [] };
     const protocolVersion = session.getServerMeta?.().protocolVersion;
     return {
@@ -65,6 +79,7 @@ export async function introspectServer(
       serverVersion: info.version,
       latency: { connectMs: Math.ceil(connectMs), rpcMs: Math.ceil(rpcMs) },
       capabilities,
+      ...(unsupported.length ? { unsupportedMethods: unsupported } : {}),
       tools: listedTools.items.map(toTool).filter((tool): tool is ToolCatalogEntry => tool !== null),
       resources: (resources?.items ?? []).map(toResource).filter((item): item is ResourceCatalogEntry => item !== null),
       resourceTemplates: (templates?.items ?? []).map(toTemplate).filter((item): item is ResourceTemplateEntry => item !== null),
@@ -73,6 +88,12 @@ export async function introspectServer(
   } finally {
     await session.close();
   }
+}
+
+/** JSON-RPC -32601 (Method not found), as surfaced by the adapters in an error message. */
+export function isMethodNotFound(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /-32601|method not found/i.test(text);
 }
 
 async function listAll(

@@ -18,6 +18,7 @@ import {
   projectRefreshServer,
   projectIntrospectionStatus,
   formatIntrospectionStatus,
+  formatSuiteUpdatePreview,
 } from "./server-update-ops.js";
 import { registerProjectCommands } from "./project-commands.js";
 
@@ -59,6 +60,22 @@ describe("server update CLI ops", () => {
     const log = await projectServerChangelog(projectId, undefined, { dataDir });
     expect(log[0]?.protocolVersion).toBe("2025-11-25");
     expect(log[0]?.versionHistory[0]?.notes).toBe("echo retired");
+  });
+
+  it("force-detects an added tool, previews and applies the suite update", async () => {
+    const { dataDir, projectId } = await setup();
+    const outputSchema = { type: "object", properties: { skills: { type: "array" } }, required: ["skills"] };
+    const v3: ServerSurface = { ...v1, serverVersion: "1.2.0", tools: [...v1.tools, { name: "skill_suggest", schemaHash: "s", writeLike: false, inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }, outputSchema }] };
+    const detail = await resolveProject(projectId, { dataDir });
+    const checked = await projectServerUpdates(projectId, [detail.servers![0]!.id], { dataDir, probe: async () => v3 });
+    expect(formatUpdateCheck(checked.results)).toContain("added: tool skill_suggest");
+    expect(checked.results[0]?.proposals.map((p) => p.action)).toEqual(["add-step"]);
+    const preview = await projectAcceptServerUpdate(projectId, undefined, { dryRun: true }, { dataDir });
+    expect(preview.suiteVersions).toEqual([]);
+    expect(formatSuiteUpdatePreview(preview.preview)).toContain("+ tool:skill_suggest [resultShape, inputSchema, outputSchema]");
+    const applied = await projectAcceptServerUpdate(projectId, undefined, {}, { dataDir });
+    expect(applied.suiteVersions).toHaveLength(1);
+    expect(applied.preview[0]?.changelog).toContain("1 added");
   });
 
   it("describes and tags suites and runs, and filters by tag", async () => {

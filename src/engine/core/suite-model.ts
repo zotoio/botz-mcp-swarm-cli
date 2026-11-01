@@ -123,6 +123,8 @@ export interface ServerSurface {
   serverVersion?: string;
   latency?: SurfaceLatency;
   capabilities: string[];
+  /** Optional list methods the server advertised the capability for but answered -32601 (treated as empty). */
+  unsupportedMethods?: string[];
   tools: ToolCatalogEntry[];
   resources: ResourceCatalogEntry[];
   resourceTemplates: ResourceTemplateEntry[];
@@ -208,6 +210,11 @@ export interface SuiteNode {
   layout?: { x: number; y: number };
   /** Scenario metadata when this group frame represents a use-case scenario (written by the control plane). */
   scenarioMeta?: { id: string; name: string; goal?: string; category?: string };
+  /**
+   * Set when a server update retired the step because its tool/prompt/resource is no longer advertised.
+   * Retired steps stay in the suite (disabled) for history; they are never deleted by updates.
+   */
+  retired?: { at: string; reason: string; primitive?: string };
 }
 
 /** Enabled tool steps that carry at least one eval prompt. Loops are not unrolled. */
@@ -671,7 +678,7 @@ function dropRetiredSteps(nodes: SuiteNode[], surface: ServerSurface): SuiteNode
   return next;
 }
 
-function insertBeforeTeardown(nodes: SuiteNode[], additions: SuiteNode[]): SuiteNode[] {
+export function insertBeforeTeardown(nodes: SuiteNode[], additions: SuiteNode[]): SuiteNode[] {
   if (additions.length === 0) return nodes;
   const place = (list: SuiteNode[]): boolean => {
     for (const node of list) {

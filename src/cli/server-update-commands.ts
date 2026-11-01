@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import {
+  formatSuiteUpdatePreview,
   formatUpdateCheck,
   parseTagList,
   projectAcceptServerUpdate,
@@ -24,11 +25,12 @@ function printJson(value: unknown): void {
 export function registerServerUpdateCommands(project: Command, server: Command, suite: Command): void {
   server
     .command("updates")
-    .description("Check for server updates: re-probe serverInfo, MCP protocol version, capabilities and every primitive schema, and diff against the stored snapshot")
+    .alias("force-detect")
+    .description("Force detect changes: re-probe serverInfo version, MCP protocol version, capabilities and every tool/prompt/resource with schemas and annotations, diff against the stored snapshot, and propose suite updates (pending review)")
     .argument("<project>", "Project id or name")
-    .option("--server <id>", "Server id or name. Defaults to every server")
+    .option("--server <id...>", "Server id(s) or name(s), space or comma separated. Defaults to every server")
     .option("--json", "Print JSON")
-    .action(async (ref: string, opts: { server?: string; json?: boolean }) => {
+    .action(async (ref: string, opts: { server?: string[]; json?: boolean }) => {
       const { results } = await projectServerUpdates(ref, opts.server);
       if (opts.json) printJson(results);
       else console.log(formatUpdateCheck(results));
@@ -70,16 +72,22 @@ export function registerServerUpdateCommands(project: Command, server: Command, 
 
   server
     .command("accept-update")
-    .description("Accept a pending server update: update only the affected suites and record a changelog entry")
+    .alias("update-suite")
+    .description("Update suite(s) from a pending server update: add generated steps for new tools/prompts/resources (with outputSchema contract checks), refresh changed schemas, retire removed steps (disabled, never deleted), one new suite version with a changelog each")
     .argument("<project>", "Project id or name")
     .option("--server <id>", "Server id or name. Defaults to the first server")
     .option("--change <id...>", "Proposal ids to accept (default: all)")
     .option("--notes <text>", "Changelog notes stored with the auto summary")
+    .option("--dry-run", "Preview the per-suite diff and changelog without writing anything")
     .option("--json", "Print JSON")
-    .action(async (ref: string, opts: { server?: string; change?: string[]; notes?: string; json?: boolean }) => {
-      const result = await projectAcceptServerUpdate(ref, opts.server, { changeIds: opts.change, notes: opts.notes });
+    .action(async (ref: string, opts: { server?: string; change?: string[]; notes?: string; dryRun?: boolean; json?: boolean }) => {
+      const result = await projectAcceptServerUpdate(ref, opts.server, { changeIds: opts.change, notes: opts.notes, dryRun: opts.dryRun });
       if (opts.json) printJson(result);
-      else {
+      else if (opts.dryRun) {
+        console.log("Preview (nothing written):");
+        console.log(formatSuiteUpdatePreview(result.preview));
+      } else {
+        console.log(formatSuiteUpdatePreview(result.preview));
         console.log(`Recorded ${result.annotation.id}: ${result.annotation.summary.split("\n").join("; ")}`);
         for (const v of result.suiteVersions) console.log(`  suite ${v.suiteId} → v${v.version}`);
         console.log(`  ${result.untouchedSuiteIds.length} suite(s) untouched`);

@@ -13,6 +13,7 @@ import {
   normalizeTags,
   proposeSuiteChanges,
   snapshotFromSurface,
+  suiteUpdateChangelog,
   type PendingServerUpdate,
   type ServerVersionAnnotation,
   type SuiteChangeProposal,
@@ -124,13 +125,15 @@ async function proposalsFor(
  */
 export async function checkServerUpdates(
   projectId: string,
-  input: { serverId?: string; probe?: ProbeFn } = {},
+  input: { serverId?: string; serverIds?: string[]; probe?: ProbeFn } = {},
   options?: ProjectStoreOptions,
 ): Promise<ServerUpdateCheck[] | null> {
   const project = await getProject(projectId, options);
   if (!project || project.archived) return null;
-  const servers = (project.servers ?? []).filter((s) => !input.serverId || s.id === input.serverId);
-  if (input.serverId && servers.length === 0) return null;
+  // Force detect for one server, a selected set, or (neither) every server in the project.
+  const wanted = [...new Set([...(input.serverId ? [input.serverId] : []), ...(input.serverIds ?? [])].map((s) => s.trim()).filter(Boolean))];
+  const servers = (project.servers ?? []).filter((s) => !wanted.length || wanted.includes(s.id));
+  if (wanted.length && servers.length !== wanted.length) return null;
   const probe: ProbeFn = input.probe ?? (options?.introspect as ProbeFn | undefined) ?? ((target) => introspectServer(target));
   const results: ServerUpdateCheck[] = [];
   const pending = new Map<string, PendingServerUpdate | null>();
@@ -200,12 +203,46 @@ export async function checkServerUpdates(
   return results;
 }
 
+export interface SuiteUpdatePreview {
+  suiteId: string;
+  suiteName: string;
+  fromVersion: number;
+  /** Version that accept would create. */
+  toVersion: number;
+  added: Array<{ nodeId: string; label?: string; primitive: string; enabled: boolean; contract: string[] }>;
+  updated: Array<{ nodeId: string; label?: string; primitive: string; beforeArgs?: unknown; afterArgs?: unknown; afterExpect?: unknown }>;
+  retired: Array<{ nodeId: string; label?: string; primitive: string; reason: string }>;
+  acknowledged: Array<{ nodeId: string; label?: string; primitive: string }>;
+  changelog: string;
+}
+
 export interface AcceptServerUpdateResult {
   annotation: ServerVersionAnnotation;
   suiteVersions: Array<{ suiteId: string; version: number }>;
   untouchedSuiteIds: string[];
   /** Accepted ids skipped because the suite changed after the check and the proposal no longer applied. */
   staleChangeIds: string[];
+  /** Per-suite before/after preview; with `dryRun` nothing was written. */
+  preview: SuiteUpdatePreview[];
+  dryRun?: boolean;
+}
+
+function previewFor(suiteId: string, suiteName: string, fromVersion: number, applied: SuiteChangeProposal[], changelog: string): SuiteUpdatePreview {
+  const prim = (p: SuiteChangeProposal) => `${p.primitive.kind}:${p.primitive.key}`;
+  return {
+    suiteId,
+    suiteName,
+    fromVersion,
+    toVersion: fromVersion + 1,
+    added: applied.filter((p) => p.action === "add-step").map((p) => ({
+      nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p), enabled: p.newNode?.enabled ?? true,
+      contract: ["resultShape", ...(p.newNode?.expect?.inputSchema ? ["inputSchema"] : []), ...(p.newNode?.expect?.outputSchema ? ["outputSchema"] : [])],
+    })),
+    updated: applied.filter((p) => p.action === "refresh-args").map((p) => ({ nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p), beforeArgs: p.beforeArgs, afterArgs: p.afterArgs, ...(p.afterExpect ? { afterExpect: p.afterExpect } : {}) })),
+    retired: applied.filter((p) => p.action === "disable-step").map((p) => ({ nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p), reason: p.reason })),
+    acknowledged: applied.filter((p) => p.action === "acknowledge").map((p) => ({ nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p) })),
+    changelog,
+  };
 }
 
 /**
@@ -215,7 +252,7 @@ export interface AcceptServerUpdateResult {
 export async function acceptServerUpdate(
   projectId: string,
   serverId: string,
-  input: { acceptChangeIds?: string[]; notes?: string; principal?: string } = {},
+  input: { acceptChangeIds?: string[]; notes?: string; principal?: string; dryRun?: boolean } = {},
   options?: ProjectStoreOptions,
 ): Promise<AcceptServerUpdateResult | { error: "project_not_found" | "server_not_found" | "no_pending_update" }> {
   const project = await getProject(projectId, options);
@@ -242,8 +279,9 @@ export async function acceptServerUpdate(
     rejectedChangeIds: rejected.map((p) => p.id),
     suiteVersions: [],
   };
+  const dryRun = Boolean(input.dryRun);
   // Adopt the catalog first so new suite versions fingerprint against it.
-  await mutateProjectRecord(projectId, (record) => {
+  if (!dryRun) await mutateProjectRecord(projectId, (record) => {
     const target = record.servers?.find((s) => s.id === serverId);
     if (!target) return;
     const snap = pending.snapshot;
@@ -268,6 +306,8 @@ export async function acceptServerUpdate(
   for (const p of accepted) bySuite.set(p.suiteId, [...(bySuite.get(p.suiteId) ?? []), p]);
   const suiteVersions: Array<{ suiteId: string; version: number }> = [];
   const staleChangeIds: string[] = [];
+  const preview: SuiteUpdatePreview[] = [];
+  const versions = { serverVersion: pending.snapshot.serverVersion, previousServerVersion: previous.serverVersion };
   for (const [suiteId, reviewed] of bySuite) {
     const pointer = project.suites.find((s) => s.id === suiteId);
     if (!pointer) continue;
@@ -292,9 +332,23 @@ export async function acceptServerUpdate(
       });
       if (!proposals.length) continue;
     }
-    const { nodes } = applySuiteChanges(doc.nodes as SuiteNode[], proposals);
-    const saved = await saveSuiteVersion(projectId, suiteId, { name: doc.name, nodes: nodes as typeof doc.nodes, load: doc.load, basedOn: pointer.currentVersion }, options);
+    const { nodes, applied } = applySuiteChanges(doc.nodes as SuiteNode[], proposals);
+    let changelog = suiteUpdateChangelog(applied, server.name, versions);
+    const notes = normalizeDescription(input.notes);
+    if (notes) changelog += `\nNotes: ${notes}`;
+    preview.push(previewFor(suiteId, pointer.name, pointer.currentVersion, applied, changelog));
+    if (dryRun) continue;
+    const saved = await saveSuiteVersion(projectId, suiteId, {
+      name: doc.name,
+      nodes: nodes as typeof doc.nodes,
+      load: doc.load,
+      basedOn: pointer.currentVersion,
+      changelog,
+    }, options);
     if (saved) suiteVersions.push({ suiteId, version: saved.version });
+  }
+  if (dryRun) {
+    return { annotation, suiteVersions: [], untouchedSuiteIds: project.suites.map((s) => s.id).filter((id) => !preview.some((p) => p.suiteId === id)), staleChangeIds, preview, dryRun: true };
   }
   annotation.suiteVersions = suiteVersions;
   if (staleChangeIds.length) annotation.staleChangeIds = staleChangeIds;
@@ -308,6 +362,7 @@ export async function acceptServerUpdate(
     suiteVersions,
     untouchedSuiteIds: project.suites.map((s) => s.id).filter((id) => !suiteVersions.some((v) => v.suiteId === id)),
     staleChangeIds,
+    preview,
   };
 }
 

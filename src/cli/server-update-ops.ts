@@ -17,6 +17,7 @@ import {
   type ProbeFn,
   type ServerIntrospectionState,
   type ServerUpdateCheck,
+  type SuiteUpdatePreview,
 } from "../engine/store/server-updates-store.js";
 import { normalizeTags } from "../engine/core/server-updates.js";
 import { resolveProject, resolveSuite } from "./project-ops.js";
@@ -28,10 +29,12 @@ export function resolveServer(project: ProjectDetail, ref?: string): ProjectServ
   return server;
 }
 
-export async function projectServerUpdates(ref: string, serverRef?: string, options?: ProjectStoreOptions & { probe?: ProbeFn }) {
+/** Force detect: re-probe one server, a selected set (`serverRef` may be an array or comma list), or every server. */
+export async function projectServerUpdates(ref: string, serverRef?: string | string[], options?: ProjectStoreOptions & { probe?: ProbeFn }) {
   const project = await resolveProject(ref, options);
-  const serverId = serverRef ? resolveServer(project, serverRef).id : undefined;
-  const results = await checkServerUpdates(project.id, { serverId, probe: options?.probe }, options);
+  const refs = (Array.isArray(serverRef) ? serverRef : serverRef ? [serverRef] : []).flatMap((r) => r.split(",")).map((r) => r.trim()).filter(Boolean);
+  const serverIds = refs.map((r) => resolveServer(project, r).id);
+  const results = await checkServerUpdates(project.id, { serverIds, probe: options?.probe }, options);
   if (!results) throw new Error("project_not_found");
   return { projectId: project.id, results };
 }
@@ -96,12 +99,12 @@ export function formatIntrospectionStatus(rows: ServerIntrospectionState[]): str
 export async function projectAcceptServerUpdate(
   ref: string,
   serverRef: string | undefined,
-  input: { changeIds?: string[]; notes?: string },
+  input: { changeIds?: string[]; notes?: string; dryRun?: boolean },
   options?: ProjectStoreOptions,
 ) {
   const project = await resolveProject(ref, options);
   const server = resolveServer(project, serverRef);
-  const result = await acceptServerUpdate(project.id, server.id, { acceptChangeIds: input.changeIds, notes: input.notes, principal: "cli" }, options);
+  const result = await acceptServerUpdate(project.id, server.id, { acceptChangeIds: input.changeIds, notes: input.notes, principal: "cli", dryRun: input.dryRun }, options);
   if ("error" in result) throw new Error(result.error);
   return result;
 }
@@ -189,6 +192,19 @@ export function formatUpdateCheck(results: ServerUpdateCheck[]): string {
     for (const p of r.proposals) {
       lines.push(`    [${p.id}] ${p.action} ${p.suiteName ?? p.suiteId} › ${p.scenarioName ? `${p.scenarioName} › ` : ""}${p.nodeLabel ?? p.nodeId} — ${p.reason}`);
     }
+  }
+  return lines.join("\n");
+}
+
+/** Per-suite preview of an update: version bump, added/updated/retired steps and the changelog it would record. */
+export function formatSuiteUpdatePreview(preview: SuiteUpdatePreview[]): string {
+  if (!preview.length) return "No suite changes.";
+  const lines: string[] = [];
+  for (const p of preview) {
+    lines.push(`${p.suiteName} (${p.suiteId}) v${p.fromVersion} → v${p.toVersion}: +${p.added.length} added, ~${p.updated.length} updated, -${p.retired.length} retired`);
+    for (const a of p.added) lines.push(`  + ${a.primitive} [${a.contract.join(", ")}]${a.enabled ? "" : " (disabled by default)"}`);
+    for (const u of p.updated) lines.push(`  ~ ${u.primitive} ${JSON.stringify(u.beforeArgs ?? {})} → ${JSON.stringify(u.afterArgs ?? {})}`);
+    for (const r of p.retired) lines.push(`  - ${r.primitive} retired (${r.label ?? r.nodeId})`);
   }
   return lines.join("\n");
 }
