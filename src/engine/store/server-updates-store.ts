@@ -11,7 +11,11 @@ import {
   matchesTags,
   normalizeDescription,
   normalizeTags,
+  proposeMissingSteps,
   proposeSuiteChanges,
+  suiteCoverage,
+  suiteRefreshProposals,
+  type CoverageItem,
   snapshotFromSurface,
   suiteUpdateChangelog,
   type PendingServerUpdate,
@@ -100,7 +104,10 @@ export function suiteProposals(
 ): SuiteChangeProposal[] {
   const fromDiff = diff?.changed ? proposeSuiteChanges(input, diff, next) : [];
   const drift = suiteDriftProposals(input, next, { modern: isModernEra(next.protocolVersion), removedMethods: MODERN_REMOVED_METHODS });
-  return mergeProposals(fromDiff, drift);
+  // Compare against the suite's actual steps too: anything advertised that this suite has no step for.
+  const adding = new Set(fromDiff.filter((p) => p.action === "add-step").map((p) => `${p.primitive.kind}:${p.primitive.key}`));
+  const missing = proposeMissingSteps(input, next).filter((p) => !adding.has(`${p.primitive.kind}:${p.primitive.key}`));
+  return mergeProposals(mergeProposals(fromDiff, drift), missing);
 }
 
 async function proposalsFor(
@@ -364,6 +371,151 @@ export async function acceptServerUpdate(
     staleChangeIds,
     preview,
   };
+}
+
+// ---- update suite from server (always available) -----------------------------
+
+export interface UpdateSuiteFromServerResult {
+  suiteId: string;
+  suiteName: string;
+  servers: Array<{ serverId: string; serverName: string; checkedAt: string; protocolVersion?: string; serverVersion?: string; error?: string; coverage: CoverageItem[] }>;
+  proposals: SuiteChangeProposal[];
+  preview: SuiteUpdatePreview;
+  /** True when the live server and the suite already agree (preview still lists coverage). */
+  noChanges: boolean;
+  regenerateAll: boolean;
+  dryRun: boolean;
+  /** Version written when applied with changes. */
+  version?: number;
+  annotationIds?: string[];
+}
+
+/** Servers a suite calls: its home server plus any server its steps reach through an alias. */
+function serversForSuite(project: ProjectRecord, suite: SuitePointer, nodes: SuiteNode[]): ProjectServer[] {
+  return (project.servers ?? []).filter((server) => {
+    const calls = suiteCallsServer(project, suite, server.id);
+    if (calls(undefined)) return true;
+    let hit = false;
+    const walk = (list: SuiteNode[], alias: string | undefined) => {
+      for (const n of list) {
+        const own = n.server ?? alias;
+        if (own && calls(own)) hit = true;
+        if (n.children?.length) walk(n.children, own);
+      }
+    };
+    walk(nodes, undefined);
+    return hit;
+  });
+}
+
+/**
+ * "Update suite from server": probe the suite's server(s) live and re-sync the suite to what they advertise now,
+ * whatever the stored snapshot says. Re-syncs step args and pinned schemas, adds an outputSchema contract where a
+ * tool declares one, adds steps for every advertised tool/prompt/resource this suite lacks, retires steps whose
+ * primitive is gone, and (optionally) regenerates every step. Preview always; apply writes one new suite version.
+ */
+export async function updateSuiteFromServer(
+  projectId: string,
+  suiteId: string,
+  input: { serverIds?: string[]; regenerateAll?: boolean; dryRun?: boolean; acceptChangeIds?: string[]; principal?: string; notes?: string; probe?: ProbeFn } = {},
+  options?: ProjectStoreOptions,
+): Promise<UpdateSuiteFromServerResult | { error: "project_not_found" | "suite_not_found" | "server_not_found" | "probe_failed"; message?: string }> {
+  const project = await getProject(projectId, options);
+  if (!project || project.archived) return { error: "project_not_found" };
+  const pointer = project.suites.find((s) => s.id === suiteId);
+  if (!pointer) return { error: "suite_not_found" };
+  const doc = await loadSuiteVersion(projectId, suiteId, pointer.currentVersion, options);
+  if (!doc) return { error: "suite_not_found" };
+  let nodes = doc.nodes as SuiteNode[];
+  const wanted = (input.serverIds ?? []).map((s) => s.trim()).filter(Boolean);
+  const servers = wanted.length ? (project.servers ?? []).filter((s) => wanted.includes(s.id)) : serversForSuite(project, pointer, nodes);
+  if (!servers.length || (wanted.length && servers.length !== wanted.length)) return { error: "server_not_found" };
+  const probe: ProbeFn = input.probe ?? (options?.introspect as ProbeFn | undefined) ?? ((target) => introspectServer(target));
+  const regenerateAll = Boolean(input.regenerateAll);
+  const dryRun = Boolean(input.dryRun);
+  const report: UpdateSuiteFromServerResult["servers"] = [];
+  const snapshots = new Map<string, SurfaceSnapshot>();
+  const all: SuiteChangeProposal[] = [];
+  for (const server of servers) {
+    const checkedAt = new Date().toISOString();
+    try {
+      const current = snapshotFromSurface(asSurface(await probe(server.target)), checkedAt);
+      snapshots.set(server.id, current);
+      const impact = { suiteId, suiteName: pointer.name, suiteVersion: pointer.currentVersion, nodes, callsServer: suiteCallsServer(project, pointer, server.id) };
+      const proposals = suiteRefreshProposals(impact, current, { regenerateAll, modern: isModernEra(current.protocolVersion), removedMethods: MODERN_REMOVED_METHODS });
+      all.push(...proposals);
+      report.push({ serverId: server.id, serverName: server.name, checkedAt, ...(current.protocolVersion ? { protocolVersion: current.protocolVersion } : {}), ...(current.serverVersion ? { serverVersion: current.serverVersion } : {}), coverage: suiteCoverage(impact, current) });
+    } catch (error) {
+      report.push({ serverId: server.id, serverName: server.name, checkedAt, error: error instanceof Error ? error.message : String(error), coverage: [] });
+    }
+  }
+  if (!snapshots.size) return { error: "probe_failed", message: report.map((r) => `${r.serverName}: ${r.error}`).join("; ") };
+  const wantedIds = input.acceptChangeIds ? new Set(input.acceptChangeIds) : null;
+  const accepted = all.filter((p) => !wantedIds || wantedIds.has(p.id));
+  const { nodes: nextNodes, applied } = applySuiteChanges(nodes, accepted);
+  const label = servers.map((s) => s.name).join(", ");
+  let changelog = applied.length
+    ? suiteUpdateChangelog(applied, label).replace(/^Server update from/, `Update suite from server${regenerateAll ? " (regenerate all)" : ""}:`)
+    : `No changes: suite already matches ${label} (${report.flatMap((r) => r.coverage).filter((c) => c.status !== "missing").length} primitives covered).`;
+  const notes = normalizeDescription(input.notes);
+  if (notes) changelog += `\nNotes: ${notes}`;
+  const preview = previewFor(suiteId, pointer.name, pointer.currentVersion, applied, changelog);
+  const result: UpdateSuiteFromServerResult = { suiteId, suiteName: pointer.name, servers: report, proposals: all, preview, noChanges: applied.length === 0, regenerateAll, dryRun };
+  if (dryRun || !applied.length) return result;
+  // Adopt the live probe as each server's baseline so the next force detect diffs against what the suite now matches.
+  const annotationIds: string[] = [];
+  await mutateProjectRecord(projectId, (record) => {
+    for (const target of record.servers ?? []) {
+      const snap = snapshots.get(target.id);
+      if (!snap) continue;
+      const id = `chg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+      annotationIds.push(id);
+      const prev = storedSnapshot(target);
+      target.catalog = snap.tools;
+      target.surface = {
+        ...(snap.serverName ? { serverName: snap.serverName } : {}),
+        ...(snap.serverVersion ? { serverVersion: snap.serverVersion } : {}),
+        ...(snap.protocolVersion ? { protocolVersion: snap.protocolVersion } : {}),
+        ...(target.surface?.latency ? { latency: target.surface.latency } : {}),
+        capabilities: snap.capabilities, resources: snap.resources, resourceTemplates: snap.resourceTemplates, prompts: snap.prompts,
+      };
+      target.catalogAt = snap.takenAt;
+      target.snapshot = snap;
+      target.lastIntrospectedAt = snap.takenAt;
+      target.snapshotHash = snapshotHash(snap);
+      if (snap.protocolVersion) target.protocolVersion = snap.protocolVersion;
+      target.versionHistory = [{
+        id, recordedAt: new Date().toISOString(),
+        ...(snap.serverVersion ? { serverVersion: snap.serverVersion } : {}),
+        ...(snap.protocolVersion ? { protocolVersion: snap.protocolVersion } : {}),
+        ...(prev.serverVersion ? { previousServerVersion: prev.serverVersion } : {}),
+        summary: `Update suite from server: ${pointer.name}${regenerateAll ? " (regenerate all)" : ""}`,
+        ...(notes ? { notes } : {}),
+        ...(input.principal ? { principal: input.principal } : {}),
+        acceptedChangeIds: applied.map((p) => p.id),
+        rejectedChangeIds: all.filter((p) => !applied.includes(p)).map((p) => p.id),
+        suiteVersions: [],
+      } as ServerVersionAnnotation, ...(target.versionHistory ?? [])].slice(0, 100);
+    }
+  }, options);
+  const saved = await saveSuiteVersion(projectId, suiteId, {
+    name: doc.name,
+    nodes: nextNodes as typeof doc.nodes,
+    load: doc.load,
+    basedOn: pointer.currentVersion,
+    changelog,
+  }, options);
+  if (saved) {
+    result.version = saved.version;
+    await mutateProjectRecord(projectId, (record) => {
+      for (const target of record.servers ?? []) {
+        const a = target.versionHistory?.find((h) => annotationIds.includes(h.id));
+        if (a) a.suiteVersions = [{ suiteId, version: saved.version }];
+      }
+    }, options);
+  }
+  result.annotationIds = annotationIds;
+  return result;
 }
 
 // ---- live introspection freshness & remediation gate -----------------------

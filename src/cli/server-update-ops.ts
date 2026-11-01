@@ -14,6 +14,8 @@ import {
   storedSnapshot,
   projectIntrospectionState,
   refreshServerIntrospection,
+  updateSuiteFromServer,
+  type UpdateSuiteFromServerResult,
   type ProbeFn,
   type ServerIntrospectionState,
   type ServerUpdateCheck,
@@ -206,6 +208,32 @@ export function formatSuiteUpdatePreview(preview: SuiteUpdatePreview[]): string 
     for (const u of p.updated) lines.push(`  ~ ${u.primitive} ${JSON.stringify(u.beforeArgs ?? {})} → ${JSON.stringify(u.afterArgs ?? {})}`);
     for (const r of p.retired) lines.push(`  - ${r.primitive} retired (${r.label ?? r.nodeId})`);
   }
+  return lines.join("\n");
+}
+
+/** `project suite update-from-server`: live probe + re-sync THIS suite regardless of the snapshot (preview, then apply). */
+export async function projectUpdateSuiteFromServer(
+  ref: string,
+  input: { suite?: string; servers?: string[]; regenerateAll?: boolean; dryRun?: boolean; changeIds?: string[]; notes?: string },
+  options?: ProjectStoreOptions & { probe?: ProbeFn },
+): Promise<UpdateSuiteFromServerResult> {
+  const project = await resolveProject(ref, options);
+  const suite = resolveSuite(project, input.suite);
+  const serverIds = (input.servers ?? []).flatMap((r) => r.split(",")).map((r) => r.trim()).filter(Boolean).map((r) => resolveServer(project, r).id);
+  const out = await updateSuiteFromServer(project.id, suite.id, { serverIds, regenerateAll: input.regenerateAll, dryRun: input.dryRun, acceptChangeIds: input.changeIds, notes: input.notes, principal: "cli", probe: options?.probe }, options);
+  if ("error" in out) throw new Error(out.message ? `${out.error}: ${out.message}` : out.error);
+  return out;
+}
+
+/** Coverage per server (every advertised tool/prompt/resource: covered / disabled / missing) plus the preview. */
+export function formatUpdateFromServer(out: UpdateSuiteFromServerResult): string {
+  const lines: string[] = [];
+  for (const s of out.servers) {
+    lines.push(`${s.serverName}${s.serverVersion ? ` ${s.serverVersion}` : ""}${s.protocolVersion ? ` (MCP ${s.protocolVersion})` : ""}${s.error ? ` — live check failed: ${s.error}` : ""}`);
+    for (const c of s.coverage) lines.push(`  ${c.status === "covered" ? "✓" : c.status === "missing" ? "✗" : "○"} ${c.kind} ${c.key} — ${c.status}`);
+  }
+  lines.push(out.noChanges ? "No changes: suite already matches the live server." : formatSuiteUpdatePreview([out.preview]));
+  lines.push(out.preview.changelog);
   return lines.join("\n");
 }
 

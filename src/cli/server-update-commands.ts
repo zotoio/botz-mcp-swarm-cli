@@ -15,6 +15,8 @@ import {
   projectServerUpdates,
   projectSuiteRows,
   projectTag,
+  projectUpdateSuiteFromServer,
+  formatUpdateFromServer,
 } from "./server-update-ops.js";
 
 function printJson(value: unknown): void {
@@ -162,6 +164,25 @@ export function registerServerUpdateCommands(project: Command, server: Command, 
     .action(async (ref: string, tags: string[], opts: { suite?: string }) => {
       const saved = await projectTag(ref, "suite", { id: opts.suite ?? "", tags: parseTagList(tags) });
       console.log(saved.length ? `Tags: ${saved.join(", ")}` : "Tags cleared.");
+    });
+
+  suite
+    .command("update-from-server")
+    .description("Always available: live-check the suite's server(s) and re-sync THIS suite regardless of the stored snapshot (args, input/outputSchema contracts, missing steps for uncovered tools/prompts/resources, retire removed). Prints coverage + preview, then applies as a new suite version unless --dry-run")
+    .argument("<project>", "Project id or name")
+    .option("--suite <id>", "Suite id or name. Defaults to the first suite")
+    .option("--server <id...>", "Limit to these server ids/names (default: every server the suite calls)")
+    .option("--regenerate-all", "Regenerate args and contract checks for every existing step")
+    .option("--change <id...>", "Proposal ids to apply (default: all)")
+    .option("--notes <text>", "Changelog notes")
+    .option("--dry-run", "Preview only, write nothing")
+    .option("--json", "Print JSON")
+    .action(async (ref: string, opts: { suite?: string; server?: string[]; regenerateAll?: boolean; change?: string[]; notes?: string; dryRun?: boolean; json?: boolean }) => {
+      const out = await projectUpdateSuiteFromServer(ref, { suite: opts.suite, servers: opts.server, regenerateAll: opts.regenerateAll, dryRun: opts.dryRun, changeIds: opts.change, notes: opts.notes });
+      if (opts.json) return printJson({ ...out, proposals: out.proposals.map(({ newNode: _n, ...p }) => p) });
+      console.log(formatUpdateFromServer(out));
+      if (out.version) console.log(`Applied: suite ${out.suiteId} → v${out.version}`);
+      else if (opts.dryRun && !out.noChanges) console.log("Preview only (nothing written). Re-run without --dry-run to apply.");
     });
 
   suite

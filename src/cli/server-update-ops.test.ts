@@ -19,6 +19,8 @@ import {
   projectIntrospectionStatus,
   formatIntrospectionStatus,
   formatSuiteUpdatePreview,
+  projectUpdateSuiteFromServer,
+  formatUpdateFromServer,
 } from "./server-update-ops.js";
 import { registerProjectCommands } from "./project-commands.js";
 
@@ -76,6 +78,19 @@ describe("server update CLI ops", () => {
     const applied = await projectAcceptServerUpdate(projectId, undefined, {}, { dataDir });
     expect(applied.suiteVersions).toHaveLength(1);
     expect(applied.preview[0]?.changelog).toContain("1 added");
+  });
+
+  it("update-from-server: no-change preview lists coverage; a newly declared outputSchema is applied as a contract check", async () => {
+    const { dataDir, projectId } = await setup();
+    const same = await projectUpdateSuiteFromServer(projectId, { dryRun: true }, { dataDir, probe: async () => v1 });
+    expect(same.noChanges).toBe(true);
+    expect(formatUpdateFromServer(same)).toContain("✓ tool echo — covered");
+    const out = { type: "object", properties: { echoed: { type: "string" } } };
+    const v3: ServerSurface = { ...v1, tools: [{ ...v1.tools[0]!, outputSchema: out } as never, { name: "extra", schemaHash: "x", writeLike: false }] };
+    const applied = await projectUpdateSuiteFromServer(projectId, { notes: "sync" }, { dataDir, probe: async () => v3 });
+    expect(applied.preview.added.map((a) => a.primitive)).toEqual(["tool:extra"]);
+    expect(applied.preview.updated[0]?.afterExpect).toEqual({ outputSchema: out });
+    expect(applied.version).toBeGreaterThan(1);
   });
 
   it("describes and tags suites and runs, and filters by tag", async () => {
