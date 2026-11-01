@@ -769,6 +769,44 @@ export function normalizeVariableRefs<T>(value: T): T {
   return value;
 }
 
+/** A step arg that would reach the server as an unresolved placeholder. */
+export interface UnresolvedArgRef { nodeId: string; label?: string; ref: string; reason: "mustache" | "undefined-variable" }
+
+/**
+ * Validate a suite before a version is saved: enabled samplers must not carry Mustache `{{name}}` refs (the runner
+ * never substitutes them, Smoke v88) or `${name}` refs no extractor in the suite defines. Built-ins (`${__iter}`...) pass.
+ */
+export function unresolvedArgRefs(nodes: SuiteNode[]): UnresolvedArgRef[] {
+  const defined = new Set<string>();
+  const collect = (list: SuiteNode[]) => { for (const n of list) {
+    const anyNode = n as SuiteNode & { variable?: string; extract?: { variable?: string } };
+    if (anyNode.variable) defined.add(anyNode.variable);
+    if (anyNode.extract?.variable) defined.add(anyNode.extract.variable);
+    if (n.children) collect(n.children);
+  } };
+  collect(nodes);
+  const out: UnresolvedArgRef[] = [];
+  const scan = (node: SuiteNode, value: unknown) => {
+    if (typeof value === "string") {
+      for (const m of value.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) out.push({ nodeId: node.id, ...(node.label ? { label: node.label } : {}), ref: m[0], reason: "mustache" });
+      for (const m of value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
+        if (!m[1].startsWith("__") && !defined.has(m[1])) out.push({ nodeId: node.id, ...(node.label ? { label: node.label } : {}), ref: m[0], reason: "undefined-variable" });
+      }
+    } else if (Array.isArray(value)) value.forEach((v) => scan(node, v));
+    else if (value && typeof value === "object") Object.values(value as Record<string, unknown>).forEach((v) => scan(node, v));
+  };
+  const walk = (list: SuiteNode[]) => { for (const n of list) {
+    if (n.enabled !== false && n.type === "sampler" && n.args) scan(n, n.args);
+    if (n.children) walk(n.children);
+  } };
+  walk(nodes);
+  return out;
+}
+
+export function describeUnresolvedArgRefs(refs: UnresolvedArgRef[]): string {
+  return refs.map((r) => `${r.label ?? r.nodeId}: ${r.ref} (${r.reason === "mustache" ? "Mustache refs are never substituted; use \${name}" : "no extractor defines this variable"})`).join("; ");
+}
+
 export function repairArgs(tool: { name: string; inputSchema?: JsonSchema }, args: Record<string, unknown>, references?: ReferenceValues): Record<string, unknown> {
   let out = applyReferenceValues(tool, normalizeVariableRefs({ ...args }), references);
   const schema = tool.inputSchema as Record<string, unknown> | undefined;

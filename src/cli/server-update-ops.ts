@@ -233,6 +233,7 @@ export function formatUpdateFromServer(out: UpdateSuiteFromServerResult): string
     for (const c of s.coverage) lines.push(`  ${c.status === "covered" ? "✓" : c.status === "missing" ? "✗" : "○"} ${c.kind} ${c.key} — ${c.status}`);
   }
   lines.push(out.noChanges ? "No changes: suite already matches the live server." : formatSuiteUpdatePreview([out.preview]));
+  if (out.unresolved?.length) lines.push(`✗ Unresolved placeholders (apply will be refused): ${out.unresolved.map((r) => `${r.label ?? r.nodeId} ${r.ref}`).join(", ")}`);
   lines.push(out.preview.changelog);
   return lines.join("\n");
 }

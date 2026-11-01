@@ -25,6 +25,9 @@ import {
   type SuiteChangeProposal,
   type SurfaceDiff,
   type SurfaceSnapshot,
+  unresolvedArgRefs,
+  describeUnresolvedArgRefs,
+  type UnresolvedArgRef,
 } from "../core/server-updates.js";
 import {
   MODERN_REMOVED_METHODS,
@@ -397,6 +400,8 @@ export interface UpdateSuiteFromServerResult {
   /** Version written when applied with changes. */
   version?: number;
   annotationIds?: string[];
+  /** Placeholders the updated suite would still send verbatim; apply is refused while any remain. */
+  unresolved?: UnresolvedArgRef[];
 }
 
 /** Servers a suite calls: its home server plus any server its steps reach through an alias. */
@@ -428,7 +433,7 @@ export async function updateSuiteFromServer(
   suiteId: string,
   input: { serverIds?: string[]; regenerateAll?: boolean; dryRun?: boolean; acceptChangeIds?: string[]; principal?: string; notes?: string; probe?: ProbeFn; resolveReferences?: (target: ProjectServer["target"], tools: SurfaceSnapshot["tools"]) => Promise<ReferenceValues> } = {},
   options?: ProjectStoreOptions,
-): Promise<UpdateSuiteFromServerResult | { error: "project_not_found" | "suite_not_found" | "server_not_found" | "probe_failed"; message?: string }> {
+): Promise<UpdateSuiteFromServerResult | { error: "project_not_found" | "suite_not_found" | "server_not_found" | "probe_failed" | "unresolved_placeholders"; message?: string }> {
   const project = await getProject(projectId, options);
   if (!project || project.archived) return { error: "project_not_found" };
   const pointer = project.suites.find((s) => s.id === suiteId);
@@ -477,7 +482,10 @@ export async function updateSuiteFromServer(
   if (notes) changelog += `\nNotes: ${notes}`;
   const preview = previewFor(suiteId, pointer.name, pointer.currentVersion, applied, changelog);
   const result: UpdateSuiteFromServerResult = { suiteId, suiteName: pointer.name, servers: report, proposals: all, preview, noChanges: applied.length === 0, regenerateAll, dryRun };
+  const unresolved = unresolvedArgRefs(nextNodes);
+  if (unresolved.length) result.unresolved = unresolved;
   if (dryRun || !applied.length) return result;
+  if (unresolved.length) return { error: "unresolved_placeholders", message: `Refusing to save: steps would send unresolved placeholders: ${describeUnresolvedArgRefs(unresolved)}` };
   // Adopt the live probe as each server's baseline so the next force detect diffs against what the suite now matches.
   const annotationIds: string[] = [];
   await mutateProjectRecord(projectId, (record) => {
