@@ -18,3 +18,18 @@ describe("unresolvedArgRefs (Smoke v88)", () => {
     expect(unresolvedArgRefs([extractor, step(normalizeVariableRefs({ name: "{{agent_name}}" }))])).toEqual([]);
   });
 });
+
+import { readPath } from "./suite-model.js";
+describe("readPath alternatives and ||fallback (Smoke v89)", () => {
+  it("returns the first non-empty alternative", () => {
+    expect(readPath({ items: [{ id: "b" }] }, "matches.0.name|items.0.id||fb")).toBe("b");
+  });
+  it("falls back to the literal after ||", () => {
+    expect(readPath(undefined, "structuredContent.matches.0.name|matches.0.name||security-pr-reviewer@56f02c69")).toBe("security-pr-reviewer@56f02c69");
+    expect(readPath({}, "a|b")).toBeUndefined();
+  });
+  it("keeps plain paths unchanged", () => {
+    expect(readPath({ tools: [{ name: "x" }] }, "tools.0.name")).toBe("x");
+    expect(readPath({ a: 1 }, "")).toEqual({ a: 1 });
+  });
+});
