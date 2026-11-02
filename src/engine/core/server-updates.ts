@@ -829,7 +829,7 @@ export function normalizeVariableRefs<T>(value: T): T {
 }
 
 /** A step arg that would reach the server as an unresolved placeholder. */
-export interface UnresolvedArgRef { nodeId: string; label?: string; ref: string; reason: "mustache" | "undefined-variable" }
+export interface UnresolvedArgRef { nodeId: string; label?: string; ref: string; reason: "mustache" | "undefined-variable" | "placeholder-id" }
 
 /**
  * Validate a suite before a version is saved: enabled samplers must not carry Mustache `{{name}}` refs (the runner
@@ -845,14 +845,19 @@ export function unresolvedArgRefs(nodes: SuiteNode[]): UnresolvedArgRef[] {
   } };
   collect(nodes);
   const out: UnresolvedArgRef[] = [];
-  const scan = (node: SuiteNode, value: unknown) => {
+  const scan = (node: SuiteNode, value: unknown, key?: string) => {
+    // t550: a literal sampled placeholder ('fixture...') for a project/suite/run id targets nothing real (or worse,
+    // someone else's data). Ids must come from an extractor on a run-created test resource or a built-in.
+    if (typeof value === "string" && key && /(^|_)(project|suite)_?id$/i.test(key) && /^fixture/i.test(value.trim())) {
+      out.push({ nodeId: node.id, ...(node.label ? { label: node.label } : {}), ref: `${key}=${value}`, reason: "placeholder-id" });
+    }
     if (typeof value === "string") {
       for (const m of value.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) out.push({ nodeId: node.id, ...(node.label ? { label: node.label } : {}), ref: m[0], reason: "mustache" });
       for (const m of value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
         if (!m[1].startsWith("__") && !defined.has(m[1])) out.push({ nodeId: node.id, ...(node.label ? { label: node.label } : {}), ref: m[0], reason: "undefined-variable" });
       }
     } else if (Array.isArray(value)) value.forEach((v) => scan(node, v));
-    else if (value && typeof value === "object") Object.values(value as Record<string, unknown>).forEach((v) => scan(node, v));
+    else if (value && typeof value === "object") Object.entries(value as Record<string, unknown>).forEach(([k, v]) => scan(node, v, k));
   };
   const walk = (list: SuiteNode[]) => { for (const n of list) {
     if (n.enabled !== false && n.type === "sampler" && n.args) scan(n, n.args);
