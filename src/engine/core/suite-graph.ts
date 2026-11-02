@@ -21,7 +21,7 @@ const FRAME_HEADER = 112;
 const WIRE_GUTTER = 40;
 const EMPTY_FRAME = { width: 360, height: 188 };
 
-const BUILTIN_VARS = new Set(["__uuid", "__ts", "__thread", "__iter", "__loop"]);
+const BUILTIN_VARS = new Set(["__uuid", "__ts", "__thread", "__iter", "__loop", "__runId"]);
 const VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
 export interface GraphPoint {

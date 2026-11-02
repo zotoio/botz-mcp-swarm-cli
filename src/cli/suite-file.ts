@@ -66,7 +66,7 @@ import {
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const TOKEN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
-const BUILTIN = new Set(["__uuid", "__ts", "__thread", "__iter", "__loop"]);
+const BUILTIN = new Set(["__uuid", "__ts", "__thread", "__iter", "__loop", "__runId"]);
 
 export interface SuiteParam {
   example: string;

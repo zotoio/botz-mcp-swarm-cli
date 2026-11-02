@@ -1385,7 +1385,8 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
   const soakMaxIterations = manifest.soak?.maxIterations;
   const soakIntervalMs = manifest.soak?.intervalMs ?? 500;
 
-  const seed = { seedVars: options.vars, strictParams: options.strictParams };
+  // `${__runId}` resolves to this run's id (the same id sent as X-Swarm-Run-Id and in swarm_run_completed).
+  const seed = { seedVars: { ...(options.vars ?? {}), __runId: runId }, strictParams: options.strictParams };
   const runSuiteHook = async (hook: "setup" | "teardown", steps: ScenarioStep[] | undefined): Promise<PassResult | undefined> => {
     if (!steps || steps.length === 0 || !sessionReady) return undefined;
     const scenario: Scenario = { name: hook === "setup" ? "Suite setup" : "Suite teardown", iterations: 1, steps: steps.map((step) => ({ ...step, hook })) };

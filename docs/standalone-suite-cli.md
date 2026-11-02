@@ -43,7 +43,7 @@ This is one of the CLI's two modes. The other, `worker`, is opt-in and authentic
 | Default suite | `buildDefaultSuiteNodes` in `src/engine/core/suite-model.ts` | One contract group: initialize, ping, each read-safe tool call, resource reads, prompt gets, teardown. Write-like tools are present and disabled |
 | Compile | `compileSuite` | Suite nodes plus a load profile become a manifest the runner already executes |
 | Run | `run` / `runManifest` | Executes a manifest. `run --manifest` writes JSON and Markdown under the runs directory |
-| Substitution | `substituteValue` | Replaces `${name}` in step args. Built-ins `__uuid`, `__ts`, `__thread`, `__iter`, `__loop` stay reserved |
+| Substitution | `substituteValue` | Replaces `${name}` in step args. Built-ins `__uuid`, `__ts`, `__thread`, `__iter`, `__loop`, `__runId` (this run's id) stay reserved |
 
 `discover` and `approve` are the older file path. `discover` lists tools only, and `approve` requires `--by <principal>`. Leave that path as it is.
 

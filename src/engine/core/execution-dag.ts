@@ -1,6 +1,6 @@
 import type { CompiledStep, SuiteNode } from "./suite-model.js";
 
-const BUILTIN_VARS = new Set(["__uuid", "__ts", "__thread", "__iter", "__loop"]);
+const BUILTIN_VARS = new Set(["__uuid", "__ts", "__thread", "__iter", "__loop", "__runId"]);
 const VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
 interface DagEdge {

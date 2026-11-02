@@ -8,7 +8,7 @@ export const MAX_SERVERS = 8;
 
 const ALIAS = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 const VAR_TOKEN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
-const BUILTIN_VARS = new Set(["__uuid", "__ts", "__thread", "__iter", "__loop"]);
+const BUILTIN_VARS = new Set(["__uuid", "__ts", "__thread", "__iter", "__loop", "__runId"]);
 
 /** 1 to 32 characters of a-z, 0-9 and -, not starting or ending with -. */
 export function isServerAlias(value: unknown): value is string {
