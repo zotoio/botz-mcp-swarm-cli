@@ -204,6 +204,7 @@ export function formatSuiteUpdatePreview(preview: SuiteUpdatePreview[]): string 
   const lines: string[] = [];
   for (const p of preview) {
     lines.push(`${p.suiteName} (${p.suiteId}) v${p.fromVersion} → v${p.toVersion}: +${p.added.length} added, ~${p.updated.length} updated, -${p.retired.length} retired`);
+    for (const h of p.hooks ?? []) lines.push(`  ⇄ ${h.primitive} → suite ${h.hook}${h.label ? ` (${h.label})` : ""}`);
     for (const a of p.added) lines.push(`  + ${a.primitive} [${a.contract.join(", ")}]${a.enabled ? "" : " (disabled by default)"}`);
     for (const u of p.updated) lines.push(`  ~ ${u.primitive} ${JSON.stringify(u.beforeArgs ?? {})} → ${JSON.stringify(u.afterArgs ?? {})}`);
     for (const r of p.retired) lines.push(`  - ${r.primitive} retired (${r.label ?? r.nodeId})`);

@@ -22,6 +22,22 @@ export function isWriteToolName(name: string): boolean {
 }
 
 /** Destructive or write-like tools are recorded in the suite and left disabled. */
+const SETUP_INTENT = /\b(ensure|seed|set ?up|provision|prepare|create)\b[^.\n]{0,60}\b(test[ _-]?)?fixtures?\b/i;
+const SETUP_NAME = /(^|_)(ensure|seed|setup|provision)_[a-z_]*fixtures?($|_)/i;
+const TEARDOWN_INTENT = /\b(clean ?up|purge|tear ?down|delete|remove)\b[^.\n]{0,60}\b(test|ephemeral|swarm)\b[^.\n]{0,20}\b(assets?|fixtures?|artifacts?|data)\b/i;
+const TEARDOWN_NAME = /(^|_)(cleanup|teardown|purge)_[a-z_]*(assets?|fixtures?)($|_)|(^|_)run_completed$/i;
+
+/**
+ * Intent-based lifecycle role of a tool, from its name, description, and hints (no server-specific lists):
+ * idempotent fixture setup belongs in suite setup, test-asset cleanup in suite teardown.
+ */
+export function toolLifecycleRole(tool: { name: string; description?: string; annotations?: ToolAnnotations }): SuiteHook | undefined {
+  const text = `${tool.name.replace(/_/g, " ")}. ${tool.description ?? ""}`;
+  if (tool.annotations?.destructiveHint !== true && (SETUP_NAME.test(tool.name) || SETUP_INTENT.test(text))) return "setup";
+  if (TEARDOWN_NAME.test(tool.name) || TEARDOWN_INTENT.test(text)) return "teardown";
+  return undefined;
+}
+
 export function toolIsCalledByDefault(tool: {
   name: string;
   writeLike?: boolean;
@@ -215,7 +231,16 @@ export interface SuiteNode {
    * Retired steps stay in the suite (disabled) for history; they are never deleted by updates.
    */
   retired?: { at: string; reason: string; primitive?: string };
+  /**
+   * Lifecycle hook. On a top-level node or group: suite setup/teardown, run once per run before/after
+   * every scenario. Inside a scenario group: scenario setup/teardown, run before/after that scenario's
+   * other steps on every pass. Setup failures skip dependents; teardown always runs and its errors are
+   * reported without failing the verdict. Hook steps should be idempotent (re-runnable).
+   */
+  hook?: SuiteHook;
 }
+
+export type SuiteHook = "setup" | "teardown";
 
 /** Enabled tool steps that carry at least one eval prompt. Loops are not unrolled. */
 export interface ScheduledToolEval {
@@ -256,6 +281,11 @@ export interface CompiledStep {
   nodeId?: string;
   label?: string;
   loopIndex?: number;
+  /** Scenario group this step belongs to. */
+  scenarioId?: string;
+  scenarioName?: string;
+  /** Lifecycle hook this step belongs to (see `SuiteNode.hook`). */
+  hook?: SuiteHook;
   /** Predecessor indexes in the compiled step list. Empty means the step can start immediately. */
   waitFor?: number[];
   /** Loop iteration keys used while wiring the DAG. Removed before the suite is returned. */
@@ -297,6 +327,10 @@ export interface CompiledManifest {
     iterations: number;
     steps: CompiledStep[];
   }>;
+  /** Suite setup steps: run once before any scenario. */
+  setup?: CompiledStep[];
+  /** Suite teardown steps: run once after all scenarios, always. */
+  teardown?: CompiledStep[];
   assertions: {
     maxErrorRate: number;
     maxP95LatencyMs?: number;
@@ -580,8 +614,10 @@ export function buildDefaultSuiteNodes(input: ToolCatalogEntry[] | ServerSurface
     ...(surface.capabilities.includes("tools") || surface.tools.length > 0
       ? [sampler("tools/list", "List tools", { expect: { resultShape: "tools/list" } })] : []),
   ];
+  const hooks: { setup: SuiteNode[]; teardown: SuiteNode[] } = { setup: [], teardown: [] };
   for (const tool of surface.tools) {
-    children.push({
+    const role = toolLifecycleRole(tool);
+    (role ? hooks[role] : children).push({
       id: newNodeId(),
       type: "sampler",
       enabled: toolIsCalledByDefault(tool),
@@ -595,6 +631,7 @@ export function buildDefaultSuiteNodes(input: ToolCatalogEntry[] | ServerSurface
         ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
       },
       evals: defaultToolEvals(tool, sampleArgsForTool({ name: tool.name, inputSchema: tool.inputSchema })),
+      ...(role ? { hook: role, enabled: role === "setup" ? true : tool.annotations?.destructiveHint !== true } : {}),
     });
   }
   if (surface.capabilities.includes("resources") || surface.resources.length > 0 || surface.resourceTemplates.length > 0) {
@@ -630,7 +667,9 @@ export function buildDefaultSuiteNodes(input: ToolCatalogEntry[] | ServerSurface
     }));
   }
   children.push(sampler("teardown", "Teardown"));
+  // Lifecycle tools become suite hooks: setup before every scenario, teardown after (always runs).
   return [
+    ...hooks.setup,
     {
       id: newNodeId(),
       type: "group",
@@ -638,6 +677,7 @@ export function buildDefaultSuiteNodes(input: ToolCatalogEntry[] | ServerSurface
       label: "Contract",
       children,
     },
+    ...hooks.teardown,
   ];
 }
 
@@ -703,6 +743,20 @@ function dropRetiredSteps(nodes: SuiteNode[], surface: ServerSurface): SuiteNode
   return next;
 }
 
+/** Every generated step: the contract group's children plus top-level lifecycle hook steps. */
+export function defaultStepPool(built: SuiteNode[]): SuiteNode[] {
+  const group = built.find((node) => node.type === "group" && !node.hook);
+  return [...(group?.children ?? []), ...built.filter((node) => node.hook)];
+}
+
+/** Insert new steps: suite setup hooks first, suite teardown hooks last, everything else before the session teardown. */
+export function placeAdditions(nodes: SuiteNode[], additions: SuiteNode[]): SuiteNode[] {
+  const setup = additions.filter((node) => node.hook === "setup");
+  const teardown = additions.filter((node) => node.hook === "teardown");
+  const body = additions.filter((node) => !node.hook);
+  return [...setup, ...insertBeforeTeardown(nodes, body), ...teardown];
+}
+
 export function insertBeforeTeardown(nodes: SuiteNode[], additions: SuiteNode[]): SuiteNode[] {
   if (additions.length === 0) return nodes;
   const place = (list: SuiteNode[]): boolean => {
@@ -735,11 +789,11 @@ export function reconcileSuiteNodes(nodes: SuiteNode[], input: ToolCatalogEntry[
   const surface = asServerSurface(input);
   const kept = dropRetiredSteps(structuredClone(nodes), surface);
   const present = collectSlots(kept);
-  const additions = (buildDefaultSuiteNodes(surface)[0]?.children ?? []).filter((node) => {
+  const additions = defaultStepPool(buildDefaultSuiteNodes(surface)).filter((node) => {
     const slot = suiteSlot(node);
     return Boolean(slot && !present.has(slot));
   });
-  return insertBeforeTeardown(kept, additions);
+  return placeAdditions(kept, additions);
 }
 
 function completionNode(surface: ServerSurface): SuiteNode | null {
@@ -764,19 +818,39 @@ function completionNode(surface: ServerSurface): SuiteNode | null {
 
 const LOOP_EXPAND_CAP = 50;
 
-function compileInto(nodes: SuiteNode[], into: CompiledStep[], server?: string): void {
-  for (const node of nodes) {
+/** Setup hooks first, teardown hooks last, everything else in its authored order. */
+export function orderByHook(nodes: SuiteNode[]): SuiteNode[] {
+  const rank = (node: SuiteNode) => (node.hook === "setup" ? 0 : node.hook === "teardown" ? 2 : 1);
+  return nodes.map((node, index) => ({ node, index }))
+    .sort((a, b) => rank(a.node) - rank(b.node) || a.index - b.index)
+    .map((item) => item.node);
+}
+
+function compileInto(
+  nodes: SuiteNode[],
+  into: CompiledStep[],
+  server?: string,
+  scenarioCtx?: { id: string; name: string },
+  hook?: SuiteHook,
+): void {
+  for (const node of orderByHook(nodes)) {
+    const ownHook = node.hook ?? hook;
     if (!node.enabled) continue;
     const own = node.type === "sampler" || node.type === "group" || node.type === "loop" ? node.server ?? server : server;
+    const meta = (): Partial<CompiledStep> => ({
+      ...(ownHook ? { hook: ownHook } : {}),
+      ...(scenarioCtx ? { scenarioId: scenarioCtx.id, scenarioName: scenarioCtx.name } : {}),
+    });
     if (node.type === "group") {
-      compileInto(node.children ?? [], into, own);
+      const nextScenario = { id: node.id, name: node.label || "Scenario" };
+      compileInto(node.children ?? [], into, own, node.hook ? scenarioCtx ?? nextScenario : nextScenario, ownHook);
       continue;
     }
     if (node.type === "loop") {
       const times = Math.min(Math.max(node.iterations ?? 1, 1), LOOP_EXPAND_CAP);
       for (let i = 0; i < times; i++) {
         const before = into.length;
-        compileInto(node.children ?? [], into, own);
+        compileInto(node.children ?? [], into, own, scenarioCtx, ownHook);
         const key = `${node.id}#${i}`;
         for (let j = before; j < into.length; j++) {
           const step = into[j];
@@ -793,6 +867,7 @@ function compileInto(nodes: SuiteNode[], into: CompiledStep[], server?: string):
         thinkMs: node.thinkMs ?? 0,
         nodeId: node.id,
         label: node.label ?? "Think",
+        ...meta(),
       });
       continue;
     }
@@ -802,6 +877,7 @@ function compileInto(nodes: SuiteNode[], into: CompiledStep[], server?: string):
         extract: { variable: node.variable ?? "extracted", path: node.path ?? "", ...(node.required ? { required: true } : {}) },
         nodeId: node.id,
         label: node.label ?? node.variable ?? "Extract",
+        ...meta(),
       });
       continue;
     }
@@ -822,9 +898,47 @@ function compileInto(nodes: SuiteNode[], into: CompiledStep[], server?: string):
           : {}),
         ...(node.elicit ? { elicit: node.elicit } : {}),
         ...(stepSlo ? { slo: stepSlo } : {}),
+        ...meta(),
       });
     }
   }
+}
+
+/**
+ * Scenario hooks: every non-hook step of a scenario waits on that scenario's setup steps, and every
+ * teardown step waits on all of the scenario's other steps. Suite-level hooks are compiled separately.
+ */
+export function wireScenarioHooks(steps: CompiledStep[]): void {
+  const byScenario = new Map<string, number[]>();
+  steps.forEach((step, index) => {
+    const key = step.scenarioId ?? "";
+    const list = byScenario.get(key) ?? [];
+    list.push(index);
+    byScenario.set(key, list);
+  });
+  for (const indexes of byScenario.values()) {
+    const setups = indexes.filter((i) => steps[i]?.hook === "setup");
+    const body = indexes.filter((i) => steps[i]?.hook === undefined);
+    const teardowns = indexes.filter((i) => steps[i]?.hook === "teardown");
+    for (const i of body) {
+      const step = steps[i]!;
+      step.waitFor = [...new Set([...(step.waitFor ?? []), ...setups.filter((s) => s < i)])];
+    }
+    for (const i of teardowns) {
+      const step = steps[i]!;
+      step.waitFor = [...new Set([...(step.waitFor ?? []), ...[...setups, ...body].filter((s) => s < i)])];
+    }
+  }
+}
+
+function compileHookSteps(nodes: SuiteNode[], hook: SuiteHook): CompiledStep[] {
+  const out: CompiledStep[] = [];
+  compileInto(nodes, out, undefined, { id: `suite-${hook}`, name: hook === "setup" ? "Suite setup" : "Suite teardown" }, hook);
+  out.forEach((step, index) => {
+    step.waitFor = index === 0 ? [] : [index - 1];
+    delete step.barriers;
+  });
+  return out;
 }
 
 export function compileSuite(input: {
@@ -848,15 +962,21 @@ export function compileSuite(input: {
   const defaultServer = input.defaultServer ?? DEFAULT_SERVER;
   const targets = Object.fromEntries(Object.entries(input.targets ?? {}).filter(([alias]) => alias !== defaultServer));
   const multi = Object.keys(targets).length > 0;
-  compileInto(input.nodes, steps);
-  for (const step of steps) {
+  const suiteSetupNodes = input.nodes.filter((node) => node.hook === "setup");
+  const suiteTeardownNodes = input.nodes.filter((node) => node.hook === "teardown");
+  const bodyNodes = input.nodes.filter((node) => node.hook === undefined);
+  compileInto(bodyNodes, steps);
+  const setup = compileHookSteps(suiteSetupNodes, "setup");
+  const teardown = compileHookSteps(suiteTeardownNodes, "teardown");
+  for (const step of [...steps, ...setup, ...teardown]) {
     if (step.server === defaultServer) delete step.server;
     if (step.server && !targets[step.server]) throw new Error(`step ${step.nodeId ?? step.label ?? step.method} uses unknown server ${step.server}`);
   }
   const serverSlos = Object.fromEntries(Object.entries(input.serverSlos ?? {})
     .map(([alias, value]) => [alias, normalizeCallSlo(value)] as const)
     .filter((entry): entry is readonly [string, CallSlo] => entry[1] !== undefined));
-  assignWaitFor(steps, dagPredecessors(input.nodes));
+  assignWaitFor(steps, dagPredecessors(bodyNodes));
+  wireScenarioHooks(steps);
   if (steps.length === 0) {
     throw new Error("suite_has_no_enabled_steps");
   }
@@ -882,6 +1002,8 @@ export function compileSuite(input: {
       maxPayloadBytes: input.limits?.maxPayloadBytes ?? DEFAULT_SUITE_LIMITS.maxPayloadBytes,
     },
     scenarios: [{ name: input.name, iterations: passes, steps }],
+    ...(setup.length > 0 ? { setup } : {}),
+    ...(teardown.length > 0 ? { teardown } : {}),
     assertions: {
       maxErrorRate: slo?.maxErrorRate ?? 0,
       ...(slo?.maxP95Ms !== undefined ? { maxP95LatencyMs: slo.maxP95Ms } : {}),
@@ -1062,4 +1184,60 @@ export function deleteNode(nodes: SuiteNode[], id: string): SuiteNode[] {
   if (!location) return nodes;
   location.siblings.splice(location.index, 1);
   return tree;
+}
+
+/** Set (or clear with `undefined`) a node's lifecycle hook. Returns a new tree. */
+export function setNodeHook(nodes: SuiteNode[], id: string, hook: SuiteHook | undefined): SuiteNode[] {
+  return nodes.map((node) => {
+    if (node.id === id) {
+      const { hook: _old, ...rest } = node;
+      return hook ? { ...rest, hook } : rest;
+    }
+    return node.children ? { ...node, children: setNodeHook(node.children, id, hook) } : node;
+  });
+}
+
+/**
+ * Add an idempotent tools/call hook step. Without `parentId` it is a suite hook (once per run);
+ * with a scenario group id it is that scenario's hook (every pass). Returns the new tree and node.
+ */
+export function addHookStep(
+  nodes: SuiteNode[],
+  input: { hook: SuiteHook; tool: string; args?: Record<string, unknown>; label?: string; server?: string; parentId?: string },
+): { nodes: SuiteNode[]; node: SuiteNode } {
+  const node: SuiteNode = {
+    id: newNodeId(),
+    type: "sampler",
+    enabled: true,
+    method: "tools/call",
+    tool: input.tool,
+    args: input.args ?? {},
+    label: input.label ?? `${input.hook === "setup" ? "Setup" : "Teardown"}: ${input.tool}`,
+    hook: input.hook,
+    ...(input.server ? { server: input.server } : {}),
+  };
+  if (!input.parentId) {
+    return { nodes: input.hook === "setup" ? [node, ...nodes] : [...nodes, node], node };
+  }
+  if (!findNode(nodes, input.parentId)) throw new Error(`node_not_found: ${input.parentId}`);
+  return { nodes: insertNode(nodes, node, input.parentId), node };
+}
+
+/** Hook steps of a suite tree, grouped for display: suite-level and per scenario. */
+export function listHookSteps(nodes: SuiteNode[]): Array<{ scope: "suite" | "scenario"; hook: SuiteHook; nodeId: string; label: string; scenario?: string }> {
+  const out: Array<{ scope: "suite" | "scenario"; hook: SuiteHook; nodeId: string; label: string; scenario?: string }> = [];
+  for (const node of nodes) {
+    if (node.hook) out.push({ scope: "suite", hook: node.hook, nodeId: node.id, label: node.label ?? node.tool ?? node.type });
+    if (node.type === "group" && !node.hook) {
+      const scenario = node.scenarioMeta?.name ?? node.label ?? node.id;
+      const walk = (list: SuiteNode[]) => {
+        for (const child of list) {
+          if (child.hook) out.push({ scope: "scenario", hook: child.hook, nodeId: child.id, label: child.label ?? child.tool ?? child.type, scenario });
+          else if (child.children) walk(child.children);
+        }
+      };
+      walk(node.children ?? []);
+    }
+  }
+  return out;
 }

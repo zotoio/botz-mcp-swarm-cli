@@ -232,6 +232,8 @@ export interface SuiteUpdatePreview {
   updated: Array<{ nodeId: string; label?: string; primitive: string; beforeArgs?: unknown; afterArgs?: unknown; afterExpect?: unknown }>;
   retired: Array<{ nodeId: string; label?: string; primitive: string; reason: string }>;
   acknowledged: Array<{ nodeId: string; label?: string; primitive: string }>;
+  /** Steps moved to suite setup/teardown (lifecycle hooks). */
+  hooks?: Array<{ nodeId: string; label?: string; primitive: string; hook: "setup" | "teardown"; reason: string }>;
   changelog: string;
 }
 
@@ -260,6 +262,10 @@ function previewFor(suiteId: string, suiteName: string, fromVersion: number, app
     updated: applied.filter((p) => p.action === "refresh-args").map((p) => ({ nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p), beforeArgs: p.beforeArgs, afterArgs: p.afterArgs, ...(p.afterExpect ? { afterExpect: p.afterExpect } : {}) })),
     retired: applied.filter((p) => p.action === "disable-step").map((p) => ({ nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p), reason: p.reason })),
     acknowledged: applied.filter((p) => p.action === "acknowledge").map((p) => ({ nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p) })),
+    hooks: [
+      ...applied.filter((p) => p.action === "set-hook" && p.afterHook).map((p) => ({ nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p), hook: p.afterHook!, reason: p.reason })),
+      ...applied.filter((p) => p.action === "add-step" && p.newNode?.hook).map((p) => ({ nodeId: p.nodeId, label: p.nodeLabel, primitive: prim(p), hook: p.newNode!.hook!, reason: p.reason })),
+    ],
     changelog,
   };
 }

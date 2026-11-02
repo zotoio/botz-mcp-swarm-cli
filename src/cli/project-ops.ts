@@ -241,6 +241,8 @@ export async function addSuiteNode(
     /** Project server id, name, or alias the step calls. */
     server?: string;
     required?: boolean;
+    /** Lifecycle hook: setup | teardown. */
+    hook?: string;
   },
   options?: ProjectStoreOptions,
 ): Promise<SuiteVersionDocument> {
@@ -267,6 +269,10 @@ export async function addSuiteNode(
   if (input.required !== undefined) {
     if (node.type !== "extractor") throw new Error("required_not_allowed: only extractors take --required");
     node.required = input.required;
+  }
+  if (input.hook !== undefined) {
+    const hook = parseHookOption(input.hook);
+    if (hook) (node as SuiteNode & { hook?: SuiteHookName }).hook = hook;
   }
   const nodes = insertNode(version.nodes, node, input.parent);
   return persistSuite(project, suite, version, nodes, version.load, options);
@@ -312,8 +318,15 @@ export async function setSuiteNode(
   if (!findInTree(version.nodes, nodeId)) throw new Error(`node_not_found: ${nodeId}`);
   if (patch.method && !METHODS.has(patch.method)) throw new Error(`unknown_method: ${patch.method}`);
   const { server, ...others } = patch;
+  const clearHook = "hook" in patch && (patch as { hook?: unknown }).hook === undefined;
   const defined = Object.fromEntries(Object.entries(others).filter((entry) => entry[1] !== undefined)) as Partial<SuiteNode>;
   let nodes = updateNode(version.nodes, nodeId, defined);
+  if (clearHook) {
+    nodes = replaceInTree(nodes, nodeId, (node) => {
+      const { hook: _old, ...rest } = node as SuiteNode & { hook?: SuiteHookName };
+      return rest as SuiteNode;
+    });
+  }
   if (server !== undefined) {
     const target = findInTree(nodes, nodeId)!;
     if (!nodeTakesServer(target)) throw new Error("server_not_allowed: extractors and think steps call no server");
@@ -637,4 +650,14 @@ export async function setProjectSuiteVersionDisabled(
   const updated = await setSuiteVersionDisabled(project.id, suite.id, version, disabled, options);
   if (!updated) throw new Error(`suite_version_not_found: ${version}`);
   return updated;
+}
+
+export type SuiteHookName = "setup" | "teardown";
+
+/** `setup` | `teardown`, or `none` / empty to clear. */
+export function parseHookOption(raw: string): SuiteHookName | undefined {
+  const value = raw.trim().toLowerCase();
+  if (value === "" || value === "none") return undefined;
+  if (value === "setup" || value === "teardown") return value;
+  throw new Error(`unknown_hook: ${raw} (use setup, teardown, or none)`);
 }

@@ -12,7 +12,7 @@ import type {
   SuiteNode,
   ToolCatalogEntry,
 } from "./suite-model.js";
-import { defaultToolEvals, insertBeforeTeardown, newNodeId, toolEvalsNeedRefresh, toolIsCalledByDefault } from "./suite-model.js";
+import { defaultToolEvals, newNodeId, placeAdditions, toolEvalsNeedRefresh, toolIsCalledByDefault, toolLifecycleRole } from "./suite-model.js";
 import { schemaAccepts } from "./contract.js";
 import { applyReferenceValues, isPlaceholderValue, referenceParams, sampleArgsForTool, type JsonSchema, type ReferenceValues } from "./tool-args.js";
 
@@ -59,7 +59,7 @@ export interface SurfaceDiff {
  * `add-step`: generate a contract step for a newly advertised tool/prompt/resource.
  * `disable-step`: retire a step whose primitive is gone (kept, disabled and marked `retired`, never deleted).
  */
-export type SuiteChangeAction = "add-step" | "disable-step" | "refresh-args" | "acknowledge";
+export type SuiteChangeAction = "add-step" | "disable-step" | "refresh-args" | "acknowledge" | "set-hook";
 
 /** One proposed edit to one step of one suite, accepted or rejected on its own. */
 export interface SuiteChangeProposal {
@@ -84,6 +84,8 @@ export interface SuiteChangeProposal {
   afterEvals?: SuiteNode["evals"];
   /** Extractor steps: new `path` (e.g. a placeholder `||agent-fixture` fallback replaced by a real id). */
   afterPath?: string;
+  /** `set-hook` only: the lifecycle hook the step moves to (suite setup/teardown). */
+  afterHook?: "setup" | "teardown";
   /** `add-step` only: the generated step inserted (before teardown) when accepted. */
   newNode?: SuiteNode;
   /** Suite version the proposal was computed against; accept re-checks it so later edits are not clobbered. */
@@ -287,11 +289,13 @@ export function stepForAddedPrimitive(change: PrimitiveChange, next: SurfaceSnap
     const tool = next.tools.find((t) => t.name === change.key);
     if (!tool) return null;
     const args = sampleArgsForTool({ name: tool.name, inputSchema: tool.inputSchema }, references);
+    const role = toolLifecycleRole(tool);
     return {
       id: newNodeId(),
       type: "sampler",
-      enabled: toolIsCalledByDefault(tool),
-      label: tool.name,
+      enabled: role === "setup" ? true : role === "teardown" ? tool.annotations?.destructiveHint !== true : toolIsCalledByDefault(tool),
+      ...(role ? { hook: role } : {}),
+      label: role ? `${role === "setup" ? "Setup" : "Teardown"}: ${tool.name}` : tool.name,
       method: "tools/call",
       tool: tool.name,
       args,
@@ -482,12 +486,54 @@ export function applySuiteChanges(
     return copy;
   });
   let out = walk(nodes);
+  // set-hook: lift the step out of its frame into a top-level suite setup/teardown hook.
+  const moves = accepted.filter((p) => p.action === "set-hook" && p.afterHook);
+  if (moves.length) {
+    const lifted: SuiteNode[] = [];
+    const ids = new Map(moves.map((p) => [p.nodeId, p] as const));
+    const strip = (list: SuiteNode[]): SuiteNode[] => list.flatMap((node) => {
+      const move = ids.get(node.id);
+      if (move) {
+        lifted.push({ ...node, hook: move.afterHook! });
+        return [];
+      }
+      return [node.children ? { ...node, children: strip(node.children) } : node];
+    });
+    out = placeAdditions(strip(out), lifted);
+    applied.push(...moves.filter((p) => lifted.some((n) => n.id === p.nodeId)));
+  }
   const additions = accepted.filter((p) => p.action === "add-step" && p.newNode);
   if (additions.length) {
-    out = insertBeforeTeardown(out, additions.map((p) => structuredClone(p.newNode!)));
+    out = placeAdditions(out, additions.map((p) => structuredClone(p.newNode!)));
     applied.push(...additions);
   }
-  return { nodes: out, applied };
+  return { nodes: reensureAfterCleanup(out), applied };
+}
+
+/**
+ * Fixtures created by suite setup must exist whenever a step needs them. A body step that cleans up test
+ * assets (teardown intent) is followed by a re-run of each idempotent setup step, so later steps still find them.
+ */
+export function reensureAfterCleanup(nodes: SuiteNode[]): SuiteNode[] {
+  const setups = nodes.filter((node) => node.hook === "setup" && node.type === "sampler" && node.method === "tools/call" && node.enabled);
+  if (setups.length === 0) return nodes;
+  const isCleanup = (node: SuiteNode) =>
+    !node.hook && node.enabled && node.type === "sampler" && node.method === "tools/call" && !!node.tool && toolLifecycleRole({ name: node.tool }) === "teardown";
+  const isReensure = (node: SuiteNode | undefined) => Boolean(node && !node.hook && setups.some((s) => s.tool === node.tool));
+  const walk = (list: SuiteNode[]): SuiteNode[] => {
+    const out: SuiteNode[] = [];
+    list.forEach((node, index) => {
+      out.push(node.children && !node.hook ? { ...node, children: walk(node.children) } : node);
+      if (isCleanup(node) && !isReensure(list[index + 1])) {
+        for (const setup of setups) {
+          const { hook: _h, layout: _l, ...rest } = structuredClone(setup);
+          out.push({ ...rest, id: newNodeId(), label: `Re-ensure: ${setup.tool}` });
+        }
+      }
+    });
+    return out;
+  };
+  return walk(nodes);
 }
 
 export function suiteUpdateChangelog(applied: SuiteChangeProposal[], serverLabel: string, versions?: { serverVersion?: string; previousServerVersion?: string }): string {
@@ -495,8 +541,8 @@ export function suiteUpdateChangelog(applied: SuiteChangeProposal[], serverLabel
     ? ` (${versions.previousServerVersion ?? "?"} → ${versions.serverVersion})` : "";
   if (!applied.length) return `Re-pinned to the updated catalog of ${serverLabel}${ver}.`;
   const count = (a: SuiteChangeAction) => applied.filter((p) => p.action === a).length;
-  const head = `Server update from ${serverLabel}${ver}: ${count("add-step")} added, ${count("refresh-args")} updated, ${count("disable-step")} retired, ${count("acknowledge")} acknowledged.`;
-  const verb: Record<SuiteChangeAction, string> = { "add-step": "added", "refresh-args": "updated", "disable-step": "retired", acknowledge: "acknowledged" };
+  const head = `Server update from ${serverLabel}${ver}: ${count("add-step")} added, ${count("refresh-args")} updated, ${count("disable-step")} retired, ${count("acknowledge")} acknowledged${count("set-hook") ? `, ${count("set-hook")} moved to setup/teardown` : ""}.`;
+  const verb: Record<SuiteChangeAction, string> = { "add-step": "added", "refresh-args": "updated", "disable-step": "retired", acknowledge: "acknowledged", "set-hook": "moved to setup/teardown" };
   return [head, ...applied.map((p) => `- ${verb[p.action]} ${p.nodeLabel ?? p.nodeId}${p.scenarioName ? ` [${p.scenarioName}]` : ""}: ${p.reason}`)].join("\n");
 }
 
@@ -636,6 +682,19 @@ export function proposeStepResync(input: ImpactInput, next: SurfaceSnapshot, opt
       ...(node.label ? { nodeLabel: node.label } : {}),
       ...(scenario ? { scenarioId: scenario.id, scenarioName: scenario.name } : {}),
     };
+    if (node.method === "tools/call" && node.tool && tools.has(node.tool) && !node.hook && !isTopLevel(input, node.id)) {
+      const role = toolLifecycleRole(tools.get(node.tool)!);
+      if (role) {
+        out.push({
+          ...base,
+          id: `${input.suiteId}:${node.id}:hook:${role}`,
+          primitive: { kind: "tool", key: node.tool, change: "changed", fields: ["lifecycle"] },
+          action: "set-hook",
+          afterHook: role,
+          reason: `Tool '${node.tool}' ${role === "setup" ? "sets up test fixtures (idempotent)" : "cleans up test assets"}; move it to suite ${role} so it runs ${role === "setup" ? "once before every scenario" : "once after all scenarios, always"}.`,
+        });
+      }
+    }
     if (node.method === "tools/call" && node.tool && tools.has(node.tool)) {
       const tool = tools.get(node.tool)!;
       const primitive: PrimitiveChange = { kind: "tool", key: tool.name, change: "changed", fields: ["inputSchema", "outputSchema"] };
@@ -911,4 +970,8 @@ export interface ServerVersionAnnotation {
   suiteVersions: Array<{ suiteId: string; version: number }>;
   /** Accepted proposals dropped because the suite changed after the check and they no longer applied. */
   staleChangeIds?: string[];
+}
+
+function isTopLevel(input: ImpactInput, nodeId: string): boolean {
+  return input.nodes.some((node) => node.id === nodeId);
 }

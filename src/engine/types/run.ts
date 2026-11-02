@@ -247,6 +247,15 @@ export interface RunReport {
   rampDown?: RampDownSummary;
   /** Tools by server. Entries without `server` belong to the default server. */
   catalog?: Array<{ server?: string; name: string; schemaHash: string; writeLike?: boolean }>;
+  /** Setup/teardown hook failures. Setup failures also appear in failReasons; teardown failures never fail the verdict. */
+  hookErrors?: Array<{
+    hook: "setup" | "teardown";
+    scope: "suite" | "scenario";
+    label: string;
+    nodeId?: string;
+    scenario?: string;
+    message: string;
+  }>;
   nodeOutcomes?: Array<{
     nodeId: string;
     label: string;

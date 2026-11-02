@@ -159,6 +159,10 @@ swarm project runs <project> --tags regression
 
 A check compares serverInfo version, protocol version, capabilities, and every tool (description, input/output schema, annotations), resource, resource template and prompt. Only steps that reference a removed or changed primitive get a proposal: removed primitives disable the step (kept for history), changed schemas refresh the step arguments. Added primitives never rewrite existing suites. Accepting writes one new version per affected suite and records a changelog entry (auto summary plus notes) on the server. The same operations are exposed by the Swarm service API and its MCP tools (`swarm_server_check_updates`, `swarm_server_update_apply`, `swarm_server_changelog`, `swarm_describe`, `swarm_tags_set`, `swarm_scenarios_list`, and `tags` on `swarm_suites_list` / `swarm_runs_list`).
 
+## Lifecycle hooks
+
+Suites support setup and teardown steps at two levels: suite (once per run) and scenario (every pass). Teardown always runs, and its errors never mask the verdict. See [docs/lifecycle-hooks.md](docs/lifecycle-hooks.md).
+
 ## Multi-server suites
 
 A suite can call tools on several MCP servers in one flow, passing values extracted from one server's result into another server's call:

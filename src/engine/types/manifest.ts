@@ -168,6 +168,15 @@ export const ScenarioStepSchema = z.object({
   /** Indexes of steps that must finish before this one. Absent means the legacy chain. */
   waitFor: z.array(z.number().int().nonnegative()).optional(),
   loopIndex: z.number().int().nonnegative().optional(),
+  /**
+   * Lifecycle hook. `setup` steps run before the rest of their scenario (or suite) and, when they fail,
+   * skip the steps that wait on them. `teardown` steps always run, even after failures or a stop, and
+   * their errors are reported without failing the verdict.
+   */
+  hook: z.enum(["setup", "teardown"]).optional(),
+  /** Scenario group this step belongs to. */
+  scenarioId: z.string().optional(),
+  scenarioName: z.string().optional(),
 });
 
 export const ScenarioSchema = z.object({
@@ -258,6 +267,10 @@ export const ManifestSchema = z.object({
   sessionPool: SessionPoolSchema.prefault({}),
   quotas: QuotasSchema.prefault({}),
   scenarios: z.array(ScenarioSchema).min(1),
+  /** Suite setup: runs once before any scenario. A failure skips every scenario and fails the run. */
+  setup: z.array(ScenarioStepSchema).optional(),
+  /** Suite teardown: runs once after all scenarios, always (even on failure or stop). Errors never fail the verdict. */
+  teardown: z.array(ScenarioStepSchema).optional(),
   assertions: AssertionsSchema.prefault({}),
   processAssertions: ProcessAssertionsSchema.optional(),
   soak: SoakSchema.optional(),
