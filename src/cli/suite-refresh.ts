@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Command } from "commander";
-import { buildDefaultSuiteNodes, type ServerSurface, type SuiteNode } from "../engine/core/suite-model.js";
+import { buildDefaultSuiteNodes, defaultStepPool, type ServerSurface, type SuiteNode } from "../engine/core/suite-model.js";
 import { introspectServer } from "../engine/core/suite-introspect.js";
 import { isMultiServer, parseSuiteFile, resolveSuiteExecution, suiteDefaultAlias, suiteServers, suiteToJson, type SuiteFile } from "./suite-file.js";
 import { resolveNodeServers } from "../engine/core/servers.js";
@@ -46,7 +46,7 @@ export function refreshSuiteModel(suite: SuiteFile, surface: ServerSurface, alia
     removed: [...before.keys()].filter((key) => !after.has(key)).sort(),
     changed: [...after.keys()].filter((key) => before.has(key) && before.get(key) !== after.get(key)).sort(),
   };
-  const defaults = buildDefaultSuiteNodes(surface)[0]?.children ?? [];
+  const defaults = defaultStepPool(buildDefaultSuiteNodes(surface));
   const known = new Set<string>();
   const disabled: string[] = [];
   const visit = (nodes: SuiteNode[]): SuiteNode[] => nodes.map((node) => {
@@ -70,11 +70,16 @@ export function refreshSuiteModel(suite: SuiteFile, surface: ServerSurface, alia
   const destination = alias === defaultAlias
     ? nodes.find((node) => node.type === "group" && (node.server ?? defaultAlias) === alias)?.children ?? nodes
     : nodes.find((node) => node.type === "group" && node.server === alias)?.children;
+  // Lifecycle hook steps (fixture setup / test-asset cleanup) go top level as suite setup/teardown.
+  const hookAdds = additions.filter((node) => node.hook);
+  const bodyAdds = additions.filter((node) => !node.hook);
   if (destination) {
     const teardown = destination.findIndex((node) => node.method === "teardown");
-    destination.splice(teardown < 0 ? destination.length : teardown, 0, ...additions);
+    destination.splice(teardown < 0 ? destination.length : teardown, 0, ...bodyAdds);
   }
-  const placed = destination ? additions : [];
+  nodes.unshift(...hookAdds.filter((node) => node.hook === "setup"));
+  nodes.push(...hookAdds.filter((node) => node.hook === "teardown"));
+  const placed = [...(destination ? bodyAdds : []), ...hookAdds];
   const servers = { ...all, [alias]: { ...current, surface: { ...surface, latency: undefined }, ...(alias === defaultAlias ? {} : { capturedAt: new Date().toISOString() }) } };
   const main = servers[defaultAlias]!;
   const others = Object.fromEntries(Object.entries(servers).filter(([key]) => key !== defaultAlias));

@@ -40,6 +40,7 @@ import {
   saveSuiteFile,
   setSuiteNode,
   setSuiteServerSlo,
+  parseHookOption,
 } from "./project-ops.js";
 
 function printJson(value: unknown): void {
@@ -314,7 +315,9 @@ export function registerProjectCommands(program: Command): void {
     .option("--args <json>")
     .option("--server <id|name>", "Project server the step calls. Defaults to the frame's server, then the suite's")
     .option("--required", "Extractor: fail when the path finds nothing, and skip steps that use the variable")
+    .option("--hook <hook>", "Lifecycle hook: setup | teardown. Top level = suite setup/teardown (once per run); inside a scenario group = scenario setup/teardown (every pass). Teardown always runs")
     .action(async (ref: string, opts: {
+      hook?: string;
       type: string;
       server?: string;
       required?: boolean;
@@ -343,6 +346,7 @@ export function registerProjectCommands(program: Command): void {
         args: opts.args ? (JSON.parse(opts.args) as Record<string, unknown>) : undefined,
         server: opts.server,
         required: opts.required,
+        hook: opts.hook,
       });
       console.log(`Saved v${saved.version}`);
     });
@@ -388,7 +392,9 @@ export function registerProjectCommands(program: Command): void {
     .option("--server <id|name>", "Project server the step calls; an empty value clears it")
     .option("--required", "Extractor: fail when the path finds nothing")
     .option("--optional", "Extractor: store an empty value when the path finds nothing")
+    .option("--hook <hook>", "Lifecycle hook: setup | teardown | none (clears it)")
     .action(async (ref: string, opts: {
+      hook?: string;
       node: string;
       server?: string;
       required?: boolean;
@@ -417,7 +423,8 @@ export function registerProjectCommands(program: Command): void {
         args: opts.args ? (JSON.parse(opts.args) as Record<string, unknown>) : undefined,
         server: opts.server,
         required: opts.required ? true : opts.optional ? false : undefined,
-      }, opts.suite);
+        ...(opts.hook !== undefined ? { hook: parseHookOption(opts.hook) } : {}),
+      } as Partial<SuiteNode>, opts.suite);
       console.log(`Saved v${saved.version}`);
     });
 

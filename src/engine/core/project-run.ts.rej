@@ -1,0 +1,11 @@
+--- src/engine/core/project-run.ts
++++ src/engine/core/project-run.ts
+@@ -215,7 +215,7 @@ export async function startSuiteRun(input: {
+     // Always keep sc_bootstrap if present so MCP initialize runs before the selected scenario
+     allowed.add("sc_bootstrap");
+     const filtered = version.nodes.filter((n) => {
+-      if (n.type !== "group") return true;
++      if (n.type !== "group" || n.hook) return true;
+       const scId = n.scenarioMeta?.id || n.id;
+       return allowed.has(scId) || allowed.has(n.id);
+     });

@@ -174,6 +174,24 @@ interface StepTrace {
   /** Work cut off by ramp-down; never counted as errors. */
   rampDown?: { cancelled: number; incomplete: number; skipped: number };
   rampDownSummary?: { strategy: "graceful" | "immediate"; drainDeadlineMs: number; passEstimateMs?: number };
+  /** Setup/teardown hook failures. Teardown failures are reported here and never fail the verdict. */
+  hookErrors?: NonNullable<RunReport["hookErrors"]>;
+}
+
+function noteHookError(trace: StepTrace, step: ScenarioStep, scope: "suite" | "scenario", message?: string): void {
+  const list = (trace.hookErrors ??= []);
+  if (list.length >= 50) return;
+  const label = step.label ?? step.tool ?? step.method;
+  const msg = (message ?? "failed").replace(/\s+/g, " ").slice(0, 300);
+  if (list.some((item) => item.hook === step.hook && item.label === label && item.message === msg)) return;
+  list.push({
+    hook: step.hook ?? "setup",
+    scope,
+    label,
+    ...(step.nodeId ? { nodeId: step.nodeId } : {}),
+    ...(step.scenarioName ? { scenario: step.scenarioName } : {}),
+    message: msg,
+  });
 }
 
 function noteRampDown(trace: StepTrace, key: "cancelled" | "incomplete" | "skipped"): void {
@@ -590,6 +608,8 @@ interface ScenarioRunContext {
   activeNodes: Set<string>;
   seedVars?: Record<string, string>;
   strictParams?: boolean;
+  /** Set when this pass runs suite-level setup or teardown steps: no scenario outcome or pass is recorded. */
+  suiteHook?: "setup" | "teardown";
 }
 
 async function runScenario(
@@ -692,7 +712,7 @@ async function runScenarioPass(
         const callsServer = step.method !== "think" && step.method !== "extract";
         const label = step.label ?? step.tool ?? step.method;
         const producer = step.waitFor?.at(-1);
-        if ((step.waitFor ?? []).some((pred) => blocked.has(pred))) {
+        if (step.hook !== "teardown" && (step.waitFor ?? []).some((pred) => blocked.has(pred))) {
           blocked.add(index);
           skippedAny = true;
           noteSkip(run.trace, step);
@@ -773,6 +793,11 @@ async function runScenarioPass(
           }
           results.set(index, { value: result.result, ...(callsServer ? { server: alias } : {}) });
           if (!result.ok && step.method === "extract" && step.extract?.required) blocked.add(index);
+          // A failed setup step skips everything that waits on it; the reason is recorded once.
+          if (!result.ok && !result.cancelled && step.hook) {
+            if (step.hook === "setup") blocked.add(index);
+            noteHookError(run.trace, step, run.suiteHook ? "suite" : "scenario", result.message);
+          }
           run.emit("mcp.step", {
             node: nodeId,
             label,
@@ -793,9 +818,12 @@ async function runScenarioPass(
           if (nodeId) run.activeNodes.delete(nodeId);
         }
       };
-      const note = (result: { ok: boolean; message?: string; cancelled?: boolean }) => {
+      const note = (result: { ok: boolean; message?: string; cancelled?: boolean }, index?: number) => {
+        const hook = index === undefined ? undefined : scenario.steps[index]?.hook;
         if (result.cancelled) cancelled = true;
-        else if (!result.ok) {
+        else if (!result.ok && hook === "teardown") {
+          // Teardown errors are reported (trace.hookErrors) but never fail the scenario.
+        } else if (!result.ok) {
           scenarioOk = false;
           lastMessage = result.message;
         }
@@ -807,6 +835,7 @@ async function runScenarioPass(
         return true;
       };
       const skipChained = (index: number): { ok: boolean } => {
+        if (scenario.steps[index]?.hook === "teardown") return { ok: true };
         const step = scenario.steps[index]!;
         blocked.add(index);
         skippedAny = true;
@@ -823,8 +852,8 @@ async function runScenarioPass(
         for (let index = 0; index < scenario.steps.length; index++) {
           if (drained()) break;
           // Without a graph every step follows the one before it, so a missing required value stops the rest.
-          const result = blocked.size > 0 ? skipChained(index) : await runOne(index);
-          note(result);
+          const result = blocked.size > 0 && scenario.steps[index]?.hook !== "teardown" ? skipChained(index) : await runOne(index);
+          note(result, index);
           if (index < scenario.steps.length - 1 && run.dwellMs > 0 && blocked.size === 0) await sleep(run.dwellMs);
         }
       } else {
@@ -855,9 +884,24 @@ async function runScenarioPass(
           for (const item of finished) {
             pending.delete(item.index);
             done.add(item.index);
-            note(item.result);
+            note(item.result, item.index);
           }
         }
+        // Teardown always runs, even when the pass was stopped or drained early.
+        for (const index of [...pending].sort((a, b) => a - b)) {
+          if (scenario.steps[index]?.hook !== "teardown") continue;
+          pending.delete(index);
+          note(await runOne(index), index);
+        }
+      }
+      if (run.suiteHook) {
+        await releaseAll(true, scenarioOk);
+        const failedSetup = run.suiteHook === "setup" && (blocked.size > 0 || !scenarioOk);
+        return {
+          durationMs: Date.now() - passBegan,
+          completed: !cancelled && !failedSetup,
+          ...(failedSetup ? { message: lastMessage ?? "suite setup failed" } : {}),
+        };
       }
 
       if (cancelled && scenarioOk) {
@@ -879,6 +923,14 @@ async function runScenarioPass(
       await releaseAll(true, scenarioOk);
       return { durationMs: Date.now() - passBegan, completed: !cancelled };
     } catch (error) {
+      if (run.suiteHook) {
+        const message = error instanceof Error ? error.message : String(error);
+        const first = scenario.steps[0];
+        if (first) noteHookError(run.trace, { ...first, hook: run.suiteHook }, "suite", message);
+        for (const [alias, item] of opened) await pools.release(alias, item.session, false);
+        opened.clear();
+        return { durationMs: Date.now() - passBegan, completed: false, message };
+      }
       if (pastDrain()) {
         noteRampDown(run.trace, "incomplete");
         for (const [alias, item] of opened) await pools.release(alias, item.session, false);
@@ -906,6 +958,8 @@ async function runScenarioPass(
 
 interface PassResult {
   durationMs: number;
+  /** Suite hook passes: why setup failed. */
+  message?: string;
   /** False when the pass errored or was cut off before its last step. */
   completed: boolean;
 }
@@ -1332,8 +1386,27 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
   const soakIntervalMs = manifest.soak?.intervalMs ?? 500;
 
   const seed = { seedVars: options.vars, strictParams: options.strictParams };
-  if (!sessionReady) {
-    // The suite never opened a session, so there are no steps to run.
+  const runSuiteHook = async (hook: "setup" | "teardown", steps: ScenarioStep[] | undefined): Promise<PassResult | undefined> => {
+    if (!steps || steps.length === 0 || !sessionReady) return undefined;
+    const scenario: Scenario = { name: hook === "setup" ? "Suite setup" : "Suite teardown", iterations: 1, steps: steps.map((step) => ({ ...step, hook })) };
+    const res = await runScenarioPass(
+      scenario, pool, metrics, quota, telemetry,
+      // Teardown ignores the stop signal: it always runs.
+      scenarioContext(manifest, hopObservations, trace, emit, { activeNodes, ...seed, suiteHook: hook, ...(hook === "setup" ? { signal } : {}) }),
+      0,
+    );
+    emit("mcp.scenario.result", { scenario: scenario.name, outcome: res.completed || hook === "teardown" ? "pass" : "fail", thread: 1 });
+    return res;
+  };
+  let suiteSetupFailed: string | undefined;
+  const setupRes = await runSuiteHook("setup", manifest.setup);
+  if (setupRes && !setupRes.completed) {
+    suiteSetupFailed = setupRes.message ?? "suite setup failed";
+    failReasons.push(`Suite setup failed: ${suiteSetupFailed}; every scenario was skipped`);
+  }
+  try {
+  if (!sessionReady || suiteSetupFailed) {
+    // No session, or suite setup failed: there are no steps to run.
   } else if (mode === "soak") {
     while (!signal?.aborted) {
       quota.assertWithinDuration();
@@ -1368,6 +1441,10 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     await runLoadProfile(manifest, pool, metrics, quota, telemetry, hopObservations, trace, emit, activeNodes, seed, signal);
   } else {
     await runAllScenarios(manifest, pool, metrics, quota, telemetry, hopObservations, trace, emit, activeNodes, seed);
+  }
+  } finally {
+    // Suite teardown always runs, after success, failure or stop. Its errors never fail the verdict.
+    await runSuiteHook("teardown", manifest.teardown);
   }
 
   signal?.removeEventListener("abort", onAbort);
@@ -1413,10 +1490,17 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     sessionReady,
   );
 
+  // Teardown calls are reported in hookErrors, never judged against step or server objectives.
+  const teardownNodes = new Set(
+    [...(manifest.teardown ?? []), ...manifest.scenarios.flatMap((sc) => sc.steps).filter((step) => step.hook === "teardown")]
+      .map((step) => step.nodeId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const judged = () => metrics.getObservations().filter((o) => !o.nodeId || !teardownNodes.has(o.nodeId));
   failReasons.push(
     ...buildFailReasons(
       manifest,
-      metrics.getObservations(),
+      judged(),
       scenarioOutcomes,
       silentGreen,
       processFailures,
@@ -1445,7 +1529,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     );
   }
 
-  failReasons.push(...serverSloReasons(manifest, metrics.getObservations(), defaultServer));
+  failReasons.push(...serverSloReasons(manifest, judged(), defaultServer));
 
   const verdict = computeVerdict(failReasons, silentGreen);
   const gatewayMetrics = buildGatewayMetrics(manifest, hopObservations);
@@ -1489,6 +1573,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       : {}),
     processSummary,
     toolSeries,
+    ...(trace.hookErrors?.length ? { hookErrors: trace.hookErrors } : {}),
     rpcSeries,
     scenarioOutcomes,
     quotas: {
