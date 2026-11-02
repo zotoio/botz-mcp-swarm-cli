@@ -9,6 +9,7 @@ import { DEFAULT_SERVER, nodesForServer } from "./servers.js";
 import { applyToolEvalVerdict, evaluateSuiteTools } from "./tool-evals.js";
 import { runManifest } from "./runner.js";
 import { tailRunLog } from "./run-log.js";
+import { loginExpiredMessage, preflightProjectOAuth } from "./project-oauth.js";
 import { bufferedRunEvents, finishSuiteRun, publishRunEvent, subscribeRunEvents, tryBeginSuiteRun } from "./run-events.js";
 import {
   getProject,
@@ -49,9 +50,11 @@ export async function startSuiteRun(input: {
   workerDispatch?: (job: WorkerDispatchJob) => void;
   /** False skips model evals for tool eval prompts. Defaults to true. */
   evals?: boolean;
+  /** Fetch used to renew OAuth logins in the pre-run login check (tests). */
+  oauthFetch?: typeof fetch;
 }): Promise<{ ok: true; runId: string; dispatch: SuiteDispatch } | { ok: false; error: string }> {
   const store = input.dataDir ? { dataDir: input.dataDir } : undefined;
-  const project = await getProject(input.projectId, store);
+  let project = await getProject(input.projectId, store);
   if (!project || project.archived) return { ok: false, error: "project_not_found" };
   const pointer = project.suites.find((suite) => suite.id === input.suiteId);
   const version = input.version
@@ -62,6 +65,24 @@ export async function startSuiteRun(input: {
   if (pointer.enabled === false) return { ok: false, error: "suite_disabled" };
   if (version.disabled || pointer.disabledVersions?.includes(version.version)) {
     return { ok: false, error: "suite_version_disabled" };
+  }
+  // Login preflight (same as the service/UI Run path): use the project's stored OAuth login, renew an
+  // expired/expiring one with its refresh token (persisting the new, sealed tokens) and fail fast with a
+  // clear "Login expired — Reconnect" message instead of a bare 401 at warm-up. Never logs tokens.
+  {
+    let usedServerIds: string[] | undefined;
+    try {
+      const pre = projectSuiteServers(project, pointer, version);
+      usedServerIds = [...new Set(Object.values(pre.serverIds))];
+    } catch {
+      usedServerIds = undefined;
+    }
+    const preflight = await preflightProjectOAuth({ projectId: project.id, serverIds: usedServerIds, store, fetchImpl: input.oauthFetch });
+    if (preflight.failures.length > 0) return { ok: false, error: loginExpiredMessage(preflight.failures) };
+    if (preflight.refreshed.length > 0) {
+      const reloaded = await getProject(project.id, store);
+      if (reloaded) project = reloaded;
+    }
   }
   const dispatch: SuiteDispatch = input.dispatch ?? pointer.dispatch ?? "local";
   if (dispatch === "worker" && !input.workerDispatch) return { ok: false, error: "worker_dispatch_unavailable" };

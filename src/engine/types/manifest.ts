@@ -24,10 +24,49 @@ export const StdioTargetSchema = z.object({
   suppressNotificationStream: z.boolean().optional(),
 });
 
+export const McpServerApiKeyAuthSchema = z.object({
+  type: z.literal("api_key"),
+  apiKey: z.string().optional(),
+  headerName: z.string().optional(),
+  scheme: z.string().optional(),
+});
+
+export const McpServerOAuthConfigSchema = z.object({
+  status: z.enum(["connected", "disconnected", "error"]).optional(),
+  grantType: z.enum(["authorization_code", "client_credentials"]).optional(),
+  issuer: z.string().optional(),
+  authorizationEndpoint: z.string().optional(),
+  tokenEndpoint: z.string().optional(),
+  registrationEndpoint: z.string().optional(),
+  clientId: z.string().optional(),
+  clientSecret: z.string().optional(),
+  scope: z.string().optional(),
+  accessToken: z.string().optional(),
+  refreshToken: z.string().optional(),
+  expiresAt: z.string().optional(),
+});
+
+export const McpServerOAuthAuthSchema = z.object({
+  type: z.literal("oauth"),
+  oauth: McpServerOAuthConfigSchema.optional(),
+});
+
+export const McpServerAuthSchema = z.union([
+  z.object({ type: z.literal("none") }),
+  McpServerApiKeyAuthSchema,
+  McpServerOAuthAuthSchema,
+  z.object({ type: z.literal("custom_header") }),
+]);
+
+export type McpServerAuth = z.infer<typeof McpServerAuthSchema>;
+export type McpServerOAuthConfig = z.infer<typeof McpServerOAuthConfigSchema>;
+
 export const HttpTargetSchema = z.object({
   transport: z.enum(["sse", "streamable-http"]),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
+  auth: McpServerAuthSchema.optional(),
+  oauth: McpServerOAuthConfigSchema.optional(),
   protocolEra: ProtocolEraSchema.optional(),
   suppressNotificationStream: z.boolean().optional(),
 });
