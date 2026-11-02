@@ -62,7 +62,7 @@ export function resolveRemoteSwarmToken(flag?: string, env: NodeJS.ProcessEnv = 
   );
 }
 
-async function callSwarmMcpTool(
+export async function callSwarmMcpTool(
   serverOriginUrl: string,
   token: string,
   toolName: string,

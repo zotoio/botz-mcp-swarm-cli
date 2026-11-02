@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { registerLoginCommands } from "./cli/login-commands.js";
 import { registerSkillsCommands } from "./cli/skills.js";
 import { registerRefreshCommand } from "./cli/suite-refresh.js";
 import { registerServerCommands } from "./cli/suite-servers.js";
@@ -284,6 +285,7 @@ registerAnalyseCommand(suite);
 registerSuiteCommands(program); // Backward-compatible capture/show aliases.
 registerDiagnostics(program, suite);
 registerProjectCommands(program);
+registerLoginCommands(program);
 
 program
   .command("worker")
