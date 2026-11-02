@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `swarm login-status <project>` and `swarm reconnect <project> <serverId>`: show expired OAuth logins of a central Swarm project and start a Reconnect (prints a sign-in URL; Swarm stores the new tokens). Never prints tokens.
+
 ## 0.17.0
 
 - Force detect changes: `project server updates` (alias `force-detect`) takes several servers (`--server a b` or `--server a,b`). Each server is re-probed (serverInfo version, protocol, capabilities, tools/prompts/resources with input/output schemas and annotations) and diffed against its stored snapshot.
