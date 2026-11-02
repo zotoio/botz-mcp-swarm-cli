@@ -31,7 +31,12 @@ const TEARDOWN_NAME = /(^|_)(cleanup|teardown|purge)_[a-z_]*(assets?|fixtures?)(
  * Intent-based lifecycle role of a tool, from its name, description, and hints (no server-specific lists):
  * idempotent fixture setup belongs in suite setup, test-asset cleanup in suite teardown.
  */
-export function toolLifecycleRole(tool: { name: string; description?: string; annotations?: ToolAnnotations }): SuiteHook | undefined {
+export function toolLifecycleRole(tool: { name: string; description?: string; annotations?: ToolAnnotations; inputSchema?: unknown }): SuiteHook | undefined {
+  // A hook must run standalone: a tool that needs other inputs (e.g. project_id/suite_id/action on a
+  // hook-management tool such as swarm_suite_hooks) is a normal step, not a lifecycle hook (t550).
+  const required = (tool.inputSchema as { required?: unknown } | undefined)?.required;
+  if (Array.isArray(required) && required.some((key) => typeof key === "string" && !/^run_?id$/i.test(key))) return undefined;
+  if (/(^|_)hooks?($|_)/i.test(tool.name)) return undefined;
   const text = `${tool.name.replace(/_/g, " ")}. ${tool.description ?? ""}`;
   if (tool.annotations?.destructiveHint !== true && (SETUP_NAME.test(tool.name) || SETUP_INTENT.test(text))) return "setup";
   if (TEARDOWN_NAME.test(tool.name) || TEARDOWN_INTENT.test(text)) return "teardown";
