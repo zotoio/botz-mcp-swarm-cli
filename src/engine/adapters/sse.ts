@@ -1,3 +1,4 @@
+import { resolveTargetAuthHeaders } from "../core/mcp-oauth.js";
 import { mergeHeaders } from "./headers.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { Target } from "../types/manifest.js";
@@ -13,7 +14,7 @@ export async function createSseSession(
     throw new Error("Expected SSE transport target");
   }
   const url = new URL(target.url);
-  const mergedHeaders = mergeHeaders(target.headers, headers);
+  const mergedHeaders = mergeHeaders(resolveTargetAuthHeaders(target), headers);
   const { fetchFn, capture } = createCapturingFetch();
   const transport = new SSEClientTransport(url, {
     requestInit: Object.keys(mergedHeaders).length

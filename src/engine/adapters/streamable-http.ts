@@ -1,3 +1,4 @@
+import { resolveTargetAuthHeaders } from "../core/mcp-oauth.js";
 import { mergeHeaders } from "./headers.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Target } from "../types/manifest.js";
@@ -37,7 +38,7 @@ export async function createStreamableHttpSession(
   const t = target as HttpTarget;
   const requested = t.protocolEra ?? "auto";
   const url = new URL(t.url);
-  const mergedHeaders = mergeHeaders(t.headers, headers);
+  const mergedHeaders = mergeHeaders(resolveTargetAuthHeaders(t), headers);
   const { fetchFn, capture } = createCapturingFetch();
 
   let fallbackReason: string | undefined;

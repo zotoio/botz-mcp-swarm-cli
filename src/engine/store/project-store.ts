@@ -1,6 +1,6 @@
 import { SuiteLimitsSchema, type SuiteLimitsInput } from "../core/suite-limits.js";
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { allowlistEntryKey, allowlistEntryLabel, allowlistHosts, type McpServerConfig } from "../service/mcp-allowlist.js";
 import { introspectServer } from "../core/suite-introspect.js";
@@ -28,6 +28,8 @@ import { tidyPositions } from "../core/suite-graph.js";
 import { forgetRunExports } from "../otel/local-collector.js";
 import type { RunReport } from "../types/run.js";
 import { swarmDataDir } from "../core/data-dirs.js";
+import { openSecretFields, sealSecretFields, writeFileAtomic } from "./keyring.js";
+import type { McpServerOAuthConfig } from "../types/manifest.js";
 import { snapshotFromSurface, type PendingServerUpdate, type ServerVersionAnnotation, type SurfaceSnapshot } from "../core/server-updates.js";
 import { protocolEraFor, snapshotHash } from "../core/introspection-freshness.js";
 import { aliasFromName, DEFAULT_SERVER, nodesForServer, usedServers } from "../core/servers.js";
@@ -206,16 +208,20 @@ function projectsRoot(options?: ProjectStoreOptions): string {
 }
 
 async function readJson<T>(path: string): Promise<T | null> {
+  let parsed: T;
   try {
-    return JSON.parse(await readFile(path, "utf8")) as T;
+    parsed = JSON.parse(await readFile(path, "utf8")) as T;
   } catch {
     return null;
   }
+  // Same as the service store: stored secrets (OAuth tokens, API keys) are sealed by the keyring
+  // (SWARM_STORAGE_KEYS); decryption errors propagate rather than being treated as "missing".
+  return openSecretFields(parsed);
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(join(path, ".."), { recursive: true });
-  await writeFile(path, JSON.stringify(value, null, 2));
+  await writeFileAtomic(path, JSON.stringify(sealSecretFields(value), null, 2));
 }
 
 function indexPath(options?: ProjectStoreOptions): string {
@@ -1288,4 +1294,36 @@ export async function mutateProjectRecord(
   await writeJson(projectPath(project.id, options), project);
   await upsertIndex(project, options);
   return project;
+}
+
+/**
+ * Persist a renewed OAuth login for one project server (same contract as the service store):
+ * never re-introspects; secrets are sealed on write; a static `Authorization: Bearer` header is dropped.
+ */
+export async function updateProjectServerOAuth(
+  projectId: string,
+  serverId: string,
+  oauth: McpServerOAuthConfig,
+  options?: ProjectStoreOptions,
+): Promise<boolean> {
+  const project = await loadRecord(projectId, options);
+  if (!project || project.archived) return false;
+  const server = project.servers?.find((item) => item.id === serverId);
+  if (!server || server.target.transport === "stdio") return false;
+  const target = server.target;
+  target.oauth = oauth;
+  target.auth = { type: "oauth", oauth };
+  if (target.headers) {
+    const headers = { ...target.headers };
+    for (const k of Object.keys(headers)) {
+      if (k.toLowerCase() === "authorization" && /^bearer\s/i.test(headers[k] ?? "")) delete headers[k];
+    }
+    if (Object.keys(headers).length > 0) target.headers = headers;
+    else delete target.headers;
+  }
+  project.updatedAt = new Date().toISOString();
+  mirrorPrimary(project);
+  await writeJson(projectPath(project.id, options), project);
+  await upsertIndex(project, options);
+  return true;
 }
