@@ -344,6 +344,13 @@ export interface ToolEvalCaseResult {
   polarityPass: boolean;
   assertions: ToolEvalAssertionResult[];
   reason?: string;
+  assistantText?: string;
+  /** Whole case wall time: agent probe + judge. */
+  durationMs?: number;
+  /** Agent tool-use probe time. */
+  probeMs?: number;
+  /** Assertion judge time (Jev or LLM fallback). */
+  judgeMs?: number;
 }
 
 export type CatalogCompareStatus = "unchanged" | "added" | "removed" | "schema-changed";
