@@ -8,6 +8,11 @@ export interface CallSlo {
   maxP99Ms?: number;
   /** Share of calls that may fail, from 0 to 1. */
   maxErrorRate?: number;
+  /**
+   * Step only: failed calls a step may have before its error rate counts, so a one-off blip (e.g. a known
+   * flaky step) does not fail the run. Unset or 0 keeps the default: any error over the rate fails.
+   */
+  maxFailedCalls?: number;
 }
 
 export interface CallSloSample {
@@ -45,6 +50,9 @@ export function normalizeCallSlo(value: unknown): CallSlo | undefined {
   if (maxP95Ms !== undefined) slo.maxP95Ms = maxP95Ms;
   if (maxP99Ms !== undefined) slo.maxP99Ms = maxP99Ms;
   if (maxErrorRate !== undefined) slo.maxErrorRate = maxErrorRate;
+  if (typeof raw.maxFailedCalls === "number" && Number.isFinite(raw.maxFailedCalls) && raw.maxFailedCalls >= 1) {
+    slo.maxFailedCalls = Math.min(1_000_000, Math.floor(raw.maxFailedCalls));
+  }
   // p99 can never be tighter than p95: an objective like p95 30795 / p99 3500 can only ever fail.
   if (slo.maxP95Ms !== undefined && slo.maxP99Ms !== undefined && slo.maxP99Ms < slo.maxP95Ms) slo.maxP99Ms = slo.maxP95Ms;
   return Object.keys(slo).length > 0 ? slo : undefined;
@@ -53,6 +61,7 @@ export function normalizeCallSlo(value: unknown): CallSlo | undefined {
 /** Same consistency rule for a resolved objective: lift p99 to p95 when a step's p95 outgrows an inherited p99. */
 export function consistentCallSlo(slo: CallSlo): CallSlo {
   if (slo.maxP95Ms !== undefined && slo.maxP99Ms !== undefined && slo.maxP99Ms < slo.maxP95Ms) return { ...slo, maxP99Ms: slo.maxP95Ms };
+  if (slo.maxFailedCalls === undefined) delete slo.maxFailedCalls;
   return slo;
 }
 
@@ -62,6 +71,7 @@ export function effectiveCallSlo(suite: CallSlo | undefined, step: CallSlo | und
     maxP95Ms: step?.maxP95Ms ?? suite?.maxP95Ms,
     maxP99Ms: step?.maxP99Ms ?? suite?.maxP99Ms,
     maxErrorRate: step?.maxErrorRate ?? suite?.maxErrorRate ?? 0,
+    ...(step?.maxFailedCalls ? { maxFailedCalls: step.maxFailedCalls } : {}),
   });
 }
 
@@ -71,7 +81,7 @@ function judge(kind: "Step" | "Tool" | "Server", name: string, samples: CallSloS
   const errors = samples.filter((sample) => sample.failed).length;
   const errorRate = errors / samples.length;
   const maxErrorRate = limits.maxErrorRate ?? 0;
-  if (errorRate > maxErrorRate) {
+  if (errorRate > maxErrorRate && errors > (limits.maxFailedCalls ?? 0)) {
     reasons.push(
       `${kind} ${name} error_rate ${errorRate.toFixed(3)} exceeds max ${maxErrorRate}`,
     );
@@ -141,4 +151,21 @@ export function serverSloFailures(alias: string, samples: CallSloSample[], slo: 
   const limits = normalizeCallSlo(slo);
   if (!limits) return [];
   return judge("Server", alias, samples, { ...limits, maxErrorRate: limits.maxErrorRate ?? 1 });
+}
+
+/**
+ * Steps whose failed calls were all absorbed by `maxFailedCalls` (errors > 0, within the allowance, so no
+ * error-rate failure). Their scenario failures are excused too, so the blip does not fail the run.
+ */
+export function toleratedStepIds(input: { suite?: CallSlo; steps: CallSloStep[]; samples: CallSloSample[] }): Set<string> {
+  const out = new Set<string>();
+  for (const step of input.steps) {
+    const id = step.nodeId?.trim();
+    if (!id || !step.slo?.maxFailedCalls) continue;
+    const samples = input.samples.filter((s) => s.nodeId === id);
+    const errors = samples.filter((s) => s.failed).length;
+    const limits = effectiveCallSlo(input.suite, step.slo);
+    if (errors > 0 && errors <= (limits.maxFailedCalls ?? 0)) out.add(id);
+  }
+  return out;
 }

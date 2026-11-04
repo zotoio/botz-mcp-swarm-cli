@@ -202,6 +202,7 @@ export const ScenarioStepSchema = z.object({
       maxP95Ms: z.number().positive().optional(),
       maxP99Ms: z.number().positive().optional(),
       maxErrorRate: z.number().min(0).max(1).optional(),
+      maxFailedCalls: z.number().int().nonnegative().optional(),
     })
     .optional(),
   /** Indexes of steps that must finish before this one. Absent means the legacy chain. */

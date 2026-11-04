@@ -18,7 +18,7 @@ import {
   type VarContext,
 } from "./suite-model.js";
 import { assertTargetAllowlisted } from "./allowlist.js";
-import { callSloFailures, serverSloFailures } from "./call-slo.js";
+import { callSloFailures, serverSloFailures, toleratedStepIds } from "./call-slo.js";
 import { exclusiveActiveNode } from "./node-log.js";
 import { assertOrgTargetAllowlisted } from "./org-target-policy.js";
 import type { AllowlistEntry } from "../service/mcp-allowlist.js";
@@ -1139,6 +1139,20 @@ function calledServers(manifest: Manifest, defaultServer: string): string[] {
   return used.size > 0 ? [...used] : [defaultServer];
 }
 
+/** True when every failed call in the scenario came from a step whose `maxFailedCalls` allowance absorbed it. */
+function onlyToleratedFailures(
+  manifest: Manifest,
+  scenarioName: string,
+  samples: ReturnType<MetricsCollector["getObservations"]>,
+  tolerated: Set<string>,
+): boolean {
+  const scenario = manifest.scenarios.find((sc) => sc.name === scenarioName);
+  if (!scenario) return false;
+  const ids = new Set(scenario.steps.map((s) => s.nodeId).filter((id): id is string => Boolean(id)));
+  const failed = samples.filter((s) => s.errorClass !== "none" && s.nodeId && ids.has(s.nodeId));
+  return failed.length > 0 && failed.every((s) => tolerated.has(s.nodeId!));
+}
+
 function buildFailReasons(
   manifest: Manifest,
   samples: ReturnType<MetricsCollector["getObservations"]>,
@@ -1155,33 +1169,34 @@ function buildFailReasons(
   }
 
   const steps = manifest.scenarios.flatMap((scenario) => scenario.steps);
-  failReasons.push(
-    ...callSloFailures({
-      suite: {
-        maxP95Ms: manifest.assertions.maxP95LatencyMs,
-        maxP99Ms: manifest.assertions.maxP99LatencyMs,
-        maxErrorRate: manifest.assertions.maxErrorRate,
-      },
-      steps: steps
-        .filter((step) => step.method === "tools/call")
-        .map((step) => ({
-          nodeId: step.nodeId,
-          label: step.label,
-          tool: step.tool,
-          slo: step.slo,
-        })),
-      samples: samples
-        .filter((sample) => sample.method === "tools/call")
-        .map((sample) => ({
-          nodeId: sample.nodeId,
-          toolName: sample.toolName,
-          latencyMs: sample.latencyMs,
-          failed: sample.errorClass !== "none",
-        })),
-    }),
-  );
+  const sloInput = {
+    suite: {
+      maxP95Ms: manifest.assertions.maxP95LatencyMs,
+      maxP99Ms: manifest.assertions.maxP99LatencyMs,
+      maxErrorRate: manifest.assertions.maxErrorRate,
+    },
+    steps: steps
+      .filter((step) => step.method === "tools/call")
+      .map((step) => ({
+        nodeId: step.nodeId,
+        label: step.label,
+        tool: step.tool,
+        slo: step.slo,
+      })),
+    samples: samples
+      .filter((sample) => sample.method === "tools/call")
+      .map((sample) => ({
+        nodeId: sample.nodeId,
+        toolName: sample.toolName,
+        latencyMs: sample.latencyMs,
+        failed: sample.errorClass !== "none",
+      })),
+  };
+  failReasons.push(...callSloFailures(sloInput));
+  const tolerated = toleratedStepIds(sloInput);
 
   for (const outcome of scenarioOutcomes) {
+    if (outcome.outcome === "fail" && tolerated.size > 0 && onlyToleratedFailures(manifest, outcome.scenario, samples, tolerated)) continue;
     if (outcome.outcome === "fail" || outcome.outcome === "error") {
       failReasons.push(
         `Scenario ${outcome.scenario} ${outcome.outcome}${outcome.message ? `: ${outcome.message}` : ""}`,
