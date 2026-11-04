@@ -1,7 +1,7 @@
 import { SuiteLimitsSchema, type SuiteLimitsInput } from "../core/suite-limits.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { allowlistEntryKey, allowlistEntryLabel, allowlistHosts, type McpServerConfig } from "../service/mcp-allowlist.js";
 import { introspectServer } from "../core/suite-introspect.js";
 import { fillGeneratedToolEvals } from "../core/tool-evals.js";
@@ -236,16 +236,36 @@ async function saveIndex(rows: ProjectIndexRow[], options?: ProjectStoreOptions)
   await writeJson(indexPath(options), rows);
 }
 
+/**
+ * Store ids become path segments: allow only simple id characters (no separators, no "." / "..")
+ * and confirm the joined path stays under the projects root.
+ */
+export function safeStoreSegment(value: string, label = "id"): string {
+  const v = String(value ?? "");
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}$/.test(v) || v.includes("..")) {
+    throw new Error(`invalid ${label}: ${JSON.stringify(v.slice(0, 80))}`);
+  }
+  return v;
+}
+
+function underProjectsRoot(options: ProjectStoreOptions | undefined, ...segments: string[]): string {
+  const root = resolve(projectsRoot(options));
+  const full = resolve(root, ...segments);
+  if (!full.startsWith(root + sep)) throw new Error("path escapes projects root");
+  return full;
+}
+
 function projectPath(id: string, options?: ProjectStoreOptions): string {
-  return join(projectsRoot(options), id, "project.json");
+  return underProjectsRoot(options, safeStoreSegment(id, "project id"), "project.json");
 }
 
 function versionPath(projectId: string, suiteId: string, version: number, options?: ProjectStoreOptions): string {
-  return join(projectsRoot(options), projectId, "suites", suiteId, "versions", `${version}.json`);
+  if (!Number.isInteger(version) || version < 0) throw new Error(`invalid suite version: ${String(version)}`);
+  return underProjectsRoot(options, safeStoreSegment(projectId, "project id"), "suites", safeStoreSegment(suiteId, "suite id"), "versions", `${version}.json`);
 }
 
 function runsDir(projectId: string, options?: ProjectStoreOptions): string {
-  return join(projectsRoot(options), projectId, "runs");
+  return underProjectsRoot(options, safeStoreSegment(projectId, "project id"), "runs");
 }
 
 function toIndexRow(project: ProjectRecord): ProjectIndexRow {
@@ -460,7 +480,13 @@ export async function listProjectsIncludingArchived(
 }
 
 async function loadRecord(id: string, options?: ProjectStoreOptions): Promise<ProjectRecord | null> {
-  const project = await readJson<ProjectRecord>(projectPath(id, options));
+  let file: string;
+  try {
+    file = projectPath(id, options);
+  } catch {
+    return null; // unsafe id: treat as not found
+  }
+  const project = await readJson<ProjectRecord>(file);
   if (!project) return null;
   return normalizeProject(project);
 }
