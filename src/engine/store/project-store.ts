@@ -264,6 +264,10 @@ function versionPath(projectId: string, suiteId: string, version: number, option
   return underProjectsRoot(options, safeStoreSegment(projectId, "project id"), "suites", safeStoreSegment(suiteId, "suite id"), "versions", `${version}.json`);
 }
 
+function runFilePath(projectId: string, runId: string, options?: ProjectStoreOptions): string {
+  return underProjectsRoot(options, safeStoreSegment(projectId, "project id"), "runs", `${safeStoreSegment(runId, "run id")}.json`);
+}
+
 function runsDir(projectId: string, options?: ProjectStoreOptions): string {
   return underProjectsRoot(options, safeStoreSegment(projectId, "project id"), "runs");
 }
@@ -1205,7 +1209,7 @@ export async function saveProjectRun(
   report: RunReport,
   options?: ProjectStoreOptions,
 ): Promise<void> {
-  await writeJson(join(runsDir(projectId, options), `${report.id}.json`), report);
+  await writeJson(runFilePath(projectId, report.id, options), report);
   const project = await loadRecord(projectId, options);
   if (!project) return;
   rememberLatestRun(project, (await listProjectRuns(projectId, options))[0]);
@@ -1250,7 +1254,7 @@ export async function loadProjectRun(
   runId: string,
   options?: ProjectStoreOptions,
 ): Promise<RunReport | null> {
-  return readJson<RunReport>(join(runsDir(projectId, options), `${runId}.json`));
+  return readJson<RunReport>(runFilePath(projectId, runId, options));
 }
 
 /** Remove one stored execution and point the project at the newest run that remains. */
@@ -1263,7 +1267,7 @@ export async function deleteProjectRun(
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(runId)) return false;
   const project = await loadRecord(projectId, options);
   if (!project || project.archived) return false;
-  const file = join(runsDir(projectId, options), `${runId}.json`);
+  const file = runFilePath(projectId, runId, options);
   const report = await readJson<RunReport>(file);
   if (!report || report.id !== runId) return false;
   await rm(file, { force: true });
