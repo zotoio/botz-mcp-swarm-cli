@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.18.0
+
+- `project suite update-from-server`: live re-sync of a suite from its server (coverage, outputSchema contracts, missing steps, `--regenerate-all`, `--dry-run`).
+- Suite and scenario lifecycle hooks (setup/teardown) and the `${__runId}` built-in variable.
+- Step SLO `maxFailedCalls`; eval case timing split (durationMs, probeMs, judgeMs, assistantText) on `ToolEvalCaseResult`.
+- Project runs use the project's stored OAuth login.
+- Engine fixes: schema-valid fixture args, discovered ids instead of placeholder fallbacks, `{{var}}` to `${var}` rewrite, refusal of unresolved arg refs.
+- Security: project store ids and run ids confined to safe path segments; stdio target args validated.
+- CI: npm pinned to 11.21.1 in the publish job; dependency updates.
 - `swarm login-status <project>` and `swarm reconnect <project> <serverId>`: show expired OAuth logins of a central Swarm project and start a Reconnect (prints a sign-in URL; Swarm stores the new tokens). Never prints tokens.
 
 ## 0.17.0
