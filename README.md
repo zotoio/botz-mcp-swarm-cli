@@ -279,7 +279,7 @@ node dist/cli.js --help
 
 The extension protocol is described in [docs/plugin-contract.md](docs/plugin-contract.md).
 CI validates the package and installs the exact tarball on Linux, macOS, and Windows.
-Releases publish that validated artifact using npm trusted publishing. Configure the
+Releases are built in the release job and published using npm trusted publishing. Configure the
 npm trusted publisher for organization `zotoio`, repository `botz-mcp-swarm-cli`,
 workflow `publish.yml` and environment `release`, with direct publishing allowed.
 Every push to `main` is released by semantic-release from Conventional Commit
