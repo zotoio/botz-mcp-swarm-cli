@@ -281,9 +281,10 @@ The extension protocol is described in [docs/plugin-contract.md](docs/plugin-con
 CI validates the package and installs the exact tarball on Linux, macOS, and Windows.
 Releases publish that validated artifact using npm trusted publishing. Configure the
 npm trusted publisher for organization `zotoio`, repository `botz-mcp-swarm-cli`,
-and workflow `publish.yml` with direct publishing allowed. A pushed `v<version>` tag
-matching `package.json` triggers validation and publishing. Stable versions use
-`latest`; prereleases use `next`. See [RELEASING.md](RELEASING.md).
+workflow `publish.yml` and environment `release`, with direct publishing allowed.
+Every push to `main` is released by semantic-release from Conventional Commit
+messages (`fix:` patch, `feat:` minor, breaking change major) and published to
+`latest`. See [RELEASING.md](RELEASING.md).
 The `botz` host is separately versioned and published by [botz-cli](https://github.com/zotoio/botz-cli).
 
 ### Run configuration defaults

@@ -1,7 +1,12 @@
 name: Publish CLI
+# semantic-release: every push to main is analysed with Conventional Commits.
+# fix: -> patch, feat: -> minor, "BREAKING CHANGE:" or "!" -> major; chore/docs/ci/test -> no release.
+# PRs are squash-merged, so the PR title is the release commit.
+# npm publishes via trusted publishing (OIDC, no token) with provenance. The npm trusted publisher
+# points at this workflow file (publish.yml) and environment "release".
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
     inputs:
       diagnose:
@@ -14,45 +19,37 @@ concurrency:
   group: publish-cli
   cancel-in-progress: false
 jobs:
-  release-ref:
-    if: ${{ !inputs.diagnose }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      tag: ${{ steps.release.outputs.tag }}
-      publish: ${{ steps.release.outputs.publish }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - id: release
-        run: node scripts/check-release.mjs
   validate:
-    needs: release-ref
-    if: ${{ needs.release-ref.outputs.publish == 'true' }}
+    if: ${{ !inputs.diagnose }}
     uses: ./.github/workflows/ci.yml
-  publish:
-    needs: [release-ref, validate]
-    if: ${{ needs.release-ref.outputs.publish == 'true' }}
+  release:
+    needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    environment: release
     permissions:
-      contents: read
+      contents: write
+      issues: write
+      pull-requests: write
       id-token: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      # CLI-04: exact pin (no floating major in the id-token:write job).
+      # Exact pin (no floating major in the id-token:write job); >= 11.5.1 is required for trusted publishing.
       - run: npm install -g npm@11.21.1
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-package
-          path: .artifacts
-      # Publish the exact artifact that passed validation, without rebuilding it.
-      - name: Publish validated CLI
+      - run: pnpm install --frozen-lockfile
+      - name: semantic-release
         env:
-          DIST_TAG: ${{ needs.release-ref.outputs.tag }}
-        run: npm publish .artifacts/*.tgz --provenance --access public --tag "$DIST_TAG"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+        run: npx --yes semantic-release@25.0.9
   diagnose:
     if: ${{ inputs.diagnose }}
     runs-on: ubuntu-latest
