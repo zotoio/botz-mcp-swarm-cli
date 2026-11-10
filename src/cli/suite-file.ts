@@ -34,6 +34,7 @@ import {
 } from "./report-scrub.js";
 import { formatMarkdownReport, writeReports } from "../engine/core/report.js";
 import { mergeUnavailableRetryBudget } from "./retry-policy-flags.js";
+import { loadToolResultValidator } from "./tool-validator.js";
 import { introspectServer } from "../engine/core/suite-introspect.js";
 import {
   buildDefaultSuiteNodes,
@@ -108,6 +109,8 @@ export interface SuiteFile {
   limits?: SuiteLimitsInput;
   load: LoadProfile;
   params: Record<string, SuiteParam>;
+  /** Module path (relative to suite directory) exporting validate({ tool, method, result }). */
+  validator?: string;
 }
 
 export function suiteDefaultAlias(suite: Pick<SuiteFile, "defaultServer">): string {
@@ -140,6 +143,7 @@ export function suiteToJson(suite: SuiteFile): Record<string, unknown> {
       schemaVersion: 1,
       ...(rest.cwdBase ? { cwdBase: rest.cwdBase } : {}),
       ...(rest.id ? { id: rest.id } : {}),
+      ...(rest.validator ? { validator: rest.validator } : {}),
       capturedAt: rest.capturedAt,
       name: rest.name,
       target,
@@ -154,6 +158,7 @@ export function suiteToJson(suite: SuiteFile): Record<string, unknown> {
     schemaVersion: 2,
     ...(rest.id ? { id: rest.id } : {}),
     ...(rest.cwdBase ? { cwdBase: rest.cwdBase } : {}),
+    ...(rest.validator ? { validator: rest.validator } : {}),
     capturedAt: rest.capturedAt,
     name: rest.name,
     defaultServer: suiteDefaultAlias(suite),
@@ -362,6 +367,7 @@ function suiteHeader(raw: Record<string, unknown>) {
     schemaVersion: 1 as 1 | 2,
     ...(raw.cwdBase === "suite" ? { cwdBase: "suite" as const } : {}),
     ...(typeof raw.id === "string" ? { id: raw.id } : {}),
+    ...(typeof raw.validator === "string" && raw.validator.trim() ? { validator: raw.validator.trim() } : {}),
     capturedAt: typeof raw.capturedAt === "string" ? raw.capturedAt : new Date().toISOString(),
     name: raw.name.trim(),
   };
@@ -540,6 +546,8 @@ export interface SuiteRunOptions {
     allowStdio?: boolean;
     /** Overrides engine unavailable/gateway retry budget for this run. */
     unavailableRetryBudgetMs?: number;
+    /** Overrides suite.validator for this run (`--validator`). */
+    validator?: string;
 }
 
 export const SUITE_STDIO_NOT_ALLOWED =
@@ -668,6 +676,10 @@ export async function runSavedSuite(
     options.protocolEra ? { ...manifest, protocolEra: options.protocolEra } : manifest,
     options.unavailableRetryBudgetMs,
   );
+  const validatorModule = options.validator ?? suite.validator;
+  const toolResultValidator = validatorModule
+    ? await loadToolResultValidator(validatorModule, dir)
+    : undefined;
   let raw = await runManifest({
     manifest: runManifestBody,
     mode: "load",
@@ -676,6 +688,7 @@ export async function runSavedSuite(
     strictParams: true,
     standaloneTarget: true,
     signal: options.signal,
+    toolResultValidator,
   });
   if (options.inference === true && !options.signal?.aborted && hasEnabledTool(suite.nodes)) {
     try {

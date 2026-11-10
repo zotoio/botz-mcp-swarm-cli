@@ -19,6 +19,7 @@ import { diagnosticError } from "./diagnostic-error.js";
 import { rampDownFlags } from "./ramp-down-flags.js";
 import { parseUnavailableRetryBudgetMs } from "./retry-policy-flags.js";
 import { runRemoteSuite } from "./remote-run.js";
+import { loadToolResultValidator } from "./tool-validator.js";
 import { DEFAULT_SWARM_SERVER_URL } from "./worker-transport.js";
 
 interface RunOptions extends AuthFlags, TargetOptions {
@@ -32,6 +33,8 @@ interface RunOptions extends AuthFlags, TargetOptions {
   remote?: boolean; central?: boolean; server?: string; token?: string; dispatch?: "local" | "worker";
   /** Per-step budget (ms) for retrying 502/503/504 / upstream unavailable during load. */
   unavailableRetryBudgetMs?: string;
+  /** Module exporting validate({ tool, method, result }); overrides suite.validator. */
+  validator?: string;
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -106,6 +109,10 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
       "--unavailable-retry-budget-ms <ms>",
       "Per-step time budget for retrying gateway/upstream 502, 503, 504, and proxy-unavailable responses (engine default 90000)",
     )
+    .option(
+      "--validator <path>",
+      "Module exporting validate({ tool, method, result }) => string | null. A non-null string fails the step. Overrides the suite validator field.",
+    )
     .option("--protocol-era <era>", "MCP protocol era: auto (default: probe server/discover, fall back to legacy initialize), legacy, modern, or both (run once per era and diff results)")
     .option("--soak", "Sustained run; suites use the load engine (default 5000ms)")
     .option("--soak-duration-ms <ms>", "Alias for --duration-ms with soak mode")
@@ -172,6 +179,7 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
           outputDir, reportBaseName: opts.output ? undefined : runReportBaseName(), baseDir: process.cwd(), auth: authFlags(opts), botz,
           allowStdio: opts.allowStdio === true,
           unavailableRetryBudgetMs: unavailableBudgetMs,
+          ...(opts.validator ? { validator: opts.validator } : {}),
           ...(opts.protocolEra ? { protocolEra: parseProtocolEra(opts.protocolEra) } : {}),
         }));
         printRunResult(result.report, shownReports(result, botz, opts.output), opts.format);
@@ -199,7 +207,16 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         if (isRecord(raw.load)) raw.load.retry = { ...(isRecord(raw.load.retry) ? raw.load.retry : {}), unavailableBudgetMs };
       }
       const manifest = parseManifest(raw);
-      const report = await withRunSignal((signal) => runManifest({ signal, manifest, manifestDir: dirname(path), mode: selectRunMode(manifest, explicitSoak) }));
+      const toolResultValidator = opts.validator
+        ? await loadToolResultValidator(opts.validator, dirname(path))
+        : undefined;
+      const report = await withRunSignal((signal) => runManifest({
+        signal,
+        manifest,
+        manifestDir: dirname(path),
+        mode: selectRunMode(manifest, explicitSoak),
+        toolResultValidator,
+      }));
       const botz = resolveBotzHome();
       const paths = await writeReports(report, await reportDir(opts.output, botz));
       printRunResult(report, shownReports(paths, botz, opts.output), opts.format);
