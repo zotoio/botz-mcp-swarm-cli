@@ -22,6 +22,7 @@
     "test": "vitest run && node --test scripts/release-policy-check.mjs",
     "check:leakage": "node scripts/check-leakage.mjs",
     "check:cli-pack": "node scripts/check-cli-pack.mjs",
+    "check:engine-sync": "node scripts/check-engine-sync.mjs",
     "prepublishOnly": "pnpm run build"
   },
   "publishConfig": {

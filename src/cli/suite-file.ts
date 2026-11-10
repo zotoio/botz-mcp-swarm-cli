@@ -33,6 +33,7 @@ import {
   targetSecretValues,
 } from "./report-scrub.js";
 import { formatMarkdownReport, writeReports } from "../engine/core/report.js";
+import { mergeUnavailableRetryBudget } from "./retry-policy-flags.js";
 import { introspectServer } from "../engine/core/suite-introspect.js";
 import {
   buildDefaultSuiteNodes,
@@ -537,6 +538,8 @@ export interface SuiteRunOptions {
     env?: NodeJS.ProcessEnv;
     /** CLI-02: permit stdio targets that come from suite.json (they launch a local command). */
     allowStdio?: boolean;
+    /** Overrides engine unavailable/gateway retry budget for this run. */
+    unavailableRetryBudgetMs?: number;
 }
 
 export const SUITE_STDIO_NOT_ALLOWED =
@@ -661,8 +664,12 @@ export async function runSavedSuite(
   assertSuiteStdioAllowed(targets, cliStdioAliases, options.allowStdio);
   const all = suiteServers(suite);
   const multi = isMultiServer(suite);
+  const runManifestBody = mergeUnavailableRetryBudget(
+    options.protocolEra ? { ...manifest, protocolEra: options.protocolEra } : manifest,
+    options.unavailableRetryBudgetMs,
+  );
   let raw = await runManifest({
-    manifest: options.protocolEra ? { ...manifest, protocolEra: options.protocolEra } : manifest,
+    manifest: runManifestBody,
     mode: "load",
     manifestDir: baseDir,
     vars: params,

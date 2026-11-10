@@ -43,6 +43,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm check:leakage
+      - run: pnpm check:engine-sync
       - run: pnpm test
       - run: pnpm build
       - run: pnpm pack --pack-destination .artifacts

@@ -17,6 +17,7 @@ import { addTargetOptions, targetOptions, type TargetOptions } from "./target-op
 import { printRunResult, type OutputFormat } from "./run-output.js";
 import { diagnosticError } from "./diagnostic-error.js";
 import { rampDownFlags } from "./ramp-down-flags.js";
+import { parseUnavailableRetryBudgetMs } from "./retry-policy-flags.js";
 import { runRemoteSuite } from "./remote-run.js";
 import { DEFAULT_SWARM_SERVER_URL } from "./worker-transport.js";
 
@@ -29,7 +30,13 @@ interface RunOptions extends AuthFlags, TargetOptions {
   maxCallCount?: string; maxPayloadBytes?: string; rampDownStrategy?: string; drainTimeoutMs?: string;
   preset?: LoadPresetId; skipImageGen?: boolean; skipExpensiveLlm?: boolean;
   remote?: boolean; central?: boolean; server?: string; token?: string; dispatch?: "local" | "worker";
+  /** Per-step budget (ms) for retrying 502/503/504 / upstream unavailable during load. */
+  unavailableRetryBudgetMs?: string;
 }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function integer(value: string | undefined, label: string, minimum = 0): number | undefined {
   if (value === undefined) return undefined;
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < minimum) {
@@ -95,6 +102,10 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
     .option("--jitter-ms <ms>", "Maximum random delay between suite passes")
     .option("--max-call-count <n>", `Suite call-count limit (overrides suite limits; env SWARM_MAX_CALL_COUNT; default 100000; max ${SUITE_LIMIT_CEILINGS.maxCallCount})`)
     .option("--max-payload-bytes <n>", `Suite per-payload byte limit (overrides suite limits; env SWARM_MAX_PAYLOAD_BYTES; default 1048576; max ${SUITE_LIMIT_CEILINGS.maxPayloadBytes})`)
+    .option(
+      "--unavailable-retry-budget-ms <ms>",
+      "Per-step time budget for retrying gateway/upstream 502, 503, 504, and proxy-unavailable responses (engine default 90000)",
+    )
     .option("--protocol-era <era>", "MCP protocol era: auto (default: probe server/discover, fall back to legacy initialize), legacy, modern, or both (run once per era and diff results)")
     .option("--soak", "Sustained run; suites use the load engine (default 5000ms)")
     .option("--soak-duration-ms <ms>", "Alias for --duration-ms with soak mode")
@@ -155,10 +166,12 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         }
         const target = await targetOptions(opts);
         const outputDir = await reportDir(opts.output, botz);
+        const unavailableBudgetMs = parseUnavailableRetryBudgetMs(opts.unavailableRetryBudgetMs);
         const result = await withRunSignal((signal) => runSavedSuite(resolveSuiteArg(opts.suite!, botz), {
           signal, params, ...target, load: suiteLoad(opts, soak), limits: suiteLimitFlags(opts), inference: opts.inference === true,
           outputDir, reportBaseName: opts.output ? undefined : runReportBaseName(), baseDir: process.cwd(), auth: authFlags(opts), botz,
           allowStdio: opts.allowStdio === true,
+          unavailableRetryBudgetMs: unavailableBudgetMs,
           ...(opts.protocolEra ? { protocolEra: parseProtocolEra(opts.protocolEra) } : {}),
         }));
         printRunResult(result.report, shownReports(result, botz, opts.output), opts.format);
@@ -180,6 +193,11 @@ export function registerRunCommand(parent: Command, name = "run", suiteOnly = fa
         if (!raw.soak.durationMs && !raw.soak.maxIterations) raw.soak.durationMs = 5000;
       }
       if (opts.protocolEra) raw.protocolEra = parseProtocolEra(opts.protocolEra);
+      const unavailableBudgetMs = parseUnavailableRetryBudgetMs(opts.unavailableRetryBudgetMs);
+      if (unavailableBudgetMs !== undefined) {
+        raw.retry = { ...(isRecord(raw.retry) ? raw.retry : {}), unavailableBudgetMs };
+        if (isRecord(raw.load)) raw.load.retry = { ...(isRecord(raw.load.retry) ? raw.load.retry : {}), unavailableBudgetMs };
+      }
       const manifest = parseManifest(raw);
       const report = await withRunSignal((signal) => runManifest({ signal, manifest, manifestDir: dirname(path), mode: selectRunMode(manifest, explicitSoak) }));
       const botz = resolveBotzHome();
