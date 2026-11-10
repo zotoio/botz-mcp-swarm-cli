@@ -61,10 +61,94 @@ export function resolveInferenceModel(explicit?: string): string {
   return chosen || DEFAULT_INFERENCE_MODEL;
 }
 
-/** Token cap fields for the Chat Completions API. GPT-5 stays on the no-reasoning setting. */
-export function inferenceLimits(model: string, maxTokens: number): Record<string, number | string> {
-  if (model.startsWith("gpt-5")) {
-    return { max_completion_tokens: maxTokens, reasoning_effort: "none" };
+/** Overlay a role's `provider:model` spec onto an environment for provider-aware resolution. */
+export function resolveRoleEnv(env: NodeJS.ProcessEnv = process.env, roleSpec?: string): NodeJS.ProcessEnv {
+  const spec = roleSpec?.trim();
+  if (!spec) return env;
+  const colonIdx = spec.indexOf(":");
+  if (colonIdx > 0) {
+    const rawProvider = spec.slice(0, colonIdx).trim().toLowerCase();
+    const bareModel = spec.slice(colonIdx + 1).trim();
+    if (rawProvider && bareModel && INFERENCE_PROVIDERS[rawProvider]) {
+      const next: NodeJS.ProcessEnv = {
+        ...env,
+        SWARM_LLM_PROVIDER: rawProvider,
+        SWARM_LLM_MODEL: bareModel,
+      };
+      if (rawProvider !== env.SWARM_LLM_PROVIDER?.trim().toLowerCase()) {
+        delete next.SWARM_LLM_BASE_URL;
+      }
+      return next;
+    }
   }
-  return { max_tokens: maxTokens };
+  return { ...env, SWARM_LLM_MODEL: spec };
+}
+
+/** Token cap fields for the Chat Completions API. GPT-5 stays on the no-reasoning setting. */
+export function inferenceLimits(
+  model: string,
+  maxTokens: number,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, number | string> {
+  const budget = Number.parseInt(env.SWARM_TOKEN_BUDGET ?? "", 10);
+  const capped = Number.isFinite(budget) && budget > 0 ? Math.min(maxTokens, budget) : maxTokens;
+  if (model.startsWith("gpt-5")) {
+    return { max_completion_tokens: capped, reasoning_effort: "none" };
+  }
+  return { max_tokens: capped };
+}
+
+export interface InferenceKeyStatus {
+  name: string;
+  set: boolean;
+  /** `••••` plus at most the last 4 characters; never the full value. Absent when unset. */
+  hint?: string;
+}
+
+export interface InferenceSummary {
+  provider?: string;
+  model?: string;
+  /** Non-secret API root, or the Cursor SDK marker. */
+  baseUrl?: string;
+  /** Cursor only: local or cloud. */
+  runtime?: string;
+  jev: { enabled: boolean; model: string };
+  keys: InferenceKeyStatus[];
+  /** Why the provider config could not be resolved (no secrets). */
+  error?: string;
+}
+
+/** Masks a secret: last 4 characters only for values long enough that 4 reveals little. */
+export function maskSecret(value: string | undefined): string | undefined {
+  const v = value?.trim();
+  if (!v) return undefined;
+  return v.length >= 12 ? `••••${v.slice(-4)}` : "••••";
+}
+
+/** Browser-safe view of the inference settings. Never contains a full key. */
+export function inferenceSummary(env: NodeJS.ProcessEnv = process.env): InferenceSummary {
+  const jev = { enabled: Boolean(env.TYPESAFE_API_KEY?.trim()), model: env.SWARM_JEV_MODEL?.trim() || "jev-latest" };
+  const key = (name: string): InferenceKeyStatus => {
+    const hint = maskSecret(env[name]);
+    return hint ? { name, set: true, hint } : { name, set: false };
+  };
+  let resolved: ReturnType<typeof resolveInferenceConfig> | undefined;
+  let error: string | undefined;
+  try {
+    resolved = resolveInferenceConfig(env);
+  } catch (err) {
+    error = err instanceof Error ? err.message : "invalid inference config";
+  }
+  const provider = resolved?.provider ?? env.SWARM_LLM_PROVIDER?.trim().toLowerCase();
+  const presetKeys = provider ? INFERENCE_PROVIDERS[provider]?.keys ?? [] : [];
+  const names = [...new Set(["SWARM_LLM_API_KEY", ...presetKeys, "TYPESAFE_API_KEY"])];
+  return {
+    provider,
+    model: resolved?.model,
+    baseUrl: resolved?.baseUrl,
+    runtime: provider === "cursor" ? (env.SWARM_CURSOR_RUNTIME?.trim() || "local") : undefined,
+    jev,
+    keys: names.map(key),
+    ...(error ? { error } : {}),
+  };
 }

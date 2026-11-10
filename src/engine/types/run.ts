@@ -9,9 +9,15 @@ export type ErrorClass =
   | "quota"
   | "allowlist"
   | "auth"
-  | "rate_limit";
+  | "rate_limit"
+  /** HTTP 502/503/504 or the reverse proxy's "temporarily unavailable" body: the environment, not the server under test. */
+  | "unavailable";
 
-export type RunVerdict = "pass" | "fail";
+/**
+ * `inconclusive`: every failure was the target being unavailable (502/503/504) even after
+ * retrying for the per-step budget, so the run says nothing about the server under test (ENV).
+ */
+export type RunVerdict = "pass" | "fail" | "inconclusive";
 
 export interface LatencyPercentiles {
   /** Arithmetic mean of the samples. */

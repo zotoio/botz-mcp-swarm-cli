@@ -1650,6 +1650,23 @@ function normaliseForEra(value: unknown, depth = 0, ignore: ReadonlySet<string> 
   return value;
 }
 
+/** Max serialized size of one recorded response payload. */
+export const RESPONSE_SAMPLE_MAX_BYTES = 8192;
+
+/** Redact, then cap a payload so reports stay small; oversize payloads become a truncated preview. */
+export function capPayload(value: unknown, max = RESPONSE_SAMPLE_MAX_BYTES): { value: unknown; truncated: boolean; bytes: number } {
+  const red = redactValue(value);
+  let text: string;
+  try {
+    text = JSON.stringify(red) ?? "null";
+  } catch {
+    text = String(red);
+  }
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= max) return { value: red, truncated: false, bytes };
+  return { value: { preview: text.slice(0, max), note: `truncated: ${bytes} bytes > ${max}` }, truncated: true, bytes };
+}
+
 /** Era-neutral digest of a tools/call result: structuredContent (else content), volatile keys removed. */
 export function eraResultDigest(result: unknown, ignoreKeys: readonly string[] = []): string {
   const r = (result ?? {}) as { structuredContent?: unknown; content?: unknown; isError?: boolean };

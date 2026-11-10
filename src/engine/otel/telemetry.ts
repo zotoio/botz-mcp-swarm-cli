@@ -1,4 +1,4 @@
-import type { Counter, Histogram, Meter } from "@opentelemetry/api";
+import type { Counter, Histogram, Meter, Tracer } from "@opentelemetry/api";
 import type { RunReport } from "../types/run.js";
 import type { CallObservation } from "../core/metrics.js";
 import type { ProcessSample } from "../core/process-gauges.js";
@@ -35,8 +35,11 @@ const instruments = {
 };
 
 function getEndpoint(): string | undefined {
-  // CLI-specific collector wins so the CLI never shares a collector with Swarm or botz-mcp by accident.
-  const ep = process.env.SWARM_CLI_OTEL_EXPORTER_OTLP_ENDPOINT?.trim() || process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
+  // Package-specific collectors win so the CLI, Swarm service, and target servers do not share one exporter by accident.
+  const ep =
+    process.env.SWARM_CLI_OTEL_EXPORTER_OTLP_ENDPOINT?.trim() ||
+    process.env.SWARM_OTEL_EXPORTER_OTLP_ENDPOINT?.trim() ||
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
   return ep ? ep.replace(/\/$/, "") : undefined;
 }
 
@@ -90,8 +93,8 @@ export async function initTelemetry(
     "@opentelemetry/sdk-metrics"
   );
   const { NodeTracerProvider } = await import("@opentelemetry/sdk-trace-node");
-  const { BatchSpanProcessor } = await import("@opentelemetry/sdk-trace-base");
-  const { metrics, trace } = await import("@opentelemetry/api");
+  const { SimpleSpanProcessor } = await import("@opentelemetry/sdk-trace-base");
+  const { metrics } = await import("@opentelemetry/api");
 
   const resource = resourceFromAttributes(
     buildTenantResourceAttributes({
@@ -109,7 +112,8 @@ export async function initTelemetry(
   });
   const exportMetrics = metricExporter.export.bind(metricExporter);
   metricExporter.export = (data, callback) => exportMetrics(data, (result) => {
-    if (result.code === 0) delivered++; else failed = true;
+    if (!result.error) delivered++;
+    else failed = true;
     callback(result);
   });
   metricsProvider = new MeterProvider({
@@ -117,31 +121,41 @@ export async function initTelemetry(
     readers: [
       new PeriodicExportingMetricReader({
         exporter: metricExporter,
-        exportIntervalMillis: 3000,
+        exportIntervalMillis: 2000,
       }),
     ],
   });
-  metrics.setGlobalMeterProvider(metricsProvider);
-  meter = metrics.getMeter("botz-mcp-swarm");
+  try {
+    metrics.disable();
+    metrics.setGlobalMeterProvider(metricsProvider);
+  } catch {
+    // Global meter provider may already be locked after a prior init in the same process.
+  }
+  meter = metricsProvider.getMeter("botz-mcp-swarm");
   bindInstruments(meter);
 
   const traceExporter = new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, timeoutMillis: 3000 });
   const exportTraces = traceExporter.export.bind(traceExporter);
   traceExporter.export = (data, callback) => exportTraces(data, (result) => {
-    if (result.code === 0) delivered++; else failed = true;
+    if (!result.error) delivered++;
+    else failed = true;
     callback(result);
   });
   traceProvider = new NodeTracerProvider({
     resource,
-    spanProcessors: [new BatchSpanProcessor(traceExporter)],
+    spanProcessors: [new SimpleSpanProcessor(traceExporter)],
   });
   traceProvider.register();
-  tracer = trace.getTracer("botz-mcp-swarm");
+  const localTracer = traceProvider.getTracer("botz-mcp-swarm");
+  tracer = localTracer;
 
-  return { ...createActiveTelemetry(), exportStatus: () => failed ? "failed" : delivered > 0 ? "delivered" : "configured" };
+  return {
+    ...createActiveTelemetry(meter, localTracer),
+    exportStatus: () => (failed ? "failed" : delivered > 0 ? "delivered" : "configured"),
+  };
 }
 
-function createActiveTelemetry(): TelemetryHandle {
+function createActiveTelemetry(_activeMeter: Meter | null = meter, activeTracer: Tracer | null = tracer): TelemetryHandle {
   return {
     recordCall(obs, transport) {
       const result = obs.errorClass === "none" ? "ok" : obs.errorClass;
@@ -171,7 +185,7 @@ function createActiveTelemetry(): TelemetryHandle {
         direction: "total",
         method: obs.method,
       });
-      tracer
+      activeTracer
         ?.startSpan(`mcp.${obs.method}`, {
           attributes: stripSecretAttributes({
             "mcp.method": obs.method,

@@ -166,6 +166,7 @@ function synthesizeReportFromStatus(
         allowlist: 0,
         auth: 0,
         rate_limit: 0,
+        unavailable: 0,
       },
       latencyMs: {
         mean: Number(stats.p50_ms ?? 0),

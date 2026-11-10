@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTimeline, formatLoadTimeline, LoadTimelineCollector, sparkline } from "./load-timeline.js";
+import { buildTimeline, formatLoadTimeline, LoadTimelineCollector, MAX_TIMELINE_POINTS, sparkline, timelineBucketMs } from "./load-timeline.js";
 
 describe("load timeline", () => {
   it("buckets VUs and TPS overall and per tool", () => {
@@ -34,6 +34,19 @@ describe("load timeline", () => {
     ], 1000);
     expect(t.points[0]!.vus).toBe(2);
     expect(t.summary.overall).toMatchObject({ peakVus: 2, avgVus: 1 });
+  });
+
+  it("downsamples long runs to whole-second buckets under the point cap", () => {
+    expect(timelineBucketMs(60_000)).toBe(1000);
+    expect(timelineBucketMs(3_600_000)).toBe(6000);
+    const c = new LoadTimelineCollector(0, 0);
+    c.setVus(3, 0);
+    for (let t = 1000; t < 3_600_000; t += 1000) c.recordToolCall("echo", 10, true, t);
+    const t = c.finish(3_600_000);
+    expect(t.bucketMs).toBe(6000);
+    expect(t.points.length).toBeLessThanOrEqual(MAX_TIMELINE_POINTS);
+    expect(t.summary.overall.calls).toBe(3599);
+    expect(t.summary.overall.avgTps).toBe(1);
   });
 
   it("collects from runner events", () => {

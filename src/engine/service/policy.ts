@@ -90,11 +90,14 @@ export function normalizePolicy(raw: Partial<OrgPolicy>): OrgPolicy {
       typeof raw.githubOrg === "string" && raw.githubOrg
         ? raw.githubOrg
         : process.env.GITHUB_ALLOWED_ORG?.trim() || DEFAULT_POLICY.githubOrg,
-    teamSlugs: Array.isArray(raw.teamSlugs)
-      ? raw.teamSlugs.map(String)
-      : parseCommaList(process.env.GITHUB_TEAM_SLUGS),
-    adminTeamSlugs: Array.isArray(raw.adminTeamSlugs) ? raw.adminTeamSlugs.map(String) : [],
-    roleBindings: normalizeRoleBindings(raw.roleBindings),
+    teamSlugs: withEnvSignInTeams(
+      Array.isArray(raw.teamSlugs) ? raw.teamSlugs.map(String) : parseCommaList(process.env.GITHUB_TEAM_SLUGS),
+    ),
+    adminTeamSlugs: unique([
+      ...(Array.isArray(raw.adminTeamSlugs) ? raw.adminTeamSlugs.map(String) : []),
+      ...envTeamLevels().admin,
+    ]),
+    roleBindings: withEnvRoleBindings(normalizeRoleBindings(raw.roleBindings)),
     targetAllowlist: normalizeAllowlistEntries(raw.targetAllowlist, DEFAULT_POLICY.targetAllowlist),
     gatewayAllowlist: normalizeAllowlistEntries(raw.gatewayAllowlist, DEFAULT_POLICY.gatewayAllowlist),
     disabledTargetKeys: normalizeKeyList(raw.disabledTargetKeys),
@@ -116,6 +119,58 @@ export function normalizePolicy(raw: Partial<OrgPolicy>): OrgPolicy {
     ),
     redactionMode: redaction,
   };
+}
+
+/**
+ * Deploy-time GitHub team -> access level mapping (env), merged additively
+ * with policy.json so it applies even when a policy file already exists.
+ * Levels (highest wins): admin (operator) > editor > runner > viewer.
+ *   GITHUB_ADMIN_TEAM_SLUGS   operator teams (full control, all projects)
+ *   GITHUB_EDITOR_TEAM_SLUGS  editor on every project
+ *   GITHUB_RUNNER_TEAM_SLUGS  runner on every project
+ *   GITHUB_VIEWER_TEAM_SLUGS  read-only; when set, sign-in is limited to the
+ *                             union of all level teams (org members in no level team are denied)
+ * Slugs are team slugs inside GITHUB_ALLOWED_ORG (an "org/" prefix is accepted and stripped).
+ * The org check (GITHUB_ALLOWED_ORG) is unchanged and always applies first.
+ */
+export interface EnvTeamLevels {
+  admin: string[];
+  editor: string[];
+  runner: string[];
+  viewer: string[];
+}
+
+function teamSlugList(value: string | undefined): string[] {
+  return parseCommaList(value).map((slug) => (slug.includes("/") ? slug.slice(slug.indexOf("/") + 1) : slug));
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+export function envTeamLevels(env: NodeJS.ProcessEnv = process.env): EnvTeamLevels {
+  return {
+    admin: teamSlugList(env.GITHUB_ADMIN_TEAM_SLUGS),
+    editor: teamSlugList(env.GITHUB_EDITOR_TEAM_SLUGS),
+    runner: teamSlugList(env.GITHUB_RUNNER_TEAM_SLUGS),
+    viewer: teamSlugList(env.GITHUB_VIEWER_TEAM_SLUGS),
+  };
+}
+
+function withEnvSignInTeams(teamSlugs: string[]): string[] {
+  const levels = envTeamLevels();
+  if (levels.viewer.length === 0) return teamSlugs;
+  return unique([...teamSlugs, ...levels.viewer, ...levels.runner, ...levels.editor, ...levels.admin]);
+}
+
+function withEnvRoleBindings(bindings: RoleBinding[]): RoleBinding[] {
+  const levels = envTeamLevels();
+  const extra: RoleBinding[] = [];
+  if (levels.editor.length > 0) extra.push({ role: "editor", teamSlugs: levels.editor, projectIds: [] });
+  if (levels.runner.length > 0) extra.push({ role: "runner", teamSlugs: levels.runner, projectIds: [] });
+  const key = (b: RoleBinding) => JSON.stringify([b.role, [...b.teamSlugs].sort(), [...b.projectIds].sort(), Boolean(b.destructive)]);
+  const seen = new Set(bindings.map(key));
+  return [...bindings, ...extra.filter((b) => !seen.has(key(b)))];
 }
 
 function normalizeKeyList(raw: unknown): string[] {
@@ -188,7 +243,7 @@ export function defaultLocalOtelEndpoint(port = Number.parseInt(process.env.PORT
 }
 
 export function effectiveOtelEndpoint(policy: OrgPolicy, port?: number): string {
-  const fromEnv = process.env.SWARM_CLI_OTEL_EXPORTER_OTLP_ENDPOINT?.trim() || process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
+  const fromEnv = process.env.SWARM_OTEL_EXPORTER_OTLP_ENDPOINT?.trim() || process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, "");
   if (policy.otelEndpoint?.trim()) return policy.otelEndpoint.trim().replace(/\/$/, "");
   return defaultLocalOtelEndpoint(port);

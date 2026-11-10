@@ -19,6 +19,8 @@ export const RetryPolicySchema = z.object({
   factor: z.number().min(1).default(RETRY_DEFAULTS.factor),
   maxDelayMs: z.number().int().nonnegative().default(RETRY_DEFAULTS.maxDelayMs),
   maxRetries: z.number().int().nonnegative().max(20).default(RETRY_DEFAULTS.maxRetries),
+  /** Wall time to keep retrying 502/503/504 per step (default 90s). */
+  unavailableBudgetMs: z.number().int().nonnegative().default(90_000),
 });
 export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
 
@@ -35,6 +37,33 @@ const RATE_LIMIT_PATTERNS = [
   /insufficient_quota/i,
   /throttl/i,
 ];
+
+/** The reverse proxy's 503 body (zoto-sites nginx @unavailable) and common gateway texts. */
+export const UNAVAILABLE_MESSAGE = "Service temporarily unavailable. Please retry shortly.";
+const UNAVAILABLE_PATTERNS = [
+  /service temporarily unavailable/i,
+  /\bservice unavailable\b/i,
+  /\bbad gateway\b/i,
+  /\bgateway time-?out\b/i,
+  /\b(?:http|status(?: code)?)[\s:=(]*50[234]\b/i,
+  /\(HTTP 50[234]\)/i,
+  /"code"\s*:\s*-32003\b[^}]*"transient"\s*:\s*true/i,
+];
+
+/** HTTP status that means "the environment is unavailable", not an application failure. */
+export function isUnavailableStatus(status: number | undefined): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
+export function isUnavailableMessage(text: string | undefined | null): boolean {
+  if (!text) return false;
+  return UNAVAILABLE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/** Max wall time one step keeps retrying an unavailable target before giving up. */
+export const UNAVAILABLE_BUDGET_MS = 90_000;
+const UNAVAILABLE_BASE_MS = 1_000;
+const UNAVAILABLE_MAX_DELAY_MS = 15_000;
 
 export function isRateLimitMessage(text: string | undefined | null): boolean {
   if (!text) return false;
@@ -62,6 +91,8 @@ export function parseRetryAfterMs(value: string | undefined, now = Date.now()): 
 
 export interface RateLimitSignal {
   rateLimited: boolean;
+  /** 502/503/504 or the proxy unavailable body: retried for UNAVAILABLE_BUDGET_MS per step. */
+  unavailable?: boolean;
   retryAfterMs?: number;
 }
 
@@ -89,6 +120,16 @@ export function detectRateLimit(
     } catch {
       dataText = "";
     }
+  }
+  const errText = typeof err?.message === "string" ? err.message : undefined;
+  const unavailable =
+    input.errorClass === "unavailable" ||
+    isUnavailableStatus(status) ||
+    isUnavailableMessage(input.errorMessage) ||
+    isUnavailableMessage(errText) ||
+    isUnavailableMessage(dataText);
+  if (unavailable && input.errorClass !== "rate_limit" && status !== 429) {
+    return { rateLimited: false, unavailable: true, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
   }
   const rateLimited =
     input.errorClass === "rate_limit" ||
@@ -121,7 +162,7 @@ export function backoffDelayMs(
 export interface RetryEvent {
   attempt: number;
   delayMs: number;
-  reason: "rate_limit";
+  reason: "rate_limit" | "unavailable";
   retryAfterMs?: number;
   message?: string;
 }
@@ -138,6 +179,8 @@ export interface RetryOptions<T> {
   random?: () => number;
   onRetry?: (event: RetryEvent) => void;
   describe?: (valueOrError: unknown) => string | undefined;
+  /** Per-call budget for retrying an unavailable target (default UNAVAILABLE_BUDGET_MS). */
+  unavailableBudgetMs?: number;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -148,6 +191,8 @@ export async function withRateLimitRetry<T>(call: () => Promise<T>, options: Ret
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? defaultSleep;
   const classifyError = options.classifyError ?? ((error: unknown) => detectRateLimit({ error }, now()));
+  const startedAt = now();
+  let unavailableAttempts = 0;
   for (let attempt = 0; ; attempt++) {
     let outcome: { ok: true; value: T } | { ok: false; error: unknown };
     try {
@@ -162,15 +207,28 @@ export async function withRateLimitRetry<T>(call: () => Promise<T>, options: Ret
       if (outcome.ok) return outcome.value;
       throw outcome.error;
     };
-    if (!policy.enabled || !signal.rateLimited || attempt >= policy.maxRetries) return finish();
-    const delayMs = backoffDelayMs(attempt, policy, options.random, signal.retryAfterMs);
-    if (delayMs === undefined) return finish();
+    if (!policy.enabled) return finish();
+    let delayMs: number | undefined;
+    if (signal.unavailable) {
+      // Environment unavailable (deploy, proxy 503): keep trying for the per-step budget,
+      // honouring Retry-After, independent of the rate-limit retry count.
+      const budget = options.unavailableBudgetMs ?? UNAVAILABLE_BUDGET_MS;
+      const elapsed = now() - startedAt;
+      if (elapsed >= budget) return finish();
+      const backoff = Math.min(UNAVAILABLE_MAX_DELAY_MS, UNAVAILABLE_BASE_MS * 2 ** unavailableAttempts);
+      delayMs = Math.min(signal.retryAfterMs ?? backoff, UNAVAILABLE_MAX_DELAY_MS, budget - elapsed);
+      unavailableAttempts++;
+    } else {
+      if (!signal.rateLimited || attempt >= policy.maxRetries) return finish();
+      delayMs = backoffDelayMs(attempt, policy, options.random, signal.retryAfterMs);
+      if (delayMs === undefined) return finish();
+    }
     if (options.deadline !== undefined && now() + delayMs >= options.deadline) return finish();
     const raw = outcome.ok ? outcome.value : outcome.error;
     options.onRetry?.({
       attempt: attempt + 1,
       delayMs,
-      reason: "rate_limit",
+      reason: signal.unavailable ? "unavailable" : "rate_limit",
       ...(signal.retryAfterMs !== undefined ? { retryAfterMs: signal.retryAfterMs } : {}),
       message: options.describe?.(raw) ?? (raw instanceof Error ? raw.message : undefined),
     });
@@ -191,7 +249,7 @@ export function retryingSession<S extends object>(
   policy: RetryPolicy,
   opts: { deadline?: () => number | undefined; onRetry?: (method: string, event: RetryEvent) => void } = {},
 ): S {
-  if (!policy.enabled || policy.maxRetries === 0) return session;
+  if (!policy.enabled) return session;
   return new Proxy(session, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);

@@ -21,10 +21,7 @@ import {
   type McpSession,
   type ServerMeta,
 } from "./base.js";
-function parseW3CTraceparent(raw: string | undefined): { traceId: string; spanId: string } | null {
-  const m = raw?.trim().match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i);
-  return m ? { traceId: m[1]!.toLowerCase(), spanId: m[2]!.toLowerCase() } : null;
-}
+import { parseW3CTraceparent, clientTraceparent } from "./http-fetch.js";
 
 export const MODERN_PROTOCOL_VERSION = "2026-07-28";
 export const UNSUPPORTED_PROTOCOL_VERSION = -32022;
@@ -196,7 +193,7 @@ export function createModernSession(
       const r = result as { isError?: boolean; content?: Array<{ type?: string; text?: string }> };
       const appError = isTool && Boolean(r?.isError);
       const respH = rpc.lastResponseHeaders();
-      const tp = respH.traceparent || rpc.lastSentHeaders().traceparent;
+      const tp = clientTraceparent(rpc.lastSentHeaders(), respH);
       const parsed = parseW3CTraceparent(tp);
       return {
         success: !appError,

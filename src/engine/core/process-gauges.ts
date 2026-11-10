@@ -73,6 +73,7 @@ export class ProcessGaugeCollector {
   constructor(
     private readonly workerPid: number,
     private readonly sutPids: Set<number> = new Set(),
+    private onSample?: (sample: ProcessSample) => void,
   ) {}
 
   private readonly sutAliases = new Map<number, string>();
@@ -119,10 +120,13 @@ export class ProcessGaugeCollector {
       }
     }
 
-    this.samples.push({ ts, pid, runtime, role, rssBytes, cpuRatio });
+    const sample: ProcessSample = { ts, pid, runtime, role, rssBytes, cpuRatio };
+    this.samples.push(sample);
+    this.onSample?.(sample);
   }
 
-  start(intervalMs: number): void {
+  start(intervalMs: number, onSample?: (sample: ProcessSample) => void): void {
+    if (onSample) this.onSample = onSample;
     void this.sampleOnce();
     this.timer = setInterval(() => void this.sampleOnce(), intervalMs);
   }
@@ -204,7 +208,12 @@ function summarizeRole(
 }
 
 export function checkProcessAssertions(
-  summary: { worker: ProcessSummary; sut: ProcessSummary | null },
+  summary: {
+    worker: ProcessSummary;
+    sut: ProcessSummary | null;
+    /** Secondary (and default) SUT samples by alias; every entry is asserted when present. */
+    suts?: Record<string, ProcessSummary>;
+  },
   assertions: {
     maxWorkerRssBytes?: number;
     maxSutRssBytes?: number;
@@ -229,23 +238,36 @@ export function checkProcessAssertions(
       `Worker CPU max ${summary.worker.cpuRatio.max.toFixed(3)} exceeds ${assertions.maxWorkerCpuRatio}`,
     );
   }
-  if (summary.sut) {
+  const suts = sutSummaries(summary);
+  for (const { label, sut } of suts) {
     if (
       assertions.maxSutRssBytes !== undefined &&
-      summary.sut.rssBytes.max > assertions.maxSutRssBytes
+      sut.rssBytes.max > assertions.maxSutRssBytes
     ) {
       failures.push(
-        `SUT RSS max ${summary.sut.rssBytes.max} exceeds ${assertions.maxSutRssBytes}`,
+        `${label} RSS max ${sut.rssBytes.max} exceeds ${assertions.maxSutRssBytes}`,
       );
     }
     if (
       assertions.maxSutCpuRatio !== undefined &&
-      summary.sut.cpuRatio.max > assertions.maxSutCpuRatio
+      sut.cpuRatio.max > assertions.maxSutCpuRatio
     ) {
       failures.push(
-        `SUT CPU max ${summary.sut.cpuRatio.max.toFixed(3)} exceeds ${assertions.maxSutCpuRatio}`,
+        `${label} CPU max ${sut.cpuRatio.max.toFixed(3)} exceeds ${assertions.maxSutCpuRatio}`,
       );
     }
   }
   return failures;
+}
+
+/** Default `sut` plus every alias in `suts` (skipping a duplicate of the default summary). */
+function sutSummaries(summary: {
+  sut: ProcessSummary | null;
+  suts?: Record<string, ProcessSummary>;
+}): Array<{ label: string; sut: ProcessSummary }> {
+  const named = Object.entries(summary.suts ?? {});
+  if (named.length > 0) {
+    return named.map(([alias, sut]) => ({ label: `SUT ${alias}`, sut }));
+  }
+  return summary.sut ? [{ label: "SUT", sut: summary.sut }] : [];
 }

@@ -2,7 +2,7 @@ import { resolveSuiteLimits, type SuiteLimitsInput } from "./suite-limits.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { AllowlistEntry } from "../service/mcp-allowlist.js";
 import type { Manifest, Target } from "../types/manifest.js";
-import type { RunProgressEvent, RunReport } from "../types/run.js";
+import type { RunProgressEvent, RunReport, RunVerdict } from "../types/run.js";
 import type { CallSlo } from "./call-slo.js";
 import { compileSuite, type LoadProfile, type SuiteNode } from "./suite-model.js";
 import { DEFAULT_SERVER, nodesForServer } from "./servers.js";
@@ -157,7 +157,7 @@ export interface CalleeRunCompletedPayload {
   suite_id: string;
   suite_version: number;
   status: "completed" | "failed" | "stopped";
-  verdict: "pass" | "fail";
+  verdict: RunVerdict;
   duration_ms: number;
   total_calls: number;
   error_count: number;

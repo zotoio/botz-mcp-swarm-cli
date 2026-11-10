@@ -20,7 +20,7 @@ const server = new Server({name:'hooks',version:'1'}, {capabilities:{tools:{}}})
 server.setRequestHandler(ListToolsRequestSchema, async()=>({tools:['ensure_fixture','use_fixture','cleanup','boom'].map(name=>({name,inputSchema:obj}))}));
 server.setRequestHandler(CallToolRequestSchema, async r=>{
   appendFileSync(LOG, r.params.name + '\\n');
-  if (r.params.name === 'ensure_fixture') { writeFileSync(STATE, 'present'); return text('ok'); }
+  if (r.params.name === 'ensure_fixture') { writeFileSync(STATE, 'present'); if (r.params.arguments && r.params.arguments.run_id) writeFileSync(STATE + '.run', String(r.params.arguments.run_id)); return text('ok'); }
   if (r.params.name === 'cleanup') { writeFileSync(STATE, 'gone'); return text('cleaned'); }
   if (r.params.name === 'boom') return text('boom failed', true);
   const present = existsSync(STATE) && readFileSync(STATE, 'utf8') === 'present';
@@ -91,6 +91,18 @@ describe("runner lifecycle hooks", () => {
     ], 2) });
     expect(report.verdict).toBe("pass");
     expect(await log()).toEqual(["ensure_fixture", "use_fixture", "use_fixture", "cleanup"]);
+  }, 30_000);
+
+  it("${__runId} in a setup hook resolves to the run's own id (fixtures tagged for run-end cleanup)", async () => {
+    const report = await runManifest({
+      runId: "run-hooks-123",
+      manifest: manifestFor([
+        { ...call("su", "ensure_fixture", { args: { run_id: "${__runId}" } }), hook: "setup" },
+        call("use", "use_fixture"),
+      ]),
+    });
+    expect(report.verdict).toBe("pass");
+    expect(await readFile(`${state}.run`, "utf8")).toBe("run-hooks-123");
   }, 30_000);
 
   it("a failed suite setup skips every scenario, fails clearly and still tears down", async () => {

@@ -82,12 +82,15 @@ export function valueMatchesField(schema: ElicitFieldSchema, value: unknown): va
   return matchesFormat(value, schema.format);
 }
 
-function fallbackFor(schema: ElicitFieldSchema): ElicitPrimitive {
+function fallbackFor(schema: ElicitFieldSchema, key?: string): ElicitPrimitive {
   if (schema.default !== undefined && valueMatchesField(schema, schema.default)) return schema.default;
   if (schema.enum?.length) return schema.enum[0] ?? "swarm-auto";
   const choice = schema.oneOf?.find((item) => typeof item.const === "string")?.const;
   if (choice) return choice;
-  if (schema.type === "boolean") return false;
+  if (schema.type === "boolean") {
+    const k = (key ?? "").toLowerCase();
+    return k === "approve" || k === "confirm" || k === "accept";
+  }
   if (schema.type === "number" || schema.type === "integer") {
     let value = schema.minimum ?? 0;
     if (schema.maximum !== undefined && value > schema.maximum) value = schema.maximum;
@@ -109,7 +112,11 @@ function fallbackFor(schema: ElicitFieldSchema): ElicitPrimitive {
   if (schema.format === "uri") return "https://example.invalid/swarm";
   if (schema.format === "date") return "2026-01-01";
   if (schema.format === "date-time") return "2026-01-01T00:00:00Z";
-  let text = "swarm-auto";
+  const k = (key ?? "").toLowerCase();
+  let text =
+    k === "details"
+      ? "Accept structured JSON input, validate fields against schema, and return a clear actionable response."
+      : "swarm-auto";
   if (schema.minLength !== undefined && text.length < schema.minLength) text = text.padEnd(schema.minLength, "x");
   if (schema.maxLength !== undefined && text.length > schema.maxLength) text = text.slice(0, schema.maxLength);
   return text;
@@ -132,7 +139,7 @@ export function scriptElicitResult(params: ElicitRequestParams, reply: ElicitAut
     }
     const hasDefault = schema.default !== undefined && valueMatchesField(schema, schema.default);
     if (!required.has(key) && !hasDefault) continue;
-    content[key] = fallbackFor(schema);
+    content[key] = fallbackFor(schema, key);
   }
   return { action: "accept", content };
 }

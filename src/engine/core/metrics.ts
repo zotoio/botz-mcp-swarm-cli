@@ -192,6 +192,7 @@ export class MetricsCollector {
         allowlist: 0,
         auth: 0,
         rate_limit: 0,
+        unavailable: 0,
       };
       for (const o of obs) {
         errorClass[o.errorClass]++;
@@ -247,7 +248,27 @@ export function detectSilentGreen(
 export function computeVerdict(
   failReasons: string[],
   silentGreen: boolean,
-): "pass" | "fail" {
-  if (silentGreen || failReasons.length > 0) return "fail";
+  observations?: readonly Pick<CallObservation, "errorClass">[],
+): "pass" | "fail" | "inconclusive" {
+  if (silentGreen || failReasons.length > 0) {
+    if (observations && isEnvironmentOnlyFailure(observations)) return "inconclusive";
+    return "fail";
+  }
   return "pass";
+}
+
+/**
+ * True when the run failed only because the target was unavailable (HTTP 502/503/504 or the
+ * proxy's unavailable body, after retries): at least one such call and no other failed call.
+ */
+export function isEnvironmentOnlyFailure(
+  observations: readonly Pick<CallObservation, "errorClass">[],
+): boolean {
+  let unavailable = 0;
+  for (const o of observations) {
+    if (o.errorClass === "none") continue;
+    if (o.errorClass !== "unavailable") return false;
+    unavailable++;
+  }
+  return unavailable > 0;
 }

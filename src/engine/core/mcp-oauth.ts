@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { McpServerAuth, McpServerOAuthConfig, Target } from "../types/manifest.js";
+import { egressGuardedFetch } from "./egress-url.js";
 
 export interface OAuthDiscoveryResult {
   issuer?: string;
@@ -466,12 +467,13 @@ export function withOAuth<T extends Target>(target: T, oauth: McpServerOAuthConf
 
 export async function refreshOAuthTokenIfNeeded(
   target: Target,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<Target> {
   if (target.transport === "stdio") return target;
   const oauth = targetOAuthConfig(target);
   if (!oauth?.refreshToken || !oauth.tokenEndpoint) return target;
-  const result = await refreshOAuthLogin(oauth, fetchImpl);
+  // SWARM-17: the refresh POST carries the refresh token and client secret, so it goes through the egress guard.
+  const result = await refreshOAuthLogin(oauth, fetchImpl ?? egressGuardedFetch(fetch));
   if (!result.ok || !result.refreshed) return target;
   return withOAuth(target, result.oauth);
 }

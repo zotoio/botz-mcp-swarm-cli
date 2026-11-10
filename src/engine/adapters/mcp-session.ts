@@ -18,6 +18,7 @@ import {
   type ServerMeta,
 } from "./base.js";
 import { scriptElicitResult } from "./elicit-reply.js";
+import { parseW3CTraceparent, clientTraceparent } from "./http-fetch.js";
 
 const CLIENT_INFO = {
   name: "botz-mcp-swarm",
@@ -33,6 +34,7 @@ const CLIENT_INFO = {
 
 export interface McpSessionOptions {
   getResponseHeaders?: () => Record<string, string>;
+  getSentHeaders?: () => Record<string, string>;
   /** Default auto-reply for elicitation/create (SEP-1036 form + URL modes). */
   elicitAutoReply?: ElicitAutoReply;
   /** Collect stderr lines (stdio only — caller attaches stream). */
@@ -204,7 +206,17 @@ export async function createMcpSession(
         bytesIn,
         bytesOut,
         result,
-        responseHeaders: options?.getResponseHeaders?.(),
+        ...(() => {
+          const respH = options?.getResponseHeaders?.();
+          const sentH = options?.getSentHeaders?.();
+          const tp = clientTraceparent(sentH, respH);
+          const parsedTp = parseW3CTraceparent(tp);
+          return {
+            responseHeaders: respH,
+            ...(tp ? { traceparent: tp } : {}),
+            ...(parsedTp ? { traceId: parsedTp.traceId, spanId: parsedTp.spanId } : {}),
+          };
+        })(),
       };
     } catch (error) {
       const latencyMs = performance.now() - start;
