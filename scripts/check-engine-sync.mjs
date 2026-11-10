@@ -71,7 +71,8 @@ if (recordedHash !== actualHash) {
 const cliPkg = JSON.parse(readFileSync(cliPackagePath, "utf8"));
 
 const rangeErrors = [];
-for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
+const engineDeps = manifest.dependencyRanges ?? manifest.dependencies ?? {};
+for (const [name, range] of Object.entries(engineDeps)) {
   if (typeof range !== "string") continue;
   const installed = cliPkg.dependencies?.[name];
   if (installed === undefined) {
@@ -89,9 +90,15 @@ if (rangeErrors.length > 0) {
   process.exit(1);
 }
 
-console.log(
-  `OK engine tree ${actualHash.slice(0, 12)}… sync ${manifest.sourceCommit?.slice?.(0, 7) ?? manifest.commit?.slice?.(0, 7) ?? "?"}`,
-);
+const commit =
+  typeof manifest.platformCommit === "string"
+    ? manifest.platformCommit
+    : typeof manifest.sourceCommit === "string"
+      ? manifest.sourceCommit
+      : typeof manifest.commit === "string"
+        ? manifest.commit
+        : "?";
+console.log(`OK engine tree ${actualHash.slice(0, 12)}… sync ${commit.slice(0, 7)}`);
 
 /**
  * @param {unknown} value
@@ -99,13 +106,15 @@ console.log(
 function validateManifest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) fatal("ENGINE_SOURCE.json must be an object");
   const m = /** @type {Record<string, unknown>} */ (value);
-  const hasCommit = typeof m.sourceCommit === "string" || typeof m.commit === "string";
-  const hasHash = typeof m.engineTreeHash === "string" || typeof m.treeHash === "string";
+  const hasCommit =
+    typeof m.platformCommit === "string" || typeof m.sourceCommit === "string" || typeof m.commit === "string";
+  const hasHash = typeof m.treeSha256 === "string" || typeof m.engineTreeHash === "string" || typeof m.treeHash === "string";
   if (!hasCommit || !hasHash) {
-    fatal("ENGINE_SOURCE.json must include sourceCommit (or commit) and engineTreeHash (or treeHash)");
+    fatal("ENGINE_SOURCE.json must include platformCommit (or sourceCommit / commit) and treeSha256 (or engineTreeHash / treeHash)");
   }
-  if (m.dependencies !== undefined && (typeof m.dependencies !== "object" || m.dependencies === null || Array.isArray(m.dependencies))) {
-    fatal("ENGINE_SOURCE.json dependencies must be an object when present");
+  const depBlock = m.dependencyRanges ?? m.dependencies;
+  if (depBlock !== undefined && (typeof depBlock !== "object" || depBlock === null || Array.isArray(depBlock))) {
+    fatal("ENGINE_SOURCE.json dependencyRanges (or dependencies) must be an object when present");
   }
   return m;
 }
@@ -114,6 +123,7 @@ function validateManifest(value) {
  * @param {Record<string, unknown>} manifest
  */
 function pickTreeHash(manifest) {
+  if (typeof manifest.treeSha256 === "string") return manifest.treeSha256;
   if (typeof manifest.engineTreeHash === "string") return manifest.engineTreeHash;
   if (typeof manifest.treeHash === "string") return manifest.treeHash;
   return undefined;

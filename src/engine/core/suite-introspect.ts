@@ -142,7 +142,24 @@ function toTool(value: unknown): ToolCatalogEntry | null {
     inputSchema,
     outputSchema,
     annotations,
+    ...(hintMeta(value._meta) ? { meta: hintMeta(value._meta) } : {}),
   };
+}
+
+const HINT_KEYS = /^(cost|costUsd|cost_usd|costTier|latencyMs|latency_ms|expectedLatencyMs|longRunning|long_running)$/;
+
+/** Keep only small, server-declared cost/latency hints from tools/list `_meta` (flat or one namespace deep). */
+function hintMeta(raw: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(raw)) return undefined;
+  const out: Record<string, unknown> = {};
+  const take = (obj: Record<string, unknown>) => {
+    for (const [k, v] of Object.entries(obj)) {
+      if (HINT_KEYS.test(k) && (typeof v === "number" || typeof v === "boolean" || (typeof v === "string" && v.length <= 32))) out[k] = v;
+    }
+  };
+  take(raw);
+  for (const v of Object.values(raw)) if (isRecord(v)) take(v);
+  return Object.keys(out).length ? out : undefined;
 }
 
 function toResource(value: unknown): ResourceCatalogEntry | null {

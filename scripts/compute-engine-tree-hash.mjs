@@ -24,7 +24,6 @@ export function computeEngineTreeHash(engineRoot) {
     hash.update(rel.replaceAll("\\", "/"));
     hash.update("\0");
     hash.update(body);
-    hash.update("\0");
   }
   return hash.digest("hex");
 }

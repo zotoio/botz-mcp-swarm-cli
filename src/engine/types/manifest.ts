@@ -6,10 +6,18 @@ import { RetryPolicySchema } from "../core/rate-limit-retry.js";
 export const TransportTypeSchema = z.enum(["stdio", "sse", "streamable-http"]);
 export type TransportType = z.infer<typeof TransportTypeSchema>;
 
+/**
+ * MCP protocol era to speak to a target.
+ * - legacy: 2025-11-25 initialize handshake, Mcp-Session-Id, standalone GET notification stream.
+ * - modern: 2026-07-28 sessionless requests (per-request `_meta`), `server/discover`.
+ * - auto (default): probe `server/discover`, fall back to legacy initialize.
+ */
 export const ProtocolEraSchema = z.enum(["legacy", "auto", "modern"]);
 export type ProtocolEra = z.infer<typeof ProtocolEraSchema>;
+/** A suite may additionally run in compare mode across both eras. */
 export const SuiteProtocolEraSchema = z.enum(["legacy", "auto", "modern", "both"]);
 export type SuiteProtocolEra = z.infer<typeof SuiteProtocolEraSchema>;
+export type NegotiatedProtocolEra = "legacy" | "modern";
 
 export const SessionReuseSchema = z.enum(["cold", "warm"]);
 export type SessionReuse = z.infer<typeof SessionReuseSchema>;
@@ -67,7 +75,9 @@ export const HttpTargetSchema = z.object({
   headers: z.record(z.string(), z.string()).optional(),
   auth: McpServerAuthSchema.optional(),
   oauth: McpServerOAuthConfigSchema.optional(),
+  /** Protocol era to speak (default auto: probe server/discover, fall back to legacy). */
   protocolEra: ProtocolEraSchema.optional(),
+  /** Legacy era only: do not open the standalone GET notification stream. */
   suppressNotificationStream: z.boolean().optional(),
 });
 
@@ -130,6 +140,7 @@ export const ErrorClassSchema = z.enum([
   "allowlist",
   "auth",
   "rate_limit",
+  "unavailable",
 ]);
 
 export const ElicitAutoReplySchema = z.object({
@@ -238,6 +249,7 @@ export const AssertionsSchema = z.object({
   requireScenarioOutcomes: z.boolean().default(true),
   /** Fail if negotiated protocolVersion differs from this value. */
   requireProtocolVersion: z.string().optional(),
+  /** Fail if the negotiated protocol era differs (catches a silent Auto fallback). */
   requireProtocolEra: z.enum(["legacy", "modern"]).optional(),
   /** Objectives judged over all tool calls on one server, by alias. */
   servers: z.record(z.string(), ServerSloSchema).optional(),
@@ -292,7 +304,10 @@ export const ManifestSchema = z.object({
    * 2025-11-25, capability-mismatch Fail honesty is on for required methods.
    */
   protocolVersion: z.string().optional(),
-  /** Pin every target to one protocol era, or `both` for compare mode. */
+  /**
+   * Pin every target to one protocol era, or `both` to run the suite once per
+   * era and diff the results (compare mode). Unset: each target's own setting.
+   */
   protocolEra: SuiteProtocolEraSchema.optional(),
   /** Compare mode: extra result keys to ignore when diffing tool results across eras. */
   eraCompare: z.object({ ignoreKeys: z.array(z.string()).optional() }).optional(),

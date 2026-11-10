@@ -20,16 +20,6 @@ function rejectUnsafeCommandSegments(command: string): void {
   }
 }
 
-/** Arguments go straight to spawn (no shell), but still must be plain bounded strings. */
-export function assertSafeStdioArgs(args: unknown): string[] {
-  if (args === undefined) return [];
-  if (!Array.isArray(args) || args.length > 256) throw new StdioPathError("stdio_args_invalid");
-  for (const a of args) {
-    if (typeof a !== "string" || a.length > 8192 || a.includes("\0")) throw new StdioPathError("stdio_args_invalid");
-  }
-  return args as string[];
-}
-
 export function assertPathWithinRoot(absolutePath: string, root: string): void {
   const resolvedRoot = resolve(root);
   const resolvedPath = resolve(absolutePath);
@@ -56,10 +46,8 @@ export function resolveStdioTarget(target: Target, baseDir?: string): Target {
   const cwd = target.cwd ? resolve(target.cwd) : root;
   assertPathWithinRoot(cwd, root);
 
-  if (typeof target.command !== "string" || target.command.trim() === "") throw new StdioPathError("stdio_command_invalid");
   let command = target.command;
   rejectUnsafeCommandSegments(command);
-  assertSafeStdioArgs(target.args);
 
   if (command.endsWith(".sh")) {
     const scriptPath = isAbsolute(command)
@@ -119,5 +107,7 @@ export function buildStdioEnv(
     if (value === undefined) continue;
     if (pass.has(key) || key.startsWith("LC_")) env[key] = value;
   }
-  return { ...env, ...userEnv };
+  const merged = { ...env, ...userEnv };
+  delete merged.NPM_CONFIG_PREFIX;
+  return merged;
 }

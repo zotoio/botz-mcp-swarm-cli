@@ -11,7 +11,7 @@ describe("retry-policy-flags", () => {
   it("merges budget into manifest retry blocks", () => {
     const base = { name: "t", target: { transport: "stdio" as const, command: "x" }, allowlist: [], nodes: [], load: { durationMs: 1, maxConcurrency: 1, iterations: 1 } } as Manifest;
     const next = mergeUnavailableRetryBudget(base, 45_000);
-    expect((next.retry as { unavailableBudgetMs?: number } | undefined)?.unavailableBudgetMs).toBe(45_000);
-    expect((next.load.retry as { unavailableBudgetMs?: number } | undefined)?.unavailableBudgetMs).toBe(45_000);
+    expect(next.retry?.unavailableBudgetMs).toBe(45_000);
+    expect(next.load.retry?.unavailableBudgetMs).toBe(45_000);
   });
 });

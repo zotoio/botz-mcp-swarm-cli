@@ -22,6 +22,20 @@ describe("run server", () => {
     expect(serverEndpoint({ transport: "stdio", command: "npx" })).toBe("npx");
   });
 
+  it("redacts secret-shaped stdio arguments", () => {
+    const secret = "s" + "uper-secret-key-99";
+    expect(serverEndpoint({
+      transport: "stdio",
+      command: "mcp-server",
+      args: [`--api-key=${secret}`, "--password", secret, "--token", secret, "--port", "3000"],
+    })).toBe("mcp-server --api-key=[REDACTED] --password [REDACTED] --token [REDACTED] --port 3000");
+    expect(serverEndpoint({
+      transport: "stdio",
+      command: "mcp-server",
+      args: [`--api-key=${secret}`],
+    })).not.toContain(secret);
+  });
+
   it("omits an unknown name and version and formats one line", () => {
     const bare = runServer({ transport: "stdio", command: "uvx", args: ["mcp-server-time"] });
     expect(bare).toEqual({ transport: "stdio", endpoint: "uvx mcp-server-time" });

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-export const SWARM_TESTER_USER_AGENT = "botz-mcp-swarm/0.16.0 (mcp-tester)";
+export const SWARM_TESTER_USER_AGENT = "botz-mcp-swarm/0.6.0 (mcp-tester)";
 
 export interface HeaderCapture {
   lastHeaders: Record<string, string>;
@@ -13,9 +13,24 @@ export function generateW3CTraceparent(): { traceparent: string; traceId: string
   return {
     traceparent: `00-${traceId}-${spanId}-01`,
     traceId,
-    traceIdHex: traceId,
     spanId,
-  } as { traceparent: string; traceId: string; spanId: string };
+  };
+}
+
+export function parseW3CTraceparent(raw: string | undefined): { traceId: string; spanId: string } | null {
+  if (!raw || typeof raw !== "string") return null;
+  const m = raw.trim().match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i);
+  if (!m) return null;
+  return { traceId: m[1]!.toLowerCase(), spanId: m[2]!.toLowerCase() };
+}
+
+/**
+ * The traceparent that identifies swarm's CLIENT span: the one we SENT. A server echoes its own
+ * traceparent (same trace id, its server span id) on the response; using that as the client span id
+ * made the client and server spans collide and left server spans unparented ("0 server spans").
+ */
+export function clientTraceparent(sent?: Record<string, string>, received?: Record<string, string>): string | undefined {
+  return sent?.traceparent || received?.traceparent || undefined;
 }
 
 /** Wraps fetch to inject W3C traceparent + (mcp-tester) User-Agent and capture response headers. */

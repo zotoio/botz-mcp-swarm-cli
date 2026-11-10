@@ -3,7 +3,7 @@ import { updateNode, type SuiteNode, type SuiteNodeType } from "./suite-model.js
 
 /** Card size on the suite graph. Frames are larger and hold their steps inside. */
 export const SUITE_CARD_WIDTH = 232;
-export const SUITE_CARD_HEIGHT = 104;
+export const SUITE_CARD_HEIGHT = 88;
 
 /** Ready steps that share one Promise.all batch, drawn as columns in a downward rank. */
 export const DEFAULT_LANES = 4;
@@ -12,11 +12,11 @@ const FAN_COLUMNS = 3;
 /** One rank of the execution DAG. Wide enough that a parallel wave stays on one band. */
 const DAG_COLUMNS = 8;
 const FAN_STAGGER = 28;
-const GAP_X = 96;
-const GAP_Y = 104;
-const FRAME_PAD = 28;
+const GAP_X = 48;
+const GAP_Y = 38;
+const FRAME_PAD = 22;
 /** Room under the frame title so the entry wire can drop onto the first step. */
-const FRAME_HEADER = 112;
+const FRAME_HEADER = 64;
 /** Extra room on the right so a wrapped run-order wire stays inside the frame. */
 const WIRE_GUTTER = 40;
 const EMPTY_FRAME = { width: 360, height: 188 };
@@ -148,6 +148,9 @@ export function frameSize(node: SuiteNode, positions: Map<string, GraphPoint>): 
     width = Math.max(width, pos.x + size.width + FRAME_PAD + WIRE_GUTTER);
     height = Math.max(height, pos.y + size.height + FRAME_PAD);
   }
+  // Display-only floor set by the canvas hook-section layout so empty Setup/Teardown headers stay inside the frame.
+  const floor = (node as { frameMinHeight?: number }).frameMinHeight;
+  if (typeof floor === "number" && floor > height) height = floor;
   return { width, height };
 }
 
@@ -390,6 +393,94 @@ export function fanPositions(nodes: SuiteNode[]): Map<string, GraphPoint> {
   return positions;
 }
 
+/**
+ * Choose a balanced column count so cards pack into a readable 2D grid on the available canvas
+ * instead of stretching into a tall single-column strip (`lanes = 1`) or an overly wide ribbon.
+ * Honors an explicit `lanes` count when > 1, otherwise picks columns from step count and aspect ratio.
+ */
+export function smartColumnsForSuite(
+  nodes: SuiteNode[],
+  options?: { lanes?: number; canvasWidth?: number; canvasHeight?: number },
+): number {
+  const explicitLanes = options?.lanes !== undefined ? Math.round(options.lanes) : undefined;
+  if (explicitLanes !== undefined && explicitLanes > 1 && !options?.canvasWidth) {
+    return Math.max(1, Math.min(8, explicitLanes));
+  }
+  const predecessors = dagPredecessors(nodes, { includeDisabled: true });
+  let maxBandSize = 0;
+  let totalSteps = 0;
+  const measure = (list: SuiteNode[]) => {
+    totalSteps += list.length;
+    for (const node of list) {
+      if (isFrame(node) && node.children?.length) measure(node.children);
+    }
+    const rankOf = new Map<string, number>();
+    const rank = (id: string, stack: Set<string>): number => {
+      const cached = rankOf.get(id);
+      if (cached !== undefined) return cached;
+      if (stack.has(id)) return 0;
+      stack.add(id);
+      const node = list.find((item) => item.id === id);
+      const sources = new Set<string>();
+      const members = node && isFrame(node) ? descendantIds(node) : [id];
+      for (const member of members) {
+        for (const source of predecessors.get(member) ?? []) {
+          const owner = ownerId(list, source);
+          if (owner && owner !== id) sources.add(owner);
+        }
+      }
+      const value = sources.size === 0 ? 0 : 1 + Math.max(...[...sources].map((source) => rank(source, stack)));
+      stack.delete(id);
+      rankOf.set(id, value);
+      return value;
+    };
+    for (const node of list) rank(node.id, new Set());
+    const counts = new Map<number, number>();
+    for (const node of list) {
+      const level = rankOf.get(node.id) ?? 0;
+      counts.set(level, (counts.get(level) ?? 0) + 1);
+    }
+    for (const count of counts.values()) {
+      maxBandSize = Math.max(maxBandSize, count);
+    }
+  };
+  measure(nodes);
+
+  const count = Math.max(maxBandSize, Math.min(totalSteps, 24));
+  if (count <= 1) return 1;
+  if (count <= 2) return 2;
+
+  const w = options?.canvasWidth && options.canvasWidth > 0 ? options.canvasWidth : 1360;
+  const h = options?.canvasHeight && options.canvasHeight > 0 ? options.canvasHeight : 600;
+  const aspect = Math.max(1.0, Math.min(3.0, w / h));
+  const cellAspect = (SUITE_CARD_HEIGHT + GAP_Y) / (SUITE_CARD_WIDTH + GAP_X);
+  const ideal = Math.ceil(Math.sqrt(count * aspect * cellAspect * 1.15));
+  const maxByViewport = Math.max(3, Math.min(count >= 18 && w >= 1350 ? 7 : 6, Math.floor((w + 240) / (SUITE_CARD_WIDTH + 24))));
+  const minCols = count >= 18 && w >= 1350 ? 6 : count >= 14 ? 5 : count >= 8 ? 4 : count >= 5 ? 3 : 2;
+  return Math.max(minCols, Math.min(maxByViewport, count, ideal));
+}
+
+/** True when any node in the suite tree has a stored custom `layout` coordinate. */
+export function hasCustomLayout(nodes: SuiteNode[]): boolean {
+  for (const node of nodes) {
+    if (node.layout) return true;
+    if (node.children?.length && hasCustomLayout(node.children)) return true;
+  }
+  return false;
+}
+
+/**
+ * Reset all custom dragged `layout` overrides across the suite tree and recompute the clean
+ * default original layout (using smart viewport-aware columns when `lanes` is omitted or <= 1).
+ */
+export function resetSuiteLayout(
+  nodes: SuiteNode[],
+  options?: { lanes?: number; canvasWidth?: number; canvasHeight?: number },
+): SuiteNode[] {
+  const columns = smartColumnsForSuite(nodes, options);
+  return tidyPositions(nodes, columns);
+}
+
 export function tidyPositions(nodes: SuiteNode[], lanes = DEFAULT_LANES): SuiteNode[] {
   const cleared = structuredClone(nodes);
   const strip = (list: SuiteNode[]) => {
@@ -565,9 +656,29 @@ export function deriveEdges(nodes: SuiteNode[]): SuiteEdge[] {
 /** Flow edges the runner honors: a wide DAG, not a chain of siblings. */
 export function executionEdges(nodes: SuiteNode[]): SuiteEdge[] {
   const predecessors = dagPredecessors(nodes, { includeDisabled: true });
+  const ancestorsOf = new Map<string, Set<string>>();
+  const getAncestors = (id: string, stack = new Set<string>()): Set<string> => {
+    const cached = ancestorsOf.get(id);
+    if (cached) return cached;
+    const result = new Set<string>();
+    if (stack.has(id)) return result;
+    stack.add(id);
+    for (const p of predecessors.get(id) ?? []) {
+      result.add(p);
+      for (const gp of getAncestors(p, stack)) result.add(gp);
+    }
+    stack.delete(id);
+    ancestorsOf.set(id, result);
+    return result;
+  };
+  for (const id of predecessors.keys()) getAncestors(id);
   const flow: SuiteEdge[] = [];
   for (const [target, sources] of predecessors) {
-    for (const source of sources) flow.push({ kind: "flow", source, target });
+    const reduced =
+      sources.length <= 1
+        ? sources
+        : sources.filter((s) => !sources.some((other) => other !== s && getAncestors(other).has(s)));
+    for (const source of reduced) flow.push({ kind: "flow", source, target });
   }
   const entry: SuiteEdge[] = [];
   const walk = (list: SuiteNode[]) => {

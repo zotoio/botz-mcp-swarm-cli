@@ -1,14 +1,48 @@
 import { win32 } from "node:path";
+import { REDACTED, redactHeaders, redactString } from "./redaction.js";
 import type { Target } from "../types/manifest.js";
 import type { RunServer } from "../types/run.js";
 
 /**
  * Where a run connected, without credentials or machine paths: an HTTP URL loses its userinfo, query,
- * and fragment; a stdio command and any absolute argument become their basename.
+ * and fragment; a stdio command and any absolute argument become their basename; secret-shaped flags
+ * (`--api-key=…`, `--password …`) become `[REDACTED]`.
  */
 export function serverEndpoint(target: Target): string {
   if (target.transport !== "stdio") return bareUrl(target.url);
-  return [target.command, ...(target.args ?? [])].map((part) => quote(portable(part))).join(" ");
+  const parts = [target.command, ...(target.args ?? [])];
+  const out: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!;
+    const flag = /^--?([A-Za-z0-9_-]+)(?:=(.*))?$/.exec(part);
+    if (flag && secretFlag(flag[1]!)) {
+      if (flag[2] !== undefined) {
+        out.push(quote(`${portableFlagName(part)}=${REDACTED}`));
+      } else {
+        out.push(quote(portable(part)));
+        const next = parts[i + 1];
+        if (next !== undefined && !next.startsWith("-")) {
+          out.push(quote(REDACTED));
+          i += 1;
+        }
+      }
+      continue;
+    }
+    const pathSafe = portable(part);
+    out.push(quote(redactString(pathSafe) === pathSafe ? pathSafe : REDACTED));
+  }
+  return out.join(" ");
+}
+
+/** True when a CLI flag name is secret-shaped (`api-key`, `token`, `password`, …). */
+function secretFlag(name: string): boolean {
+  return redactHeaders({ [name]: "x" })[name] !== "x";
+}
+
+/** Keep `--flag` (or `-f`) and basename any absolute path after `=` was already split off. */
+function portableFlagName(part: string): string {
+  const eq = part.indexOf("=");
+  return eq > 0 ? portable(part.slice(0, eq)) : portable(part);
 }
 
 export function runServer(target: Target, info?: { name?: string; version?: string }): RunServer {

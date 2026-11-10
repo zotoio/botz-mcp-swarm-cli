@@ -73,6 +73,8 @@ function report(id: string, tool: string, p95: number): RunReport {
           quota: 0,
           allowlist: 0,
           auth: 0,
+          rate_limit: 0,
+          unavailable: 0,
         },
         latencyMs: { p50: p95, p95, p99: p95 },
         bytesIn: 1,

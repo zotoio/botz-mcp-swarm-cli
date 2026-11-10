@@ -12,6 +12,7 @@ export interface JsonSchema {
   maximum?: number;
   minLength?: number;
   minItems?: number;
+  maxItems?: number;
   items?: JsonSchema;
   [key: string]: unknown;
 }
@@ -149,8 +150,15 @@ function sampleValue(schema: JsonSchema | undefined, depth: number): unknown {
   }
   if (rawType === "boolean") return false;
   if (rawType === "array") {
-    const count = typeof schema.minItems === "number" ? schema.minItems : 0;
-    return Array.from({ length: count }, () => sampleValue(schema.items, depth + 1));
+    // Many servers reject an empty list even when the schema has no minItems
+    // (e.g. Parallel's web_search: "search_queries must be a non-empty list").
+    // Default to one item; honour minItems and a maxItems cap.
+    // An item schema with no declared fields (`{type: object, additionalProperties: true}`) has nothing concrete to
+    // generate: `[]` is the only value guaranteed valid, unless minItems forces items.
+    const opaque = !!schema.items && (schema.items.type === "object" || !schema.items.type) && !schema.items.properties && !(schema.items.required?.length);
+    const min = typeof schema.minItems === "number" ? schema.minItems : opaque ? 0 : 1;
+    const count = typeof schema.maxItems === "number" ? Math.min(min, schema.maxItems) : min;
+    return Array.from({ length: Math.max(count, 0) }, () => sampleValue(schema.items, depth + 1));
   }
   if (rawType === "object" || schema.properties) return sampleObject(schema, depth);
   if (schema.format === "uri" || schema.format === "uri-reference") return "https://example.com/fixture";

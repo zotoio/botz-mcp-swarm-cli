@@ -24,5 +24,6 @@ export async function createSseSession(
   });
   return createMcpSession(transport, {
     getResponseHeaders: () => capture.lastHeaders,
+    getSentHeaders: () => capture.lastSentHeaders,
   });
 }

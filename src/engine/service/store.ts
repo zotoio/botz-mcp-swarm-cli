@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { openSecretFields, sealSecretFields, writeFileAtomic } from "../store/keyring.js";
 import { join } from "node:path";
 import type { OptimizeSuggestion } from "../core/discovery.js";
 import { defaultRunStore, type StoredRun } from "../store/run-store.js";
@@ -22,6 +23,8 @@ export interface Schedule {
   suiteId?: string;
   /** Missing uses the suite's field, then `local`. Applies to project suite schedules only. */
   dispatch?: "local" | "worker";
+  /** IANA zone the cron fields are read in (e.g. Australia/Sydney). Missing = SWARM_CRON_TZ, else UTC. */
+  timeZone?: string;
   lastRunAt?: string;
   nextRunAt?: string;
 }
@@ -34,18 +37,21 @@ export async function ensureDataDir(): Promise<void> {
 
 export async function loadPolicy(): Promise<OrgPolicy> {
   await ensureDataDir();
+  let parsed: Partial<OrgPolicy>;
   try {
-    const raw = await readFile(join(DATA_DIR, "policy.json"), "utf8");
-    return normalizePolicy(JSON.parse(raw) as Partial<OrgPolicy>);
+    parsed = JSON.parse(await readFile(join(DATA_DIR, "policy.json"), "utf8")) as Partial<OrgPolicy>;
   } catch {
     return normalizePolicy({});
   }
+  // Outside the try: a missing/wrong key must fail loudly, never fall back to (and later save) defaults.
+  return normalizePolicy(openSecretFields(parsed));
 }
 
 export async function savePolicy(policy: OrgPolicy): Promise<void> {
   await ensureDataDir();
   const normalized = normalizePolicy(policy);
-  await writeFile(join(DATA_DIR, "policy.json"), JSON.stringify(normalized, null, 2));
+  // Target credentials sealed at rest (AES-256-GCM, field-level); atomic write.
+  await writeFileAtomic(join(DATA_DIR, "policy.json"), JSON.stringify(sealSecretFields(normalized), null, 2));
 }
 
 export async function loadSchedules(): Promise<Schedule[]> {

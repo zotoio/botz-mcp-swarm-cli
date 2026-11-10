@@ -60,7 +60,14 @@ describe("rate limit detection", () => {
 describe("backoff maths", () => {
   const policy = resolveRetryPolicy();
   it("uses the documented defaults", () => {
-    expect(policy).toEqual({ enabled: true, baseMs: 500, factor: 2, maxDelayMs: 30_000, maxRetries: 5 });
+    expect(policy).toEqual({
+      enabled: true,
+      baseMs: 500,
+      factor: 2,
+      maxDelayMs: 30_000,
+      maxRetries: 5,
+      unavailableBudgetMs: 90_000,
+    });
     expect(RETRY_DEFAULTS.maxRetries).toBe(5);
   });
   it("full jitter within base*factor^n capped at maxDelay", () => {

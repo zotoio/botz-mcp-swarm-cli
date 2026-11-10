@@ -26,7 +26,7 @@ import {
 import { normalizeCallSlo, type CallSlo } from "../core/call-slo.js";
 import { tidyPositions } from "../core/suite-graph.js";
 import { forgetRunExports } from "../otel/local-collector.js";
-import type { RunReport } from "../types/run.js";
+import type { RunReport, RunVerdict } from "../types/run.js";
 import { swarmDataDir } from "../core/data-dirs.js";
 import { openSecretFields, sealSecretFields, writeFileAtomic } from "./keyring.js";
 import type { McpServerOAuthConfig } from "../types/manifest.js";
@@ -41,7 +41,7 @@ export interface ProjectIndexRow {
   transport: string;
   allowlistKey: string;
   archived: boolean;
-  lastVerdict?: "pass" | "fail";
+  lastVerdict?: RunVerdict;
   lastRunAt?: string;
   lastSuiteName?: string;
   suiteCount: number;
@@ -163,7 +163,7 @@ export interface ProjectRecord {
   surface?: ProjectSurface;
   catalogAt?: string;
   introspectError?: string;
-  lastVerdict?: "pass" | "fail";
+  lastVerdict?: RunVerdict;
   lastRunAt?: string;
   /** Suite name of the newest run by start time. */
   lastSuiteName?: string;
@@ -182,7 +182,7 @@ export interface RunSummary {
   id: string;
   startedAt: string;
   finishedAt: string;
-  verdict: "pass" | "fail";
+  verdict: RunVerdict;
   durationMs: number;
   suiteId?: string;
   suiteVersion?: number;
@@ -262,10 +262,6 @@ function projectPath(id: string, options?: ProjectStoreOptions): string {
 function versionPath(projectId: string, suiteId: string, version: number, options?: ProjectStoreOptions): string {
   if (!Number.isInteger(version) || version < 0) throw new Error(`invalid suite version: ${String(version)}`);
   return underProjectsRoot(options, safeStoreSegment(projectId, "project id"), "suites", safeStoreSegment(suiteId, "suite id"), "versions", `${version}.json`);
-}
-
-function runFilePath(projectId: string, runId: string, options?: ProjectStoreOptions): string {
-  return underProjectsRoot(options, safeStoreSegment(projectId, "project id"), "runs", `${safeStoreSegment(runId, "run id")}.json`);
 }
 
 function runsDir(projectId: string, options?: ProjectStoreOptions): string {
@@ -1209,7 +1205,7 @@ export async function saveProjectRun(
   report: RunReport,
   options?: ProjectStoreOptions,
 ): Promise<void> {
-  await writeJson(runFilePath(projectId, report.id, options), report);
+  await writeJson(join(runsDir(projectId, options), `${report.id}.json`), report);
   const project = await loadRecord(projectId, options);
   if (!project) return;
   rememberLatestRun(project, (await listProjectRuns(projectId, options))[0]);
@@ -1254,7 +1250,7 @@ export async function loadProjectRun(
   runId: string,
   options?: ProjectStoreOptions,
 ): Promise<RunReport | null> {
-  return readJson<RunReport>(runFilePath(projectId, runId, options));
+  return readJson<RunReport>(join(runsDir(projectId, options), `${runId}.json`));
 }
 
 /** Remove one stored execution and point the project at the newest run that remains. */
@@ -1267,7 +1263,7 @@ export async function deleteProjectRun(
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(runId)) return false;
   const project = await loadRecord(projectId, options);
   if (!project || project.archived) return false;
-  const file = runFilePath(projectId, runId, options);
+  const file = join(runsDir(projectId, options), `${runId}.json`);
   const report = await readJson<RunReport>(file);
   if (!report || report.id !== runId) return false;
   await rm(file, { force: true });

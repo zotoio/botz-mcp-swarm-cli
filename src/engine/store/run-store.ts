@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunReport } from "../types/run.js";
 import { swarmDataDir } from "../core/data-dirs.js";
@@ -39,17 +39,35 @@ export class RunStore {
     }
   }
 
+  private readonly fileCache = new Map<string, { mtimeMs: number; size: number; run: StoredRun }>();
+
   async list(limit = 50): Promise<StoredRun[]> {
     await this.ensure();
     try {
-      const files = await readdir(this.dir);
-      const runs: StoredRun[] = [];
-      for (const file of files.filter((f) => f.endsWith(".json"))) {
-        runs.push(
-          JSON.parse(await readFile(join(this.dir, file), "utf8")) as StoredRun,
-        );
-      }
-      return runs
+      const files = (await readdir(this.dir)).filter((f) => f.endsWith(".json"));
+      const loaded = await Promise.all(
+        files.map(async (file): Promise<StoredRun | null> => {
+          const full = join(this.dir, file);
+          const st = await stat(full).catch(() => null);
+          if (!st) {
+            this.fileCache.delete(full);
+            return null;
+          }
+          const cached = this.fileCache.get(full);
+          if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+            return cached.run;
+          }
+          try {
+            const run = JSON.parse(await readFile(full, "utf8")) as StoredRun;
+            this.fileCache.set(full, { mtimeMs: st.mtimeMs, size: st.size, run });
+            return run;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      return loaded
+        .filter((r): r is StoredRun => r !== null)
         .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
         .slice(0, limit);
     } catch {

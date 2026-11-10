@@ -40,6 +40,14 @@ export interface LoadTimeline {
   summary: { overall: LoadStats; tools: Record<string, LoadStats> };
 }
 
+/** Cap on stored points per run; longer runs widen the bucket. */
+export const MAX_TIMELINE_POINTS = 600;
+
+/** 1 s buckets, widened to whole seconds when the run would exceed MAX_TIMELINE_POINTS. */
+export function timelineBucketMs(durationMs: number): number {
+  return Math.max(1000, Math.ceil(durationMs / MAX_TIMELINE_POINTS / 1000) * 1000);
+}
+
 interface CallSpan { tool: string; start: number; end: number; ok: boolean }
 
 const round = (n: number, d = 2) => Math.round(n * 10 ** d) / 10 ** d;
@@ -49,7 +57,8 @@ export class LoadTimelineCollector {
   private readonly calls: CallSpan[] = [];
   private readonly t0: number;
 
-  constructor(private readonly bucketMs = 1000, now = Date.now()) {
+  /** `bucketMs` 0 picks 1 s, widened in whole seconds so long runs keep at most MAX_TIMELINE_POINTS. */
+  constructor(private readonly bucketMs = 0, now = Date.now()) {
     this.t0 = now;
   }
 
@@ -64,7 +73,7 @@ export class LoadTimelineCollector {
 
   finish(now = Date.now()): LoadTimeline {
     const durationMs = Math.max(1, now - this.t0, ...this.calls.map((c) => c.end));
-    return buildTimeline(this.vus, this.calls, durationMs, this.bucketMs);
+    return buildTimeline(this.vus, this.calls, durationMs, this.bucketMs || timelineBucketMs(durationMs));
   }
 }
 

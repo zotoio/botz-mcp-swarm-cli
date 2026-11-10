@@ -18,7 +18,11 @@ describe("check-engine-sync", () => {
     const hash = computeEngineTreeHash(engineRoot);
     writeFileSync(
       join(engineRoot, "ENGINE_SOURCE.json"),
-      JSON.stringify({ sourceCommit: "abc1234567890abcdef1234567890abcdef12345678", engineTreeHash: hash, dependencies: {} }),
+      JSON.stringify({
+        platformCommit: "abc1234567890abcdef1234567890abcdef12345678",
+        treeSha256: hash,
+        dependencyRanges: {},
+      }),
     );
     const pkgDir = join(dir, "pkg");
     mkdirSync(pkgDir, { recursive: true });
@@ -30,17 +34,17 @@ describe("check-engine-sync", () => {
        import { computeEngineTreeHash } from ${JSON.stringify(join(repoRoot, "scripts/compute-engine-tree-hash.mjs"))};
        const engineRoot = ${JSON.stringify(engineRoot)};
        const manifest = JSON.parse(readFileSync(join(engineRoot, "ENGINE_SOURCE.json"), "utf8"));
-       if (manifest.engineTreeHash !== computeEngineTreeHash(engineRoot)) process.exit(1);`,
+       if (manifest.treeSha256 !== computeEngineTreeHash(engineRoot)) process.exit(1);`,
     );
     const result = spawnSync(process.execPath, [join(dir, "check.mjs")], { cwd: repoRoot, encoding: "utf8" });
     rmSync(dir, { recursive: true, force: true });
     expect(result.status).toBe(0);
   });
 
-  it("fails when ENGINE_SOURCE.json is missing in this repo", () => {
+  it("passes on the vendored engine tree in this repo", () => {
     const result = spawnSync(process.execPath, [checker], { cwd: repoRoot, encoding: "utf8" });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("ENGINE_SOURCE.json");
-    expect(result.stderr).toContain("export-engine");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("OK engine tree");
+    expect(result.stdout).toContain("8cdb258");
   });
 });

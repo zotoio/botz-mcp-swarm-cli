@@ -38,7 +38,7 @@ export async function createStreamableHttpSession(
   const t = target as HttpTarget;
   const requested = t.protocolEra ?? "auto";
   const url = new URL(t.url);
-  const mergedHeaders = mergeHeaders(resolveTargetAuthHeaders(t), headers);
+  const mergedHeaders = mergeHeaders(resolveTargetAuthHeaders(target), headers);
   const { fetchFn, capture } = createCapturingFetch();
 
   let fallbackReason: string | undefined;
@@ -77,6 +77,8 @@ export async function createStreamableHttpSession(
   };
   const session = await createMcpSession(makeTransport(), {
     getResponseHeaders: () => capture.lastHeaders,
+    getSentHeaders: () => capture.lastSentHeaders,
+    recreateTransport: makeTransport,
   });
   return withLegacyEra(session, requested, fallbackReason);
 }

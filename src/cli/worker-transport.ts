@@ -1,39 +1,18 @@
 import http2 from "node:http2";
 import { SWARM_TESTER_USER_AGENT } from "../engine/adapters/http-fetch.js";
+import {
+  parseWorkerJsonLine,
+  type AssignFrame,
+  type ServerFrame,
+  type TransportKind,
+  type VuSliceAssignment,
+  type WorkerFrame,
+} from "../engine/worker-protocol/frames.js";
 
-export type TransportKind = "http2" | "sse";
+export type { AssignFrame, ServerFrame, TransportKind, VuSliceAssignment, WorkerFrame };
 
 export const DEFAULT_SWARM_SERVER_URL = "https://swarm.botz.ai";
 export const SWARM_SERVER_URL_ENV = "SWARM_SERVER_URL";
-
-export type VuSliceAssignment = {
-  shardIndex: number;
-  totalShards: number;
-  assignedVus: number;
-};
-
-export type AssignFrame = {
-  type: "assign";
-  executionId?: unknown;
-  projectId?: unknown;
-  suiteId?: unknown;
-  version?: unknown;
-  vuSlice?: VuSliceAssignment;
-};
-
-export type ServerFrame =
-  | { type: "ready"; tokenId?: string; label?: string; transport?: TransportKind; channelId?: string }
-  | AssignFrame
-  | { type: "withdraw"; executionId: string; reason: string }
-  | { type: "ack"; executionId: string; frame: string; ok: boolean; error?: string }
-  | { type: "error"; error: string }
-  | { type: "ping" };
-
-export type WorkerFrame =
-  | { type: "accept"; executionId: string; maxVus?: number; capabilities?: string[] }
-  | { type: "progress"; executionId: string; event: { name: string; attributes: Record<string, string | number | boolean> } }
-  | { type: "complete"; executionId: string; verdict: "pass" | "fail"; report?: unknown }
-  | { type: "reject"; executionId: string; reason: string };
 
 export type SendResult = { ok: true } | { ok: false; error: string };
 export type SuiteResult = { ok: true; payload: unknown } | { ok: false; status: number; error: string };
@@ -124,14 +103,10 @@ export function serverOrigin(server: string): URL {
 }
 
 export function parseFrame(text: string): ServerFrame | null {
-  try {
-    const value = JSON.parse(text) as unknown;
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    const type = (value as { type?: unknown }).type;
-    return typeof type === "string" ? (value as ServerFrame) : null;
-  } catch {
-    return null;
-  }
+  const value = parseWorkerJsonLine(text);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = (value as { type?: unknown }).type;
+  return typeof type === "string" ? (value as ServerFrame) : null;
 }
 
 /** Split NDJSON (`\n`) or SSE (`data:` events separated by a blank line) text into frames. */

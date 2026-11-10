@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SUITE_LIMITS, SUITE_LIMIT_CEILINGS, SuiteLimitsSchema, parseSuiteLimit, resolveSuiteLimits } from "./suite-limits.js";
 import { QuotaExceededError, QuotaTracker } from "./quotas.js";
 import { compileSuite, type SuiteNode } from "./suite-model.js";
-import { SuiteInputSchema } from "../../cli/suite-schema.js";
-import { suiteLimitFlags } from "../../cli/run-commands.js";
 import { parseManifest } from "../types/manifest.js";
 
 const nodes: SuiteNode[] = [{ id: "a", type: "sampler", enabled: true, method: "ping" }];
@@ -28,10 +26,6 @@ describe("suite limits parsing", () => {
     expect(SuiteLimitsSchema.safeParse({ maxCallCount: 2.5 }).success).toBe(false);
     expect(SuiteLimitsSchema.safeParse({ other: 1 }).success).toBe(false);
   });
-  it("parses CLI flags", () => {
-    expect(suiteLimitFlags({ maxCallCount: "10" })).toEqual({ maxCallCount: 10 });
-    expect(() => suiteLimitFlags({ maxPayloadBytes: "0" })).toThrow(/max-payload-bytes/);
-  });
 });
 
 describe("suite limits precedence", () => {
@@ -53,11 +47,6 @@ describe("suite limits precedence", () => {
 });
 
 describe("suite limits schema and compile", () => {
-  it("suite files accept and validate limits", () => {
-    const base = { kind: "botz-suite", name: "s", target, nodes, params: {}, surface: { capabilities: [], tools: [] } };
-    expect(SuiteInputSchema.safeParse({ ...base, limits: { maxCallCount: 5 } }).success).toBe(true);
-    expect(SuiteInputSchema.safeParse({ ...base, limits: { maxCallCount: -5 } }).success).toBe(false);
-  });
   it("compileSuite keeps defaults and applies limits", () => {
     expect(compileSuite({ name: "s", target, allowlist: [], nodes, load: {} }).quotas)
       .toMatchObject({ maxCallCount: 100_000, maxPayloadBytes: 1_048_576 });

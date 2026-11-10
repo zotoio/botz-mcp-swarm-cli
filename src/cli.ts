@@ -7,7 +7,7 @@ import { registerAnalyseCommand } from "./cli/analyse-commands.js";
 import { registerRunCommand } from "./cli/run-commands.js";
 import { registerDiagnostics } from "./cli/diagnostics.js";
 import { registerUpgradeCommand } from "./cli/upgrade.js";
-import { loadLocalEnv } from "./cli/load-local-env.js";
+import { loadLocalEnv } from "./engine/load-local-env.js";
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
