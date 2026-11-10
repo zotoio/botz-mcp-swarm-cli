@@ -7,6 +7,7 @@ import { createSession } from "../adapters/index.js";
 import { resolveStdioTarget } from "./target-resolve.js";
 import { LLM_STEP_TIMEOUT_MS } from "./inference-model.js";
 import type { EvalTool } from "./tool-evals.js";
+import { withSharedModelCatalog } from "./shared-model-catalog.js";
 
 export function cursorRuntime(key: string, model: string, cwd: string): AgentOptions {
   const runtime = process.env.SWARM_CURSOR_RUNTIME ?? "local";
@@ -32,6 +33,10 @@ async function finish(run: Run): Promise<string> {
 
 /** Structured fixture creation and judging through the official SDK. */
 export async function cursorInference(body: Record<string, unknown>, key: string): Promise<unknown> {
+  return withSharedModelCatalog(key, () => cursorInferenceInner(body, key));
+}
+
+async function cursorInferenceInner(body: Record<string, unknown>, key: string): Promise<unknown> {
   if (body.tools) throw new Error("Cursor tool evals require an MCP target; use the saved-suite runner");
   const workspace = await mkdtemp(join(tmpdir(), "swarm-cursor-"));
   let agent: SDKAgent | undefined;
@@ -50,6 +55,10 @@ export async function cursorInference(body: Record<string, unknown>, key: string
 
 /** Local SDK callback tools execute the real MCP session and expose only enabled tools. */
 export async function cursorProbe(input: { prompt: string; tools: EvalTool[]; target: Target; baseDir?: string; key: string; model: string }) {
+  return withSharedModelCatalog(input.key, () => cursorProbeInner(input));
+}
+
+async function cursorProbeInner(input: { prompt: string; tools: EvalTool[]; target: Target; baseDir?: string; key: string; model: string }) {
   const workspace = await mkdtemp(join(tmpdir(), "swarm-cursor-eval-"));
   const calls: Array<{ name: string; arguments: Record<string, unknown>; result?: unknown }> = [];
   let agent: SDKAgent | undefined;

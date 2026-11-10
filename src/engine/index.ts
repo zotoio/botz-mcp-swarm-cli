@@ -1,5 +1,5 @@
 export { parseManifest, type Manifest } from "./types/manifest.js";
-export { runManifest } from "./core/runner.js";
+export { runManifest, type ToolResultValidator } from "./core/runner.js";
 export { writeReports, formatMarkdownReport } from "./core/report.js";
 export { compareRuns, loadRunReport, formatCompareMarkdown } from "./core/compare.js";
 export {

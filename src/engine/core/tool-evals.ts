@@ -4,6 +4,7 @@ import type { RunReport, ToolEvalAssertionResult, ToolEvalCaseResult } from "../
 import { resolveStdioTarget } from "./target-resolve.js";
 import { LLM_STEP_TIMEOUT_MS, inferenceLimits, inferenceUrl, resolveInferenceModel, resolveInferenceConfig } from "./inference-model.js";
 import { cursorInference, cursorProbe } from "./cursor-inference.js";
+import { withSharedModelCatalog } from "./shared-model-catalog.js";
 import { validateAgainstSchema } from "./contract.js";
 import {
   collectToolEvals,
@@ -669,9 +670,24 @@ export async function evaluateSuiteTools(input: {
   if (cursor && process.env.SWARM_CURSOR_RUNTIME === "cloud" && tools.some((tool) => !enabled.has(tool.name))) {
     throw new Error("Cursor cloud requires an MCP endpoint exposing only the suite's enabled tools");
   }
-  return runToolEvals({ scheduled, tools, env, fetchImpl: input.fetchImpl,
-    probe: cursor ? (prompt) => cursorProbe({ prompt, tools: tools.filter((tool) => enabled.has(tool.name)), target: input.target, baseDir: input.baseDir, key: env.llmKey, model: env.llmModel }) : undefined,
+  const run = () => runToolEvals({
+    scheduled,
+    tools,
+    env,
+    fetchImpl: input.fetchImpl,
+    probe: cursor
+      ? (prompt) => cursorProbe({
+        prompt,
+        tools: tools.filter((tool) => enabled.has(tool.name)),
+        target: input.target,
+        baseDir: input.baseDir,
+        key: env.llmKey,
+        model: env.llmModel,
+      })
+      : undefined,
   });
+  if (cursor && env.llmKey) return withSharedModelCatalog(env.llmKey, run);
+  return run();
 }
 
 export function applyToolEvalVerdict(report: RunReport, evalReport: ToolEvalRun): RunReport {

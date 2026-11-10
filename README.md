@@ -89,6 +89,10 @@ For stdio use `--command <bin> --arg <arg>` in place of the URL. Capture generat
 
 Reports include `toolEvals` and the combined pass/fail verdict. `--inference` on run requires `--suite`. For full instructions see the [CLI inference guide](https://github.com/zotoio/botz-mcp-swarm-cli/blob/main/docs/mcp-inference-cli.md).
 
+### Tool result validators
+
+After each successful MCP tool call the runner applies contract checks, optional `expectErrorClass`, built-in detection of success-shaped error JSON in tool text payloads, then your validator. Add a `validator` field to `suite.json` with a path relative to the suite directory to a module that exports `validate({ tool, method, result }) => string | null` (a string fails the step). For one-off runs, `botz mcp-swarm run --suite <name> --validator ./checks/tool.ts` overrides the suite field; the same flag works with `--manifest` when the path is relative to the manifest file's directory.
+
 ## Repeatable standalone workflows
 
 Use `suite capture|show|list|validate|refresh|run` for saved suites. Top-level `capture`, `show`, and `run --suite` remain available.
