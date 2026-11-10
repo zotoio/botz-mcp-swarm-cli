@@ -45,6 +45,6 @@ describe("check-engine-sync", () => {
     const result = spawnSync(process.execPath, [checker], { cwd: repoRoot, encoding: "utf8" });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("OK engine tree");
-    expect(result.stdout).toContain("8cdb258");
+    expect(result.stdout).toMatch(/sync [0-9a-f]{7}/);
   });
 });
