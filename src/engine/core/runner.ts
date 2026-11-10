@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Manifest, Scenario, ScenarioStep, Target } from "../types/manifest.js";
 import type { RunMode, RunProgressEvent, RunReport, RunServerSummary } from "../types/run.js";
 import { contractFailure, validateAgainstSchema } from "./contract.js";
+import { payloadErrorMessage } from "./payload-error.js";
 import { redactValue } from "./redaction.js";
 import { RunRecorder } from "./run-recorder.js";
 import {
@@ -80,7 +81,13 @@ export interface RunOptions {
   strictParams?: boolean;
   /** Stops new iterations and closes every session, including stdio children. The report fails with `run aborted`. */
   signal?: AbortSignal;
+  /** Optional per-tool result validation after contracts and errorClass expectations. */
+  toolResultValidator?: ToolResultValidator;
 }
+
+export type ToolResultValidator = (
+  ctx: { tool?: string; method: string; result: McpCallResult },
+) => string | null | Promise<string | null>;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -113,6 +120,32 @@ function assertRequiredCapabilities(
     ok: false,
     message: `Capability mismatch (Fail, not skip): server missing [${missing.join(", ")}] required by ${step.method}`,
   };
+}
+
+async function applyResultChecks(
+  step: ScenarioStep,
+  raw: McpCallResult,
+  method: string,
+  toolName: string | undefined,
+  toolResultValidator: ToolResultValidator | undefined,
+): Promise<{ contracted: McpCallResult; expected: { ok: boolean; message?: string } }> {
+  let contracted = applyContract(step, raw);
+  let expected = applyExpectErrorClass(contracted, step);
+  if (method === "tools/call" && contracted.success) {
+    const payloadFail = payloadErrorMessage(contracted);
+    if (payloadFail) {
+      contracted = { ...contracted, success: false, errorClass: "application", errorMessage: payloadFail };
+      expected = { ok: false, message: payloadFail };
+    }
+  }
+  if (method === "tools/call" && toolResultValidator) {
+    const message = await toolResultValidator({ tool: toolName, method, result: contracted });
+    if (message) {
+      contracted = { ...contracted, success: false, errorClass: "application", errorMessage: message };
+      expected = { ok: false, message };
+    }
+  }
+  return { contracted, expected };
 }
 
 function applyExpectErrorClass(
@@ -294,6 +327,7 @@ async function executeStep(
   prior?: { value: unknown; server?: string },
   /** Alias of the step's server, on multi-server runs only. */
   server?: string,
+  toolResultValidator?: ToolResultValidator,
 ): Promise<{ ok: boolean; message?: string; result?: unknown; cancelled?: boolean }> {
   if (step.method === "think") {
     await sleep(step.thinkMs ?? 0);
@@ -373,13 +407,12 @@ async function executeStep(
     });
   }
 
-  const record = (
+  const record = async (
     method: string,
     raw: McpCallResult,
     toolName?: string,
   ) => {
-    const contracted = applyContract(step, raw);
-    const expected = applyExpectErrorClass(contracted, step);
+    const { contracted, expected } = await applyResultChecks(step, raw, method, toolName, toolResultValidator);
     // Expected tool errors must not inflate error rate. The scenario outcome
     // already asserted the class; unexpected errors still Fail.
     const result =
@@ -472,7 +505,7 @@ async function executeStep(
   switch (step.method) {
     case "initialize": {
       const meta = session.getServerMeta();
-      return record("initialize", {
+      return await record("initialize", {
         success: true,
         latencyMs: 0,
         errorClass: "none",
@@ -490,7 +523,7 @@ async function executeStep(
       if (step.assertJsonSchema202012) {
         const dialect = assertJsonSchemaDialect(result);
         if (dialect && !dialect.ok) {
-          return record("tools/list", {
+          return await record("tools/list", {
             ...result,
             success: false,
             errorClass: "protocol",
@@ -498,15 +531,15 @@ async function executeStep(
           });
         }
       }
-      return record("tools/list", result);
+      return await record("tools/list", result);
     }
     case "resources/list":
-      return record(
+      return await record(
         "resources/list",
         await session.listResources(typeof args.cursor === "string" ? args.cursor : undefined),
       );
     case "resources/templates/list":
-      return record(
+      return await record(
         "resources/templates/list",
         await session.listResourceTemplates(typeof args.cursor === "string" ? args.cursor : undefined),
       );
@@ -516,10 +549,10 @@ async function executeStep(
         noteNode(trace, step, false);
         return { ok: false, message: "resources/read requires a uri" };
       }
-      return record("resources/read", await session.readResource(uri));
+      return await record("resources/read", await session.readResource(uri));
     }
     case "prompts/list":
-      return record(
+      return await record(
         "prompts/list",
         await session.listPrompts(typeof args.cursor === "string" ? args.cursor : undefined),
       );
@@ -533,10 +566,10 @@ async function executeStep(
       for (const [key, value] of Object.entries(args)) {
         promptArgs[key] = value == null ? "" : String(value);
       }
-      return record("prompts/get", await session.getPrompt(name, promptArgs));
+      return await record("prompts/get", await session.getPrompt(name, promptArgs));
     }
     case "logging/setLevel":
-      return record("logging/setLevel", await session.setLoggingLevel(String(args.level ?? "info")));
+      return await record("logging/setLevel", await session.setLoggingLevel(String(args.level ?? "info")));
     case "completion/complete": {
       const ref = args.ref === "resource" ? "resource" : "prompt";
       const name = ref === "prompt" ? step.prompt ?? step.name : step.resourceUri ?? step.uri;
@@ -544,7 +577,7 @@ async function executeStep(
         noteNode(trace, step, false);
         return { ok: false, message: "completion/complete requires a ref and argument" };
       }
-      return record("completion/complete", await session.complete({
+      return await record("completion/complete", await session.complete({
         ref,
         name,
         argument: args.argument,
@@ -556,12 +589,12 @@ async function executeStep(
         noteNode(trace, step, false);
         return { ok: false, message: "tools/call requires tool name" };
       }
-      return record("tools/call", await session.callTool(step.tool, args, step.timeoutMs), step.tool);
+      return await record("tools/call", await session.callTool(step.tool, args, step.timeoutMs), step.tool);
     }
     case "ping":
-      return record("ping", await session.ping());
+      return await record("ping", await session.ping());
     case "tasks/list":
-      return record(
+      return await record(
         "tasks/list",
         await session.listTasks(typeof args.cursor === "string" ? args.cursor : undefined),
       );
@@ -570,14 +603,14 @@ async function executeStep(
         noteNode(trace, step, false);
         return { ok: false, message: "tasks/get requires taskId" };
       }
-      return record("tasks/get", await session.getTask(step.taskId));
+      return await record("tasks/get", await session.getTask(step.taskId));
     }
     case "tasks/cancel": {
       if (!step.taskId) {
         noteNode(trace, step, false);
         return { ok: false, message: "tasks/cancel requires taskId" };
       }
-      return record("tasks/cancel", await session.cancelTask(step.taskId));
+      return await record("tasks/cancel", await session.cancelTask(step.taskId));
     }
     default:
       noteNode(trace, step, false);
@@ -608,6 +641,7 @@ interface ScenarioRunContext {
   activeNodes: Set<string>;
   seedVars?: Record<string, string>;
   strictParams?: boolean;
+  toolResultValidator?: ToolResultValidator;
   /** Set when this pass runs suite-level setup or teardown steps: no scenario outcome or pass is recorded. */
   suiteHook?: "setup" | "teardown";
 }
@@ -789,6 +823,7 @@ async function runScenarioPass(
               run.emit,
               producer === undefined ? undefined : results.get(producer) ?? { value: undefined },
               run.multiServer ? alias : undefined,
+              run.toolResultValidator,
             );
           }
           results.set(index, { value: result.result, ...(callsServer ? { server: alias } : {}) });
@@ -1401,7 +1436,11 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
   const soakIntervalMs = manifest.soak?.intervalMs ?? 500;
 
   // `${__runId}` resolves to this run's id (the same id sent as X-Swarm-Run-Id and in swarm_run_completed).
-  const seed = { seedVars: { ...(options.vars ?? {}), __runId: runId }, strictParams: options.strictParams };
+  const seed = {
+    seedVars: { ...(options.vars ?? {}), __runId: runId },
+    strictParams: options.strictParams,
+    toolResultValidator: options.toolResultValidator,
+  };
   const runSuiteHook = async (hook: "setup" | "teardown", steps: ScenarioStep[] | undefined): Promise<PassResult | undefined> => {
     if (!steps || steps.length === 0 || !sessionReady) return undefined;
     const scenario: Scenario = { name: hook === "setup" ? "Suite setup" : "Suite teardown", iterations: 1, steps: steps.map((step) => ({ ...step, hook })) };
