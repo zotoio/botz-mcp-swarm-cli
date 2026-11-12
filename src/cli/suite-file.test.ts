@@ -2,6 +2,8 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import type { McpSession } from "../engine/adapters/base.js";
+import * as adapters from "../engine/adapters/index.js";
 import * as introspection from "../engine/core/suite-introspect.js";
 import { applyAuthFlags, resolveTargetSecrets, storedSecretNames } from "./suite-auth.js";
 import {
@@ -321,4 +323,44 @@ it("rejects unsupported versions, malformed nested nodes, and duplicate IDs befo
   expect(() => parseSuiteFile({ ...valid, schemaVersion: 3 })).toThrow(/schemaVersion/);
   expect(() => parseSuiteFile({ ...valid, nodes: [{ id: "g", type: "group", enabled: true, children: [null] }] })).toThrow();
   expect(() => parseSuiteFile({ ...valid, nodes: [...valid.nodes, ...valid.nodes] })).toThrow(/duplicate node id/);
+});
+
+it("saves a suite when resources/templates/list is missing or method-not-found", async () => {
+  const ok = (result: unknown) => ({ success: true, result, latencyMs: 0, errorClass: "none" as const, bytesIn: 0, bytesOut: 0 });
+  const fail = (errorMessage: string) => ({
+    success: false,
+    result: {},
+    latencyMs: 0,
+    errorClass: "protocol" as const,
+    bytesIn: 0,
+    bytesOut: 0,
+    errorMessage,
+  });
+  for (const errorMessage of [
+    "MCP error -32601: Method not found: resources/templates/list",
+    "fixture failure",
+  ]) {
+    const session = {
+      serverInfo: () => ({ name: "fixture", version: "1.0.0", capabilities: { tools: {}, resources: {} } }),
+      close: vi.fn(async () => {}),
+      listTools: vi.fn(async () => ok({ tools: [{ name: "echo" }] })),
+      listResources: vi.fn(async () => ok({ resources: [] })),
+      listResourceTemplates: vi.fn(async () => fail(errorMessage)),
+      listPrompts: vi.fn(async () => ok({ prompts: [] })),
+      getServerMeta: () => ({}),
+    };
+    const created = vi.spyOn(adapters, "createSession").mockResolvedValue(session as unknown as McpSession);
+    try {
+      const outDir = await mkdtemp(join(tmpdir(), "suite-missing-templates-"));
+      const suite = await captureSuite({ target: { transport: "stdio", command: "fixture" }, outDir });
+      expect(suite.surface.tools.map((tool) => tool.name)).toEqual(["echo"]);
+      expect(suite.surface.resourceTemplates).toEqual([]);
+      expect(suite.surface.unsupportedMethods).toEqual(["resourceTemplates"]);
+      const saved = JSON.parse(await readFile(join(outDir, "suite.json"), "utf8")) as SuiteFile;
+      expect(saved.surface.tools.map((tool) => tool.name)).toEqual(["echo"]);
+      expect(saved.surface.resourceTemplates).toEqual([]);
+    } finally {
+      created.mockRestore();
+    }
+  }
 });

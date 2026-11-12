@@ -48,6 +48,24 @@ describe("complete discovery", () => {
     expect(surface.unsupportedMethods).toEqual(["resourceTemplates"]);
     expect(s.listPrompts).toHaveBeenCalled();
   });
+  it("treats a missing resources/templates/list without -32601 as an empty list and keeps the tools", async () => {
+    const s = session({ tools: {}, resources: {} });
+    s.listTools.mockResolvedValue(success({ tools: [{ name: "echo" }] }));
+    s.listResourceTemplates.mockResolvedValue(failure());
+    const surface = await capture();
+    expect(surface.tools.map((t) => t.name)).toEqual(["echo"]);
+    expect(surface.resourceTemplates).toEqual([]);
+    expect(surface.unsupportedMethods).toEqual(["resourceTemplates"]);
+  });
+  it("treats an invalid templates list body as unsupported rather than aborting discovery", async () => {
+    const s = session({ tools: {}, resources: {} });
+    s.listTools.mockResolvedValue(success({ tools: [{ name: "echo" }] }));
+    s.listResourceTemplates.mockResolvedValue(success({}));
+    const surface = await capture();
+    expect(surface.tools.map((t) => t.name)).toEqual(["echo"]);
+    expect(surface.resourceTemplates).toEqual([]);
+    expect(surface.unsupportedMethods).toEqual(["resourceTemplates"]);
+  });
   it("supports resource-only servers without a tools/list step", async () => {
     const s = session({ resources: {} });
     const surface = await capture();
