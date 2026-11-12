@@ -6,6 +6,8 @@ export const DEFAULT_LOAD_PROFILE = Object.freeze({
   jitterMs: 100,
   rampDownMs: 60_000,
   dwellMs: 100,
+  /** Symmetric, mean-preserving jitter on each dwell; see core/dwell.ts. 0 is a fixed dwell. */
+  dwellJitterRatio: 0.2,
   iterations: 1,
   lanes: 1,
 });

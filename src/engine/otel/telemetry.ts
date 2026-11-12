@@ -2,6 +2,8 @@ import type { Counter, Histogram, Meter, Tracer } from "@opentelemetry/api";
 import type { RunReport } from "../types/run.js";
 import type { CallObservation } from "../core/metrics.js";
 import type { ProcessSample } from "../core/process-gauges.js";
+import type { DwellKind } from "../core/dwell.js";
+import type { RateLimitSource, RetryEvent, RetryGiveUpEvent } from "../core/rate-limit-retry.js";
 import {
   buildTenantResourceAttributes,
   stripSecretAttributes,
@@ -14,6 +16,14 @@ export interface TelemetryHandle {
   recordScenario(scenario: string, outcome: string): void;
   recordSessionStart(transport: string, result: string): void;
   recordProcessSample(sample: ProcessSample): void;
+  /** One measured pause between calls. Optional: older handles predate pacing telemetry. */
+  recordDwell?(durationMs: number, attrs: { kind: DwellKind; server?: string }): void;
+  /** One retry that was slept through, with the backoff it waited. */
+  recordRetry?(event: RetryEvent, method: string): void;
+  /** One retry loop that gave up while still rate-limited. */
+  recordRetryExhausted?(event: RetryGiveUpEvent, method: string): void;
+  /** One observed rate-limit / unavailable signal, whether or not it was retried. */
+  recordRateLimitSignal?(source: RateLimitSource, method: string): void;
   flush(): Promise<void>;
   shutdown(): Promise<void>;
 }
@@ -32,6 +42,11 @@ const instruments = {
   payloadBytes: null as Histogram | null,
   rss: null as Histogram | null,
   cpu: null as Histogram | null,
+  dwellDuration: null as Histogram | null,
+  retryBackoff: null as Histogram | null,
+  retryAttempts: null as Counter | null,
+  retryExhausted: null as Counter | null,
+  rateLimitSignals: null as Counter | null,
 };
 
 function getEndpoint(): string | undefined {
@@ -47,7 +62,8 @@ export function isOtelEnabled(): boolean {
   return Boolean(getEndpoint());
 }
 
-function bindInstruments(m: Meter): void {
+/** Exported so a test can bind the instruments to a fake meter without an OTLP endpoint. */
+export function bindInstruments(m: Meter): void {
   instruments.sessionStart = m.createCounter("mcp.session.start");
   instruments.scenarioResult = m.createCounter("mcp.scenario.result");
   instruments.toolErrors = m.createCounter("mcp.tool.call.errors");
@@ -56,6 +72,11 @@ function bindInstruments(m: Meter): void {
   instruments.payloadBytes = m.createHistogram("mcp.payload.bytes", { unit: "By" });
   instruments.rss = m.createHistogram("process.runtime.rss.bytes", { unit: "By" });
   instruments.cpu = m.createHistogram("process.runtime.cpu.ratio");
+  instruments.dwellDuration = m.createHistogram("mcp.client.dwell.duration", { unit: "ms" });
+  instruments.retryBackoff = m.createHistogram("mcp.retry.backoff.duration", { unit: "ms" });
+  instruments.retryAttempts = m.createCounter("mcp.retry.attempts");
+  instruments.retryExhausted = m.createCounter("mcp.retry.exhausted");
+  instruments.rateLimitSignals = m.createCounter("mcp.rate_limit.signals");
 }
 
 export interface TelemetryInitOptions {
@@ -155,7 +176,11 @@ export async function initTelemetry(
   };
 }
 
-function createActiveTelemetry(_activeMeter: Meter | null = meter, activeTracer: Tracer | null = tracer): TelemetryHandle {
+/**
+ * The exporting handle. Instruments live on the module (bound by `bindInstruments`), so a test can
+ * bind a fake meter and pass a fake tracer here instead of standing up an OTLP endpoint.
+ */
+export function createActiveTelemetry(_activeMeter: Meter | null = meter, activeTracer: Tracer | null = tracer): TelemetryHandle {
   return {
     recordCall(obs, transport) {
       const result = obs.errorClass === "none" ? "ok" : obs.errorClass;
@@ -212,6 +237,55 @@ function createActiveTelemetry(_activeMeter: Meter | null = meter, activeTracer:
         role: sample.role,
       });
     },
+    recordDwell(durationMs, attrs) {
+      const server = attrs.server ? { "mcp.server.alias": attrs.server } : {};
+      instruments.dwellDuration?.record(durationMs, { kind: attrs.kind, ...server });
+      // The span covers the wait itself, so it lines up with the calls either side of it.
+      const endedAt = Date.now();
+      activeTracer
+        ?.startSpan("mcp.dwell", {
+          startTime: endedAt - durationMs,
+          attributes: stripSecretAttributes({ "mcp.dwell.kind": attrs.kind, "mcp.dwell.duration_ms": durationMs, ...server }),
+        })
+        .end(endedAt);
+    },
+    recordRetry(event, method) {
+      const attrs = {
+        reason: event.reason,
+        source: event.source,
+        method,
+      };
+      instruments.retryAttempts?.add(1, attrs);
+      instruments.retryBackoff?.record(event.delayMs, {
+        ...attrs,
+        retry_after: String(event.retryAfterHonoured),
+      });
+      const endedAt = Date.now();
+      activeTracer
+        ?.startSpan("mcp.retry.backoff", {
+          startTime: endedAt - event.delayMs,
+          attributes: stripSecretAttributes({
+            "mcp.method": method,
+            "mcp.retry.reason": event.reason,
+            "mcp.retry.source": event.source,
+            "mcp.retry.attempt": event.attempt,
+            "mcp.retry.delay_ms": event.delayMs,
+            "mcp.retry.retry_after": event.retryAfterHonoured,
+          }),
+        })
+        .end(endedAt);
+    },
+    recordRetryExhausted(event, method) {
+      instruments.retryExhausted?.add(1, {
+        reason: event.reason,
+        source: event.source,
+        method,
+        cause: event.cause,
+      });
+    },
+    recordRateLimitSignal(source, method) {
+      instruments.rateLimitSignals?.add(1, { source, method });
+    },
     async flush() {
       await metricsProvider?.forceFlush();
       await traceProvider?.forceFlush();
@@ -230,6 +304,11 @@ function createActiveTelemetry(_activeMeter: Meter | null = meter, activeTracer:
       instruments.payloadBytes = null;
       instruments.rss = null;
       instruments.cpu = null;
+      instruments.dwellDuration = null;
+      instruments.retryBackoff = null;
+      instruments.retryAttempts = null;
+      instruments.retryExhausted = null;
+      instruments.rateLimitSignals = null;
       if (results.some((result) => result.status === "rejected")) throw new Error("telemetry shutdown failed");
     },
   };
@@ -242,6 +321,10 @@ function createNoopTelemetry(): TelemetryHandle {
     recordScenario() {},
     recordSessionStart() {},
     recordProcessSample() {},
+    recordDwell() {},
+    recordRetry() {},
+    recordRetryExhausted() {},
+    recordRateLimitSignal() {},
     async flush() {},
     async shutdown() {},
   };
@@ -275,6 +358,23 @@ export async function exportRunToOtel(
   }
   for (const sample of report.processSeries ?? []) {
     tel.recordProcessSample(sample);
+  }
+  // Retries and pacing only survive in the report as aggregates, so they are replayed as counts on
+  // the same series (no per-event attributes to reconstruct, and no spans for waits long past).
+  const retries = report.retries;
+  if (retries) {
+    for (const [method, count] of Object.entries(retries.byMethod)) {
+      if (count > 0) instruments.retryAttempts?.add(count, { method });
+    }
+    for (const [source, count] of Object.entries(retries.bySource ?? {})) {
+      if (count > 0) instruments.rateLimitSignals?.add(count, { source });
+    }
+    for (const [cause, count] of Object.entries(retries.exhaustedByCause ?? {})) {
+      if ((count ?? 0) > 0) instruments.retryExhausted?.add(count!, { cause });
+    }
+  }
+  for (const kind of report.pacing?.byKind ?? []) {
+    instruments.dwellDuration?.record(kind.meanMs, { kind: kind.kind });
   }
   await tel.flush();
   await tel.shutdown();

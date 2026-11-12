@@ -203,6 +203,43 @@ export function formatMarkdownReport(report: RunReport): string {
     );
   }
 
+  if (report.pacing) {
+    const { pacing } = report;
+    lines.push(
+      `## Pacing`,
+      ``,
+      `- Configured dwell: ${pacing.dwellMs}ms ±${Math.round(pacing.dwellJitterRatio * 100)}% (symmetric, so mean pacing is unchanged)`,
+      ...(pacing.passJitterMs !== undefined ? [`- Pass jitter: 0–${pacing.passJitterMs}ms between passes of one virtual user`] : []),
+      ``,
+      `| Pause | Count | Total (ms) | Min | Mean | Max |`,
+      `|-------|-------|------------|-----|------|-----|`,
+      ...pacing.byKind.map((kind) =>
+        `| ${kind.kind} | ${kind.count} | ${kind.totalMs} | ${kind.minMs} | ${kind.meanMs} | ${kind.maxMs} |`),
+      ``,
+    );
+  }
+
+  if (report.retries) {
+    const r = report.retries;
+    lines.push(
+      `## Rate-limit Retries`,
+      ``,
+      `- Retries slept through: ${r.total} (session setup ${r.sessionSetup})`,
+      ...(r.byReason ? [`- By reason: rate limit ${r.byReason.rate_limit}, unavailable ${r.byReason.unavailable}`] : []),
+      ...(r.bySource
+        ? [`- By source: HTTP 429 ${r.bySource.http_429}, MCP protocol ${r.bySource.mcp_protocol}, unavailable ${r.bySource.unavailable}`]
+        : []),
+      ...(r.retryAfterHonoured !== undefined ? [`- Delays taken from the server's Retry-After: ${r.retryAfterHonoured}`] : []),
+      ...(r.totalBackoffMs !== undefined ? [`- Time spent backing off: ${r.totalBackoffMs}ms`] : []),
+      ...(r.exhausted
+        ? [`- Gave up while still rate-limited: ${r.exhausted} (${Object.entries(r.exhaustedByCause ?? {}).map(([cause, count]) => `${cause} ${count}`).join(", ")})`]
+        : []),
+      ``,
+      `_Retries that later succeeded are not failures and do not count toward error rates._`,
+      ``,
+    );
+  }
+
   if (report.loadTimeline && report.loadTimeline.summary.overall.calls > 0) {
     lines.push(`## Load over time`, ``, "```", ...formatLoadTimeline(report.loadTimeline, { width: 60 }), "```", ``);
   }

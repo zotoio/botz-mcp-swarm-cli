@@ -8,7 +8,10 @@ import {
   parseRetryAfterMs,
   resolveRetryPolicy,
   retryingSession,
+  UNAVAILABLE_MESSAGE,
   withRateLimitRetry,
+  type RetryEvent,
+  type RetryGiveUpEvent,
 } from "./rate-limit-retry.js";
 
 const PARALLEL_FREE_TIER =
@@ -43,10 +46,22 @@ describe("rate limit detection", () => {
   it("detects HTTP 429, Retry-After and JSON-RPC data", () => {
     expect(detectRateLimit({ error: Object.assign(new Error("boom"), { code: 429 }) }).rateLimited).toBe(true);
     expect(detectRateLimit({ status: 429 }).rateLimited).toBe(true);
-    expect(detectRateLimit(fail({ responseHeaders: { "retry-after": "3" } }))).toEqual({ rateLimited: true, retryAfterMs: 3000 });
+    expect(detectRateLimit(fail({ responseHeaders: { "retry-after": "3" } }))).toEqual({ rateLimited: true, source: "http_429", retryAfterMs: 3000 });
     expect(detectRateLimit({ error: Object.assign(new Error("MCP error -32000"), { data: { reason: "rate_limited" } }) }).rateLimited).toBe(true);
     expect(detectRateLimit(fail({ errorMessage: "invalid params" })).rateLimited).toBe(false);
     expect(detectRateLimit({ ...ok, responseHeaders: { "retry-after": "3" } }).rateLimited).toBe(false);
+  });
+
+  it("labels where the signal came from", () => {
+    expect(detectRateLimit({ status: 429 }).source).toBe("http_429");
+    expect(detectRateLimit(fail({ errorMessage: "Error POSTing to endpoint (HTTP 429)" })).source).toBe("http_429");
+    expect(detectRateLimit(fail({ errorClass: "rate_limit", errorMessage: PARALLEL_FREE_TIER })).source).toBe("mcp_protocol");
+    expect(detectRateLimit({ error: Object.assign(new Error("MCP error -32000"), { data: { reason: "rate_limited" } }) }).source).toBe("mcp_protocol");
+    expect(detectRateLimit(fail({ status: 503 }))).toMatchObject({ rateLimited: false, unavailable: true, source: "unavailable" });
+    expect(detectRateLimit(fail({ errorMessage: UNAVAILABLE_MESSAGE })).source).toBe("unavailable");
+    // A 429 behind a proxy that also says "unavailable" is still rate limiting.
+    expect(detectRateLimit(fail({ status: 429, errorMessage: UNAVAILABLE_MESSAGE })).source).toBe("http_429");
+    expect(detectRateLimit(fail({ errorMessage: "invalid params" })).source).toBeUndefined();
   });
 
   it("parses Retry-After seconds and HTTP dates", () => {
@@ -151,6 +166,91 @@ describe("withRateLimitRetry", () => {
     const promise = withRateLimitRetry(connect, { policy: resolveRetryPolicy(), random: () => 0 });
     await vi.runAllTimersAsync();
     await expect(promise).resolves.toBe("session");
+  });
+
+  it("honours Retry-After on a 429 and says so", async () => {
+    const call = vi.fn()
+      .mockResolvedValueOnce(fail({ status: 429, responseHeaders: { "retry-after": "2" } }))
+      .mockResolvedValueOnce(ok);
+    const events: RetryEvent[] = [];
+    const promise = withRateLimitRetry(call, {
+      policy: resolveRetryPolicy(),
+      classify: (r) => detectRateLimit(r),
+      random: () => 0.5,
+      onRetry: (event) => events.push(event),
+    });
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe(ok);
+    expect(events).toMatchObject([{ delayMs: 2000, reason: "rate_limit", source: "http_429", retryAfterHonoured: true }]);
+  });
+
+  it("retries an MCP protocol signal with jittered exponential backoff", async () => {
+    const call = vi.fn()
+      .mockResolvedValueOnce(fail({ errorClass: "rate_limit", errorMessage: PARALLEL_FREE_TIER }))
+      .mockResolvedValueOnce(fail({ errorMessage: "monthly quota exceeded" }))
+      .mockResolvedValueOnce(ok);
+    const events: RetryEvent[] = [];
+    const promise = withRateLimitRetry(call, {
+      policy: resolveRetryPolicy(),
+      classify: (r) => detectRateLimit(r),
+      random: () => 0.5,
+      onRetry: (event) => events.push(event),
+    });
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe(ok);
+    // Full jitter at 0.5: half of 500, then half of 1000.
+    expect(events).toMatchObject([
+      { attempt: 1, delayMs: 250, source: "mcp_protocol", retryAfterHonoured: false },
+      { attempt: 2, delayMs: 500, source: "mcp_protocol", retryAfterHonoured: false },
+    ]);
+  });
+
+  it("retries an unavailable target on its own budget", async () => {
+    const call = vi.fn()
+      .mockResolvedValueOnce(fail({ errorMessage: UNAVAILABLE_MESSAGE }))
+      .mockResolvedValueOnce(ok);
+    const events: RetryEvent[] = [];
+    const promise = withRateLimitRetry(call, {
+      policy: resolveRetryPolicy(),
+      classify: (r) => detectRateLimit(r),
+      onRetry: (event) => events.push(event),
+    });
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe(ok);
+    expect(events).toMatchObject([{ delayMs: 1000, reason: "unavailable", source: "unavailable" }]);
+  });
+
+  it.each([
+    ["max_retries", { errorClass: "rate_limit" }, { maxRetries: 1 }, {}],
+    ["retry_after_too_long", { status: 429, responseHeaders: { "retry-after": "600" } }, {}, {}],
+    ["deadline", { status: 429, responseHeaders: { "retry-after": "5" } }, {}, { deadline: Date.now() + 1000 }],
+    ["budget", { errorMessage: UNAVAILABLE_MESSAGE }, {}, { unavailableBudgetMs: 0 }],
+  ] as const)("gives up with cause %s", async (cause, outcome, policy, options) => {
+    const call = vi.fn().mockResolvedValue(fail(outcome));
+    const giveUps: RetryGiveUpEvent[] = [];
+    const promise = withRateLimitRetry(call, {
+      policy: resolveRetryPolicy(policy),
+      classify: (r) => detectRateLimit(r),
+      random: () => 0.5,
+      onGiveUp: (event) => giveUps.push(event),
+      ...options,
+    });
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toMatchObject({ success: false });
+    expect(giveUps).toHaveLength(1);
+    expect(giveUps[0]).toMatchObject({ cause });
+  });
+
+  it("reports give-up through retryingSession with the method that failed", async () => {
+    const session = { callTool: vi.fn().mockResolvedValue(fail({ errorClass: "rate_limit" })) };
+    const giveUps: Array<[string, RetryGiveUpEvent]> = [];
+    const wrapped = retryingSession(session, resolveRetryPolicy({ maxRetries: 1 }), {
+      onGiveUp: (method, event) => giveUps.push([method, event]),
+    });
+    const promise = wrapped.callTool("web_search", {});
+    await vi.runAllTimersAsync();
+    await promise;
+    expect(giveUps).toMatchObject([["callTool", { cause: "max_retries", source: "mcp_protocol", attempts: 2 }]]);
   });
 
   it("retryingSession wraps call methods only", async () => {

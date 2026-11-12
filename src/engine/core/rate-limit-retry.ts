@@ -89,11 +89,25 @@ export function parseRetryAfterMs(value: string | undefined, now = Date.now()): 
   return Math.max(0, at - now);
 }
 
+/**
+ * Where the signal came from, low cardinality so it is safe as a metric attribute:
+ * - `http_429`: HTTP 429, or a Retry-After header / explicit 429 in the response.
+ * - `mcp_protocol`: an MCP/JSON-RPC error — errorClass `rate_limit`, or rate-limit text in the
+ *   error message or `error.data`.
+ * - `unavailable`: 502/503/504 or the reverse proxy's unavailable body.
+ */
+export type RateLimitSource = "http_429" | "mcp_protocol" | "unavailable";
+
+/** An explicit 429 in free text (e.g. "Error POSTing to endpoint (HTTP 429)"). */
+const HTTP_429_TEXT = /\b429\b/;
+
 export interface RateLimitSignal {
   rateLimited: boolean;
   /** 502/503/504 or the proxy unavailable body: retried for UNAVAILABLE_BUDGET_MS per step. */
   unavailable?: boolean;
   retryAfterMs?: number;
+  /** Set whenever `rateLimited` or `unavailable` is true. */
+  source?: RateLimitSource;
 }
 
 /** Detect rate limiting on a failed call result (success=false) or a thrown error. */
@@ -129,7 +143,12 @@ export function detectRateLimit(
     isUnavailableMessage(errText) ||
     isUnavailableMessage(dataText);
   if (unavailable && input.errorClass !== "rate_limit" && status !== 429) {
-    return { rateLimited: false, unavailable: true, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
+    return {
+      rateLimited: false,
+      unavailable: true,
+      source: "unavailable",
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    };
   }
   const rateLimited =
     input.errorClass === "rate_limit" ||
@@ -138,7 +157,19 @@ export function detectRateLimit(
     isRateLimitMessage(input.errorMessage) ||
     isRateLimitMessage(typeof err?.message === "string" ? err.message : undefined) ||
     isRateLimitMessage(dataText);
-  return rateLimited ? { rateLimited, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) } : { rateLimited: false };
+  if (!rateLimited) return { rateLimited: false };
+  // 429 or Retry-After means the transport said so; anything else was only visible in the protocol error.
+  const http429 =
+    status === 429 ||
+    retryAfterMs !== undefined ||
+    HTTP_429_TEXT.test(input.errorMessage ?? "") ||
+    HTTP_429_TEXT.test(errText ?? "") ||
+    HTTP_429_TEXT.test(dataText);
+  return {
+    rateLimited,
+    source: http429 ? "http_429" : "mcp_protocol",
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  };
 }
 
 /**
@@ -159,10 +190,34 @@ export function backoffDelayMs(
   return Math.floor(random() * ceiling);
 }
 
+export type RetryReason = "rate_limit" | "unavailable";
+
 export interface RetryEvent {
   attempt: number;
   delayMs: number;
-  reason: "rate_limit" | "unavailable";
+  reason: RetryReason;
+  source: RateLimitSource;
+  retryAfterMs?: number;
+  /** True when `delayMs` came from the server's Retry-After rather than the backoff curve. */
+  retryAfterHonoured: boolean;
+  message?: string;
+}
+
+/**
+ * Why a retry loop stopped while the outcome was still rate-limited:
+ * - `max_retries`: the policy's attempt budget ran out.
+ * - `retry_after_too_long`: Retry-After was longer than `maxDelayMs`.
+ * - `deadline`: the sleep would cross the run deadline or ramp-down drain.
+ * - `budget`: the unavailable wall-time budget for this call ran out.
+ */
+export type RetryGiveUpCause = "max_retries" | "retry_after_too_long" | "deadline" | "budget";
+
+export interface RetryGiveUpEvent {
+  reason: RetryReason;
+  source: RateLimitSource;
+  /** Calls made before giving up, including the first. */
+  attempts: number;
+  cause: RetryGiveUpCause;
   retryAfterMs?: number;
   message?: string;
 }
@@ -178,6 +233,8 @@ export interface RetryOptions<T> {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   onRetry?: (event: RetryEvent) => void;
+  /** Called once when the loop gives up on a signal it would otherwise have retried. */
+  onGiveUp?: (event: RetryGiveUpEvent) => void;
   describe?: (valueOrError: unknown) => string | undefined;
   /** Per-call budget for retrying an unavailable target (default UNAVAILABLE_BUDGET_MS). */
   unavailableBudgetMs?: number;
@@ -207,33 +264,52 @@ export async function withRateLimitRetry<T>(call: () => Promise<T>, options: Ret
       if (outcome.ok) return outcome.value;
       throw outcome.error;
     };
+    const raw = outcome.ok ? outcome.value : outcome.error;
+    const describe = () => options.describe?.(raw) ?? (raw instanceof Error ? raw.message : undefined);
+    const reason: RetryReason = signal.unavailable ? "unavailable" : "rate_limit";
+    const giveUp = (cause: RetryGiveUpCause): T => {
+      options.onGiveUp?.({
+        reason,
+        source: signal.source ?? (signal.unavailable ? "unavailable" : "mcp_protocol"),
+        attempts: attempt + 1,
+        cause,
+        ...(signal.retryAfterMs !== undefined ? { retryAfterMs: signal.retryAfterMs } : {}),
+        message: describe(),
+      });
+      return finish();
+    };
     if (!policy.enabled) return finish();
     let delayMs: number | undefined;
+    let retryAfterHonoured = false;
     if (signal.unavailable) {
       // Environment unavailable (deploy, proxy 503): keep trying for the per-step budget,
       // honouring Retry-After, independent of the rate-limit retry count.
       const budget = options.unavailableBudgetMs ?? UNAVAILABLE_BUDGET_MS;
       const elapsed = now() - startedAt;
-      if (elapsed >= budget) return finish();
+      if (elapsed >= budget) return giveUp("budget");
       const backoff = Math.min(UNAVAILABLE_MAX_DELAY_MS, UNAVAILABLE_BASE_MS * 2 ** unavailableAttempts);
       delayMs = Math.min(signal.retryAfterMs ?? backoff, UNAVAILABLE_MAX_DELAY_MS, budget - elapsed);
+      retryAfterHonoured = signal.retryAfterMs !== undefined && delayMs === signal.retryAfterMs;
       unavailableAttempts++;
     } else {
-      if (!signal.rateLimited || attempt >= policy.maxRetries) return finish();
+      if (!signal.rateLimited) return finish();
+      if (attempt >= policy.maxRetries) return giveUp("max_retries");
       delayMs = backoffDelayMs(attempt, policy, options.random, signal.retryAfterMs);
-      if (delayMs === undefined) return finish();
+      if (delayMs === undefined) return giveUp("retry_after_too_long");
+      retryAfterHonoured = signal.retryAfterMs !== undefined;
     }
-    if (options.deadline !== undefined && now() + delayMs >= options.deadline) return finish();
-    const raw = outcome.ok ? outcome.value : outcome.error;
+    if (options.deadline !== undefined && now() + delayMs >= options.deadline) return giveUp("deadline");
     options.onRetry?.({
       attempt: attempt + 1,
       delayMs,
-      reason: signal.unavailable ? "unavailable" : "rate_limit",
+      reason,
+      source: signal.source ?? (signal.unavailable ? "unavailable" : "mcp_protocol"),
       ...(signal.retryAfterMs !== undefined ? { retryAfterMs: signal.retryAfterMs } : {}),
-      message: options.describe?.(raw) ?? (raw instanceof Error ? raw.message : undefined),
+      retryAfterHonoured,
+      message: describe(),
     });
     await sleep(delayMs);
-    if (options.deadline !== undefined && now() >= options.deadline) return finish();
+    if (options.deadline !== undefined && now() >= options.deadline) return giveUp("deadline");
   }
 }
 
@@ -247,7 +323,11 @@ const RETRYABLE_SESSION_METHODS = new Set([
 export function retryingSession<S extends object>(
   session: S,
   policy: RetryPolicy,
-  opts: { deadline?: () => number | undefined; onRetry?: (method: string, event: RetryEvent) => void } = {},
+  opts: {
+    deadline?: () => number | undefined;
+    onRetry?: (method: string, event: RetryEvent) => void;
+    onGiveUp?: (method: string, event: RetryGiveUpEvent) => void;
+  } = {},
 ): S {
   if (!policy.enabled) return session;
   return new Proxy(session, {
@@ -260,9 +340,11 @@ export function retryingSession<S extends object>(
         withRateLimitRetry(() => (value as (...a: unknown[]) => Promise<unknown>).apply(target, args), {
           policy,
           deadline: opts.deadline?.(),
+          unavailableBudgetMs: policy.unavailableBudgetMs,
           classify: (result) => detectRateLimit(result as Parameters<typeof detectRateLimit>[0]),
           describe: (raw) => (raw as { errorMessage?: string } | undefined)?.errorMessage,
           onRetry: (event) => opts.onRetry?.(prop, event),
+          onGiveUp: (event) => opts.onGiveUp?.(prop, event),
         });
     },
   });
