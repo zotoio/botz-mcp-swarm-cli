@@ -58,7 +58,10 @@ export async function introspectServer(
       try {
         return await listAll(key, fetchPage);
       } catch (error) {
-        if (!isMethodNotFound(error)) throw error;
+        // templates/list is a weaker sub-capability of resources: many servers advertise
+        // resources but omit or mis-implement templates. Treat method-not-found and other
+        // missing/invalid template catalogs as empty rather than aborting capture.
+        if (!isMethodNotFound(error) && !isMissingResourceTemplates(error)) throw error;
         unsupported.push(key);
         return { items: [] };
       }
@@ -90,10 +93,29 @@ export async function introspectServer(
   }
 }
 
-/** JSON-RPC -32601 (Method not found), as surfaced by the adapters in an error message. */
+/** JSON-RPC -32601 (Method not found), as surfaced by the adapters in an error message or code. */
 export function isMethodNotFound(error: unknown): boolean {
-  const text = error instanceof Error ? error.message : String(error);
+  if (rpcErrorCode(error) === -32601) return true;
+  const text = error instanceof Error ? error.message : String(error ?? "");
   return /-32601|method not found/i.test(text);
+}
+
+/** A resources/templates/list catalog that is absent or unusable, not a pagination bug. */
+export function isMissingResourceTemplates(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  return /resourceTemplates_list_failed|resourceTemplates_list_invalid/.test(text);
+}
+
+function rpcErrorCode(error: unknown): number | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current != null; depth++) {
+    if (typeof current !== "object") break;
+    const record = current as { code?: unknown; cause?: unknown };
+    if (typeof record.code === "number") return record.code;
+    if (typeof record.code === "string" && /^-?\d+$/.test(record.code)) return Number(record.code);
+    current = record.cause;
+  }
+  return undefined;
 }
 
 async function listAll(
@@ -106,7 +128,11 @@ async function listAll(
   for (let page = 0; page < PAGE_CAP; page++) {
     const result = await fetchPage(cursor);
     if (!result.success) {
-      throw new Error(`${key}_list_failed: ${result.errorMessage ?? "incomplete discovery"}`);
+      const error = new Error(`${key}_list_failed: ${result.errorMessage ?? "incomplete discovery"}`);
+      if (/-32601/.test(result.errorMessage ?? "")) {
+        (error as Error & { code: number }).code = -32601;
+      }
+      throw error;
     }
     const body = isRecord(result.result) ? result.result : {};
     const chunk = body[key];
