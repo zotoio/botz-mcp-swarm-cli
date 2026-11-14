@@ -73,8 +73,10 @@ export interface LoadProfile {
   maxConcurrency: number;
   jitterMs: number;
   rampDownMs: number;
-  /** Fixed pause inserted between every pair of steps. */
+  /** Pause inserted between every pair of steps; the mean when `dwellJitterRatio` jitters it. */
   dwellMs: number;
+  /** Symmetric, mean-preserving jitter on each dwell (0..1). Unset means the default 0.2. */
+  dwellJitterRatio?: number;
   /** Minimum full passes of the suite for each virtual user. */
   iterations: number;
   /** Ready steps that run together in one Promise.all. The graph draws this many lanes. */
@@ -425,6 +427,7 @@ export function normalizeLoadProfile(load?: Partial<LoadProfile> | null): LoadPr
     jitterMs: nonnegative(load?.jitterMs, base.jitterMs),
     rampDownMs: nonnegative(load?.rampDownMs, base.rampDownMs),
     dwellMs: nonnegative(load?.dwellMs, base.dwellMs),
+    dwellJitterRatio: ratio(load?.dwellJitterRatio, DEFAULT_LOAD_PROFILE.dwellJitterRatio),
     iterations: Math.max(1, Math.round(load?.iterations ?? base.iterations)),
     lanes: Math.min(16, Math.max(1, Math.round(load?.lanes ?? base.lanes))),
     ...(load?.rampDown ? { rampDown: normalizeRampDown(load.rampDown) } : {}),
@@ -437,6 +440,12 @@ function normalizeRampDown(input: RampDownConfig): RampDownConfig {
     ...(input.drainTimeoutMs !== undefined ? { drainTimeoutMs: nonnegative(input.drainTimeoutMs, 0) } : {}),
     ...(input.passEstimateMs !== undefined ? { passEstimateMs: nonnegative(input.passEstimateMs, 0) } : {}),
   };
+}
+
+/** A 0..1 fraction, kept fractional (unlike `nonnegative`, which rounds to whole ms). */
+function ratio(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.min(1, Math.max(0, value));
 }
 
 function nonnegative(value: number | undefined, fallback: number): number {

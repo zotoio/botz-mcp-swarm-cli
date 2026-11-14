@@ -7,7 +7,7 @@ import * as adapters from "../adapters/index.js";
 afterEach(() => vi.restoreAllMocks());
 describe("run defaults", () => {
   it("uses one user, lane, and required pass with a bounded drain grace period", () => {
-    expect(defaultLoadProfile()).toEqual({ durationMs: 30000, rampUpMs: 5000, maxConcurrency: 1, jitterMs: 100, rampDownMs: 60000, dwellMs: 100, iterations: 1, lanes: 1 });
+    expect(defaultLoadProfile()).toEqual({ durationMs: 30000, rampUpMs: 5000, maxConcurrency: 1, jitterMs: 100, rampDownMs: 60000, dwellMs: 100, dwellJitterRatio: 0.2, iterations: 1, lanes: 1 });
     expect(normalizeLoadProfile({ durationMs: 0, rampUpMs: 0, rampDownMs: 0, dwellMs: 0, jitterMs: 0, iterations: 3, lanes: 2 })).toMatchObject({ durationMs: 0, rampUpMs: 0, rampDownMs: 0, dwellMs: 0, jitterMs: 0, iterations: 3, lanes: 2 });
   });
   it.each([undefined, 0])("immediate ramp-down finishes a 25-second in-flight pass with default grace, respecting explicit drain %s", async (rampDownMs) => {

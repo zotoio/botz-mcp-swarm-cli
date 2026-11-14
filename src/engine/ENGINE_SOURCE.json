@@ -1,9 +1,9 @@
 {
   "schema": 1,
-  "platformRepo": "https://github.com/zotoio/botz-mcp-swarm",
-  "platformCommit": "cd5889b10c94c8f5d6c2c5f457beb630d2f404d0",
-  "treeSha256": "bafee34c820346337b824b52668ff4e1be0de8fe3d17e9b4e67fbdf6edd337dc",
-  "exportedAt": "2026-11-12T05:19:29.724Z",
+  "platformRepo": "https://github.com/zotoio/botz-mcp-swarm.git",
+  "platformCommit": "299863bc035a89e3186995216d11fbf338b3bd7a",
+  "treeSha256": "0d46aef18981988efc0ba9ddc7b87ea480295f6a125dfa11bba03c4766cdb14c",
+  "exportedAt": "2026-11-12T13:55:44.149Z",
   "enginePackage": "@zotoio/botz-mcp-swarm-engine",
   "dependencyRanges": {
     "@cursor/sdk": "^1.0.40",

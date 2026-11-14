@@ -276,6 +276,12 @@ export const LoadProfileSchema = z.object({
   jitterMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.jitterMs),
   rampDownMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.rampDownMs),
   dwellMs: z.number().int().nonnegative().default(DEFAULT_LOAD_PROFILE.dwellMs),
+  /**
+   * Symmetric, mean-preserving jitter on every dwell: each pause is uniform in
+   * [dwellMs×(1−r), dwellMs×(1+r)], so average pacing and the advertised TPS are unchanged.
+   * 0 is the exact configured dwell.
+   */
+  dwellJitterRatio: z.number().min(0).max(1).default(DEFAULT_LOAD_PROFILE.dwellJitterRatio),
   iterations: z.number().int().positive().default(DEFAULT_LOAD_PROFILE.iterations),
   lanes: z.number().int().positive().max(16).default(DEFAULT_LOAD_PROFILE.lanes),
   /** How VUs scale down after the hold. Defaults to graceful. */

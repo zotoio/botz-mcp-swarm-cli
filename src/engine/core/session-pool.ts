@@ -1,6 +1,11 @@
 import type { SessionReuse, Target } from "../types/manifest.js";
 import { createSession, type McpSession } from "../adapters/index.js";
-import { withRateLimitRetry, type RetryEvent, type RetryPolicy } from "./rate-limit-retry.js";
+import {
+  withRateLimitRetry,
+  type RetryEvent,
+  type RetryGiveUpEvent,
+  type RetryPolicy,
+} from "./rate-limit-retry.js";
 
 export interface SessionPoolOptions {
   size: number;
@@ -15,6 +20,7 @@ export interface SessionPoolOptions {
     policy: RetryPolicy;
     deadline?: () => number | undefined;
     onRetry?: (event: RetryEvent) => void;
+    onGiveUp?: (event: RetryGiveUpEvent) => void;
   };
 }
 
@@ -86,8 +92,12 @@ export class SessionPool {
       ? await withRateLimitRetry(connect, {
           policy: retry.policy,
           deadline: retry.deadline?.(),
+          unavailableBudgetMs: retry.policy.unavailableBudgetMs,
           onRetry: (event) => {
             if (!this.aborted) retry.onRetry?.(event);
+          },
+          onGiveUp: (event) => {
+            if (!this.aborted) retry.onGiveUp?.(event);
           },
         })
       : await connect();

@@ -36,7 +36,21 @@ import {
 import { QuotaTracker } from "./quotas.js";
 import { SessionPoolSet } from "./session-pool.js";
 import { DEFAULT_SERVER } from "./servers.js";
-import { resolveRetryPolicy, retryingSession, type RetryEvent, type RetryPolicy } from "./rate-limit-retry.js";
+import {
+  resolveRetryPolicy,
+  retryingSession,
+  type RetryEvent,
+  type RetryGiveUpEvent,
+  type RetryPolicy,
+} from "./rate-limit-retry.js";
+import {
+  jitteredDwellMs,
+  pace,
+  PacingCollector,
+  passJitterMs,
+  resolveDwellJitterRatio,
+  type DwellKind,
+} from "./dwell.js";
 import { runServer } from "./run-server.js";
 import { resolveStdioTarget } from "./target-resolve.js";
 import {
@@ -201,6 +215,8 @@ interface StepTrace {
   /** Epoch ms after which no retry may start (run max duration). */
   retryDeadline?: number;
   retries?: NonNullable<RunReport["retries"]>;
+  /** Every pause this run slept through, aggregated per kind. */
+  pacing?: PacingCollector;
   recorder?: RunRecorder;
   /** The manifest has extract steps: sample responses are not recorded, so extracted values never reach the report. */
   hasExtractors?: boolean;
@@ -232,17 +248,35 @@ function noteRampDown(trace: StepTrace, key: "cancelled" | "incomplete" | "skipp
   counts[key] += 1;
 }
 
+/** The run's retry section with every aggregate initialised, so the counters need no guards. */
+function retryTotals(trace: StepTrace): Required<NonNullable<RunReport["retries"]>> {
+  const retries = (trace.retries ??= { total: 0, reason: "rate_limit", byMethod: {}, sessionSetup: 0 });
+  retries.byReason ??= { rate_limit: 0, unavailable: 0 };
+  retries.bySource ??= { http_429: 0, mcp_protocol: 0, unavailable: 0 };
+  retries.retryAfterHonoured ??= 0;
+  retries.exhausted ??= 0;
+  retries.exhaustedByCause ??= {};
+  retries.totalBackoffMs ??= 0;
+  return retries as Required<NonNullable<RunReport["retries"]>>;
+}
+
 function noteRetry(
   trace: StepTrace,
   emit: (name: RunProgressEvent["name"], attributes: Record<string, string | number | boolean>) => void,
   method: string,
   event: RetryEvent,
-  extra: { nodeId?: string; label?: string; tool?: string; thread?: number } = {},
+  extra: { nodeId?: string; label?: string; tool?: string; thread?: number; telemetry?: TelemetryHandle } = {},
 ): void {
-  const retries = (trace.retries ??= { total: 0, reason: "rate_limit", byMethod: {}, sessionSetup: 0 });
+  const retries = retryTotals(trace);
   retries.total += 1;
   retries.byMethod[method] = (retries.byMethod[method] ?? 0) + 1;
+  retries.byReason[event.reason] += 1;
+  retries.bySource[event.source] += 1;
+  if (event.retryAfterHonoured) retries.retryAfterHonoured += 1;
+  retries.totalBackoffMs += event.delayMs;
   if (method === "initialize") retries.sessionSetup += 1;
+  extra.telemetry?.recordRetry?.(event, method);
+  extra.telemetry?.recordRateLimitSignal?.(event.source, method);
   if (extra.nodeId) {
     const current = trace.nodeOutcomes.get(extra.nodeId) ?? {
       nodeId: extra.nodeId,
@@ -255,14 +289,54 @@ function noteRetry(
   }
   emit("mcp.retry", {
     reason: event.reason,
+    source: event.source,
     method,
     attempt: event.attempt,
     delayMs: event.delayMs,
+    retryAfterHonoured: event.retryAfterHonoured,
     ...(event.retryAfterMs !== undefined ? { retryAfterMs: event.retryAfterMs } : {}),
     ...(extra.tool ? { tool: extra.tool } : {}),
     ...(extra.nodeId ? { node: extra.nodeId } : {}),
     ...(extra.thread !== undefined ? { thread: extra.thread } : {}),
     ...(event.message ? { message: event.message.slice(0, 300) } : {}),
+  });
+}
+
+/**
+ * A retry loop that stopped while the outcome was still rate-limited. Counted, never emitted as a
+ * run event: the call's own failure is already reported through the step.
+ */
+function noteRetryGiveUp(
+  trace: StepTrace,
+  method: string,
+  event: RetryGiveUpEvent,
+  telemetry?: TelemetryHandle,
+): void {
+  const retries = retryTotals(trace);
+  retries.exhausted += 1;
+  retries.exhaustedByCause[event.cause] = (retries.exhaustedByCause[event.cause] ?? 0) + 1;
+  telemetry?.recordRetryExhausted?.(event, method);
+  telemetry?.recordRateLimitSignal?.(event.source, method);
+}
+
+/**
+ * The one place a run pauses between calls. Jitter is applied by the caller (`jitteredDwellMs` /
+ * `passJitterMs`); this clamps to the drain deadline, sleeps, then records what was actually slept.
+ */
+async function dwellFor(
+  kind: DwellKind,
+  plannedMs: number,
+  trace: StepTrace,
+  telemetry: TelemetryHandle,
+  drainAt?: number,
+): Promise<void> {
+  await pace(kind, plannedMs, {
+    ...(drainAt !== undefined ? { deadline: drainAt } : {}),
+    sleep,
+    onPaced: (pausedKind, actualMs) => {
+      trace.pacing?.record(pausedKind, actualMs);
+      telemetry.recordDwell?.(actualMs, { kind: pausedKind });
+    },
   });
 }
 
@@ -635,6 +709,8 @@ interface ScenarioRunContext {
   waitForSlot: boolean;
   drainAt?: number;
   dwellMs: number;
+  /** Symmetric, mean-preserving jitter on each dwell (0..1); 0 keeps the exact `dwellMs`. */
+  dwellJitterRatio: number;
   /** How many ready steps in one pass may run at once. */
   stepParallelism: number;
   /** Steps inside executeStep. Server stderr is stamped only when this has one id. */
@@ -805,7 +881,10 @@ async function runScenarioPass(
                       label: step.label,
                       tool: step.tool,
                       thread: run.thread,
+                      telemetry,
                     }),
+                  onGiveUp: (method, event) =>
+                    noteRetryGiveUp(run.trace, method === "callTool" ? "tools/call" : step.method, event, telemetry),
                 })
               : bound;
             result ??= await executeStep(
@@ -889,7 +968,9 @@ async function runScenarioPass(
           // Without a graph every step follows the one before it, so a missing required value stops the rest.
           const result = blocked.size > 0 && scenario.steps[index]?.hook !== "teardown" ? skipChained(index) : await runOne(index);
           note(result, index);
-          if (index < scenario.steps.length - 1 && run.dwellMs > 0 && blocked.size === 0) await sleep(run.dwellMs);
+          if (index < scenario.steps.length - 1 && run.dwellMs > 0 && blocked.size === 0) {
+            await dwellFor("step", jitteredDwellMs(run.dwellMs, run.dwellJitterRatio), run.trace, telemetry, run.drainAt);
+          }
         }
       } else {
         const pending = new Set(scenario.steps.map((_step, index) => index));
@@ -911,7 +992,7 @@ async function runScenarioPass(
             .join("|");
           const allSkipped = ready.every((index) => (scenario.steps[index]?.waitFor ?? []).some((pred) => blocked.has(pred)));
           if (!allSkipped && waveKey && !dwelled.has(waveKey) && done.size > 0 && run.dwellMs > 0) {
-            await sleep(run.dwellMs);
+            await dwellFor("wave", jitteredDwellMs(run.dwellMs, run.dwellJitterRatio), run.trace, telemetry, run.drainAt);
           }
           dwelled.add(waveKey);
           const batch = nextBatch(ready, scenario.steps, run.stepParallelism);
@@ -1022,6 +1103,11 @@ function recordUnreachable(
   return { ok: false, message };
 }
 
+/** Dwell between steps: the load profile's, or 1s for a functional run that sets no load. */
+function resolvedDwellMs(manifest: Manifest): number {
+  return Math.max(0, manifest.load?.dwellMs ?? 1000);
+}
+
 function scenarioContext(
   manifest: Manifest,
   hopObservations: HopObservation[],
@@ -1043,7 +1129,8 @@ function scenarioContext(
     thread: 1,
     iter: 0,
     waitForSlot: false,
-    dwellMs: Math.max(0, manifest.load?.dwellMs ?? 1000),
+    dwellMs: resolvedDwellMs(manifest),
+    dwellJitterRatio: resolveDwellJitterRatio(manifest.load?.dwellJitterRatio),
     stepParallelism: Math.max(1, manifest.load?.lanes ?? 4),
     activeNodes: new Set(),
     ...extra,
@@ -1131,7 +1218,10 @@ async function runLoadProfile(
           if (result.completed) durations.push(result.durationMs);
           passes += 1;
           if (passes >= minPasses && Date.now() >= retireAt) break;
-          if (load.jitterMs > 0) await sleep(Math.floor(Math.random() * (load.jitterMs + 1)));
+          // Pass-level jitter is unchanged (uniform 0..jitterMs); it is now measured like any dwell.
+          if (load.jitterMs > 0) {
+            await dwellFor("pass_jitter", passJitterMs(load.jitterMs), trace, telemetry, drainAt);
+          }
         }
       } finally {
         active -= 1;
@@ -1368,6 +1458,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     retryDeadline: Date.now() + manifest.quotas.maxDurationMs,
     resultDigests: new Map(),
     eraIgnoreKeys: manifest.eraCompare?.ignoreKeys ?? [],
+    pacing: new PacingCollector(),
     recorder: new RunRecorder(Date.now()),
     hasExtractors: manifest.scenarios.some((scenario) => scenario.steps.some((step) => step.method === "extract")),
   };
@@ -1402,7 +1493,8 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
     retry: {
       policy: retryPolicy,
       deadline: () => trace.retryDeadline,
-      onRetry: (event) => noteRetry(trace, emit, "initialize", event),
+      onRetry: (event) => noteRetry(trace, emit, "initialize", event, { telemetry }),
+      onGiveUp: (event) => noteRetryGiveUp(trace, "initialize", event, telemetry),
     },
     onSutPid: (pid, alias) => processCollector.trackSutPid(pid, alias),
     onStderr: (line, alias) => {
@@ -1589,6 +1681,12 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
   const verdict = computeVerdict(failReasons, silentGreen);
   const gatewayMetrics = buildGatewayMetrics(manifest, hopObservations);
 
+  const pacing = trace.pacing?.summary({
+    dwellMs: resolvedDwellMs(manifest),
+    dwellJitterRatio: resolveDwellJitterRatio(manifest.load?.dwellJitterRatio),
+    ...(manifest.load ? { passJitterMs: manifest.load.jitterMs } : {}),
+  });
+
   let telemetryFailed = false;
   try { await telemetry.flush(); } catch { telemetryFailed = true; }
   try { await telemetry.shutdown(); } catch { telemetryFailed = true; }
@@ -1650,6 +1748,7 @@ export async function runManifest(options: RunOptions): Promise<RunReport> {
       ? { sampleResults: trace.recorder.sampleResults(), timeSeries: trace.recorder.timeSeries() }
       : {}),
     ...(trace.retries ? { retries: trace.retries } : {}),
+    ...(pacing ? { pacing } : {}),
     ...(mode === "load" && trace.rampDownSummary
       ? {
           rampDown: {

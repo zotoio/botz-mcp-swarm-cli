@@ -245,6 +245,8 @@ export interface RunReport {
     jitterMs: number;
     rampDownMs: number;
     dwellMs?: number;
+    /** Symmetric, mean-preserving jitter applied to each dwell (0..1). */
+    dwellJitterRatio?: number;
     iterations?: number;
     lanes?: number;
     rampDown?: { strategy?: "graceful" | "immediate"; drainTimeoutMs?: number; passEstimateMs?: number };
@@ -276,12 +278,9 @@ export interface RunReport {
     retries?: number;
   }>;
   /** Rate-limit retries. Only final outcomes count toward error rates. */
-  retries?: {
-    total: number;
-    reason: "rate_limit";
-    byMethod: Record<string, number>;
-    sessionSetup: number;
-  };
+  retries?: RetrySummary;
+  /** Pacing actually slept between calls, aggregated per kind. No event per dwell. */
+  pacing?: import("../core/dwell.js").PacingSummary;
   /** First substituted args sample per node, with secrets redacted. */
   redactedArgs?: Array<{ nodeId: string; tool?: string; args: unknown }>;
   /** One result per eval prompt attached to a tool step. */
@@ -294,6 +293,29 @@ export interface RunReport {
   timeSeries?: RunTimeBucket[];
   /** Tail of the run log, newest lines last. */
   log?: string[];
+}
+
+/**
+ * Retries that were slept through and then succeeded (or were given up on). `reason` stays
+ * `rate_limit` for backward compatibility; the per-reason split is in `byReason`.
+ */
+export interface RetrySummary {
+  total: number;
+  reason: "rate_limit";
+  byMethod: Record<string, number>;
+  sessionSetup: number;
+  /** Retries by signal reason. */
+  byReason?: { rate_limit: number; unavailable: number };
+  /** Retries by signal source, as `detectRateLimit` classified them. */
+  bySource?: { http_429: number; mcp_protocol: number; unavailable: number };
+  /** Retries whose delay came from the server's Retry-After rather than the backoff curve. */
+  retryAfterHonoured?: number;
+  /** Retry loops that gave up while still rate-limited. */
+  exhausted?: number;
+  /** Retry loops that gave up, by cause. */
+  exhaustedByCause?: Partial<Record<"max_retries" | "retry_after_too_long" | "deadline" | "budget", number>>;
+  /** Wall time spent sleeping before retries. */
+  totalBackoffMs?: number;
 }
 
 export interface RunSampleEntry {
